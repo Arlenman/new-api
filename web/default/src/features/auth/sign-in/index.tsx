@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next'
 import { useStatus } from '@/hooks/use-status'
 import { AuthLayout } from '../auth-layout'
 import { TermsFooter } from '../components/terms-footer'
+import { LoginAnnouncements } from './components/login-announcements'
 import { UserAuthForm } from './components/user-auth-form'
 
 export function SignIn() {
@@ -31,6 +32,8 @@ export function SignIn() {
   return (
     <AuthLayout>
       <div className='w-full space-y-8'>
+        <LoginAnnouncements />
+
         <div className='space-y-2'>
           <h2 className='text-center text-2xl font-semibold tracking-tight sm:text-left'>
             {t('Sign in')}
