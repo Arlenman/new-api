@@ -16,27 +16,18 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Megaphone } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { getAnnouncementColorClass } from '@/lib/colors'
 import { formatDateTimeObject } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { useStatus } from '@/hooks/use-status'
 import { Markdown } from '@/components/ui/markdown'
 import { getLoginAnnouncements } from '../lib/login-announcements'
 
-function AnnouncementDot(props: { type?: string }) {
-  return (
-    <span
-      className={cn(
-        'mt-1.5 inline-block size-2 shrink-0 rounded-full',
-        getAnnouncementColorClass(props.type)
-      )}
-    />
-  )
+type LoginAnnouncementsProps = {
+  className?: string
 }
 
-export function LoginAnnouncements() {
+export function LoginAnnouncements(props: LoginAnnouncementsProps) {
   const { t } = useTranslation()
   const { status } = useStatus()
   const announcements = getLoginAnnouncements(status)
@@ -46,14 +37,13 @@ export function LoginAnnouncements() {
   return (
     <section
       aria-label={t('Announcements')}
-      className='bg-card/80 mx-auto w-full max-w-md rounded-lg border p-3 text-left shadow-sm'
+      data-login-announcements
+      className={cn(
+        'bg-card/80 mx-auto w-full rounded-lg border p-4 text-left shadow-sm',
+        props.className
+      )}
     >
-      <div className='flex items-center justify-center gap-2 text-sm font-medium'>
-        <Megaphone className='text-muted-foreground size-4' />
-        <span>{t('Announcements')}</span>
-      </div>
-
-      <div className='mt-2 space-y-3'>
+      <div className='space-y-3'>
         {announcements.map((item, index) => {
           const publishDate = item.publishDate
             ? new Date(item.publishDate)
@@ -68,26 +58,23 @@ export function LoginAnnouncements() {
             <article
               key={key}
               className={cn(
-                'flex items-start gap-3',
+                'min-w-0 space-y-1.5 text-sm',
                 index > 0 && 'border-border/60 border-t pt-3'
               )}
             >
-              <AnnouncementDot type={item.type} />
-              <div className='min-w-0 flex-1 space-y-1.5 text-sm'>
-                <Markdown>{item.content}</Markdown>
+              <Markdown>{item.content}</Markdown>
 
-                {item.extra ? (
-                  <div className='text-muted-foreground text-xs'>
-                    <Markdown>{item.extra}</Markdown>
-                  </div>
-                ) : null}
+              {item.extra ? (
+                <div className='text-muted-foreground text-xs'>
+                  <Markdown>{item.extra}</Markdown>
+                </div>
+              ) : null}
 
-                {absoluteTime ? (
-                  <time className='text-muted-foreground block text-xs'>
-                    {absoluteTime}
-                  </time>
-                ) : null}
-              </div>
+              {absoluteTime ? (
+                <time className='text-muted-foreground block text-xs'>
+                  {absoluteTime}
+                </time>
+              ) : null}
             </article>
           )
         })}

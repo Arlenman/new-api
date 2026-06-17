@@ -17,8 +17,18 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { describe, test } from 'node:test'
 import { getLoginAnnouncements } from './login-announcements.ts'
+
+const loginAnnouncementsSource = readFileSync(
+  new URL('../components/login-announcements.tsx', import.meta.url),
+  'utf8'
+)
+
+const signInSource = readFileSync(new URL('../index.tsx', import.meta.url), {
+  encoding: 'utf8',
+})
 
 describe('getLoginAnnouncements', () => {
   test('returns configured announcements when the panel is enabled', () => {
@@ -119,5 +129,25 @@ describe('getLoginAnnouncements', () => {
     })
 
     assert.deepEqual(announcements, [{ content: 'System announcement' }])
+  })
+
+  test('login page places announcements beside the form on desktop', () => {
+    assert.match(signInSource, /lg:grid-cols-\[/)
+    assert.match(signInSource, /<LoginAnnouncements\s+className=/)
+    assert.match(signInSource, /contentClassName=/)
+  })
+
+  test('login page vertically centers the announcement and form columns', () => {
+    assert.equal(signInSource.includes('lg:items-start'), false)
+    assert.match(signInSource, /lg:items-center/)
+  })
+
+  test('login announcements render without a heading row or leading status dot', () => {
+    assert.equal(loginAnnouncementsSource.includes('AnnouncementDot'), false)
+    assert.equal(loginAnnouncementsSource.includes('<Megaphone'), false)
+    assert.equal(
+      loginAnnouncementsSource.includes("<span>{t('Announcements')}</span>"),
+      false
+    )
   })
 })

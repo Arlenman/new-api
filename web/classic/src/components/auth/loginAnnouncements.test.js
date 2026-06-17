@@ -18,8 +18,22 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 import { getLoginAnnouncements } from './loginAnnouncements.js';
+
+const loginAnnouncementsPanelSource = readFileSync(
+  new URL('./LoginAnnouncementsPanel.jsx', import.meta.url),
+  'utf8',
+);
+
+const loginFormSource = readFileSync(new URL('./LoginForm.jsx', import.meta.url), {
+  encoding: 'utf8',
+});
+
+const indexCssSource = readFileSync(new URL('../../index.css', import.meta.url), {
+  encoding: 'utf8',
+});
 
 describe('getLoginAnnouncements', () => {
   test('returns visible announcements when announcements are enabled', () => {
@@ -120,5 +134,34 @@ describe('getLoginAnnouncements', () => {
     });
 
     assert.deepEqual(announcements, [{ content: 'System announcement' }]);
+  });
+
+  test('login form places announcements beside the login card on desktop', () => {
+    assert.match(loginFormSource, /login-shell/);
+    assert.match(loginFormSource, /login-card-column/);
+    assert.match(loginFormSource, /login-announcement-column/);
+  });
+
+  test('login content block is centered in the viewport', () => {
+    assert.match(loginFormSource, /min-h-screen/);
+    assert.equal(loginFormSource.includes('mt-[60px]'), false);
+    assert.match(loginFormSource, /login-page-content w-full mx-auto/);
+  });
+
+  test('login announcement and card columns are vertically centered', () => {
+    assert.equal(indexCssSource.includes('align-items: start'), false);
+    assert.match(indexCssSource, /align-items: center/);
+  });
+
+  test('login announcements render without a heading row or leading status dot', () => {
+    assert.equal(loginAnnouncementsPanelSource.includes('Megaphone'), false);
+    assert.equal(
+      loginAnnouncementsPanelSource.includes('ANNOUNCEMENT_DOT_COLOR'),
+      false,
+    );
+    assert.equal(
+      loginAnnouncementsPanelSource.includes("<span>{t('系统公告')}</span>"),
+      false,
+    );
   });
 });
