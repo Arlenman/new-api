@@ -16,8 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { getStatus } from '@/lib/api'
-
 export type ModuleAccess = { enabled: boolean; requireAuth: boolean }
 
 export type HeaderNavModule = 'rankings' | 'pricing'
@@ -30,6 +28,18 @@ export type HeaderNavModules = {
   docs: boolean
   about: boolean
   [key: string]: boolean | ModuleAccess
+}
+
+export type CustomNavPlacement = 'top' | 'sidebar' | 'both'
+
+export type CustomNavMenu = {
+  id: string
+  title: string
+  url: string
+  enabled: boolean
+  placement: CustomNavPlacement
+  openInNewTab: boolean
+  requireAuth: boolean
 }
 
 const DEFAULT_HEADER_NAV_MODULES: HeaderNavModules = {
@@ -102,6 +112,93 @@ function parseHeaderNavRecord(raw: unknown): Record<string, unknown> | null {
   } catch {
     return null
   }
+}
+
+function parseCustomNavArray(raw: unknown): unknown[] {
+  if (!raw || String(raw).trim() === '') return []
+  if (Array.isArray(raw)) return raw
+
+  try {
+    const parsed = JSON.parse(String(raw)) as unknown
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function isSafeCustomNavURL(url: string): boolean {
+  if (url.startsWith('/') && !url.startsWith('//')) return true
+
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+function isCustomNavPlacement(value: unknown): value is CustomNavPlacement {
+  return value === 'top' || value === 'sidebar' || value === 'both'
+}
+
+export function parseCustomNavMenus(raw: unknown): CustomNavMenu[] {
+  const parsed = parseCustomNavArray(raw)
+  const seenIds = new Set<string>()
+  const result: CustomNavMenu[] = []
+
+  parsed.forEach((item) => {
+    if (!item || typeof item !== 'object') return
+
+    const record = item as Record<string, unknown>
+    const id = typeof record.id === 'string' ? record.id.trim() : ''
+    const title = typeof record.title === 'string' ? record.title.trim() : ''
+    const url = typeof record.url === 'string' ? record.url.trim() : ''
+    const placement = record.placement
+
+    if (!id || seenIds.has(id)) return
+    if (!title || !url || !isSafeCustomNavURL(url)) return
+    if (!isCustomNavPlacement(placement)) return
+
+    seenIds.add(id)
+    result.push({
+      id,
+      title,
+      url,
+      enabled: parseHeaderNavBoolean(record.enabled, true),
+      placement,
+      openInNewTab: parseHeaderNavBoolean(record.openInNewTab, false),
+      requireAuth: parseHeaderNavBoolean(record.requireAuth, false),
+    })
+  })
+
+  return result
+}
+
+export function getCustomNavMenusForPlacement(
+  raw: unknown,
+  placement: Exclude<CustomNavPlacement, 'both'>,
+  isAuthenticated: boolean
+): CustomNavMenu[] {
+  return getEnabledCustomNavMenusForPlacement(raw, placement).filter((item) => {
+    if (item.requireAuth && !isAuthenticated) return false
+    return true
+  })
+}
+
+export function getEnabledCustomNavMenusForPlacement(
+  raw: unknown,
+  placement: Exclude<CustomNavPlacement, 'both'>
+): CustomNavMenu[] {
+  return parseCustomNavMenus(raw).filter((item) => {
+    if (!item.enabled) return false
+    return item.placement === placement || item.placement === 'both'
+  })
+}
+
+export function parseCustomNavMenusFromStatus(
+  status: Record<string, unknown> | null
+): CustomNavMenu[] {
+  return parseCustomNavMenus(status?.CustomNavMenus)
 }
 
 export function parseHeaderNavModules(raw: unknown): HeaderNavModules {
@@ -177,6 +274,7 @@ export async function getFreshModuleAccess(
   module: HeaderNavModule
 ): Promise<ModuleAccess> {
   try {
+    const { getStatus } = await import('@/lib/api')
     const status = (await getStatus()) as Record<string, unknown> | null
     cacheStatus(status)
     return getModuleAccessFromStatus(status, module)

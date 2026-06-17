@@ -26,6 +26,9 @@ type BaseNavItem = {
   title: string
   badge?: string
   icon?: React.ElementType
+  external?: boolean
+  openInNewTab?: boolean
+  requiresAuth?: boolean
   activeUrls?: (LinkProps['to'] | (string & {}))[]
   configUrls?: (LinkProps['to'] | (string & {}))[]
 }
@@ -91,6 +94,7 @@ export type TopNavLink = {
   disabled?: boolean
   requiresAuth?: boolean
   external?: boolean
+  openInNewTab?: boolean
 }
 
 /**

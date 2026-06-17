@@ -1,13 +1,14 @@
 package console_setting
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/QuantumNous/new-api/common"
 )
 
 var (
@@ -24,7 +25,7 @@ var (
 
 func parseJSONArray(jsonStr string, typeName string) ([]map[string]interface{}, error) {
 	var list []map[string]interface{}
-	if err := json.Unmarshal([]byte(jsonStr), &list); err != nil {
+	if err := common.Unmarshal([]byte(jsonStr), &list); err != nil {
 		return nil, fmt.Errorf("%s格式错误：%s", typeName, err.Error())
 	}
 	return list, nil
@@ -55,7 +56,7 @@ func getJSONList(jsonStr string) []map[string]interface{} {
 		return []map[string]interface{}{}
 	}
 	var list []map[string]interface{}
-	json.Unmarshal([]byte(jsonStr), &list)
+	common.Unmarshal([]byte(jsonStr), &list)
 	return list
 }
 
@@ -73,9 +74,100 @@ func ValidateConsoleSettings(settingsStr string, settingType string) error {
 		return validateFAQ(settingsStr)
 	case "UptimeKumaGroups":
 		return validateUptimeKumaGroups(settingsStr)
+	case "CustomNavMenus":
+		return validateCustomNavMenus(settingsStr)
 	default:
 		return fmt.Errorf("未知的设置类型：%s", settingType)
 	}
+}
+
+func validateCustomNavMenuURL(urlStr string, index int) error {
+	if strings.HasPrefix(urlStr, "/") && !strings.HasPrefix(urlStr, "//") {
+		return nil
+	}
+	return validateURL(urlStr, index, "自定义菜单")
+}
+
+func validateCustomNavMenus(menusStr string) error {
+	list, err := parseJSONArray(menusStr, "自定义菜单")
+	if err != nil {
+		return err
+	}
+	if len(list) > 30 {
+		return fmt.Errorf("自定义菜单数量不能超过30个")
+	}
+
+	idSet := make(map[string]bool)
+	validPlacements := map[string]bool{
+		"top": true, "sidebar": true, "both": true,
+	}
+
+	for i, item := range list {
+		id, ok := item["id"].(string)
+		if !ok || strings.TrimSpace(id) == "" {
+			return fmt.Errorf("第%d个自定义菜单缺少ID字段", i+1)
+		}
+		id = strings.TrimSpace(id)
+		if idSet[id] {
+			return fmt.Errorf("第%d个自定义菜单ID与其他菜单重复", i+1)
+		}
+		idSet[id] = true
+		if len(id) > 80 || !slugRegex.MatchString(id) {
+			return fmt.Errorf("第%d个自定义菜单ID格式不正确", i+1)
+		}
+
+		title, ok := item["title"].(string)
+		if !ok || strings.TrimSpace(title) == "" {
+			return fmt.Errorf("第%d个自定义菜单缺少名称字段", i+1)
+		}
+		if len(title) > 80 {
+			return fmt.Errorf("第%d个自定义菜单名称长度不能超过80字符", i+1)
+		}
+		if err := checkDangerousContent(title, i+1, "自定义菜单"); err != nil {
+			return err
+		}
+
+		urlStr, ok := item["url"].(string)
+		if !ok || strings.TrimSpace(urlStr) == "" {
+			return fmt.Errorf("第%d个自定义菜单缺少URL字段", i+1)
+		}
+		urlStr = strings.TrimSpace(urlStr)
+		if len(urlStr) > 500 {
+			return fmt.Errorf("第%d个自定义菜单URL长度不能超过500字符", i+1)
+		}
+		if err := validateCustomNavMenuURL(urlStr, i+1); err != nil {
+			return err
+		}
+		if err := checkDangerousContent(urlStr, i+1, "自定义菜单"); err != nil {
+			return err
+		}
+
+		if enabled, exists := item["enabled"]; exists {
+			if _, ok := enabled.(bool); !ok {
+				return fmt.Errorf("第%d个自定义菜单启用状态必须为布尔值", i+1)
+			}
+		}
+		if openInNewTab, exists := item["openInNewTab"]; exists {
+			if _, ok := openInNewTab.(bool); !ok {
+				return fmt.Errorf("第%d个自定义菜单新窗口打开状态必须为布尔值", i+1)
+			}
+		}
+		if requireAuth, exists := item["requireAuth"]; exists {
+			if _, ok := requireAuth.(bool); !ok {
+				return fmt.Errorf("第%d个自定义菜单登录可见状态必须为布尔值", i+1)
+			}
+		}
+
+		placement, ok := item["placement"].(string)
+		if !ok || strings.TrimSpace(placement) == "" {
+			return fmt.Errorf("第%d个自定义菜单缺少显示位置字段", i+1)
+		}
+		if !validPlacements[placement] {
+			return fmt.Errorf("第%d个自定义菜单显示位置不合法", i+1)
+		}
+	}
+
+	return nil
 }
 
 func validateApiInfo(apiInfoStr string) error {
