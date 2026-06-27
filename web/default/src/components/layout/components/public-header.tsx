@@ -221,8 +221,10 @@ export function PublicHeader(props: PublicHeaderProps) {
                     <a
                       key={i}
                       href={link.href}
-                      target='_blank'
-                      rel='noopener noreferrer'
+                      target={link.openInNewTab ? '_blank' : undefined}
+                      rel={
+                        link.openInNewTab ? 'noopener noreferrer' : undefined
+                      }
                       aria-disabled={link.disabled}
                       tabIndex={link.disabled ? -1 : undefined}
                       onClick={(event) => handleNavLinkClick(event, link)}
@@ -364,8 +366,8 @@ export function PublicHeader(props: PublicHeaderProps) {
                   <a
                     key={i}
                     href={link.href}
-                    target='_blank'
-                    rel='noopener noreferrer'
+                    target={link.openInNewTab ? '_blank' : undefined}
+                    rel={link.openInNewTab ? 'noopener noreferrer' : undefined}
                     aria-disabled={link.disabled}
                     tabIndex={link.disabled ? -1 : undefined}
                     onClick={(event) => handleNavLinkClick(event, link, true)}

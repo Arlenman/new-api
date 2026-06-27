@@ -64,6 +64,8 @@ import OIDCIcon from '../common/logo/OIDCIcon';
 import WeChatIcon from '../common/logo/WeChatIcon';
 import LinuxDoIcon from '../common/logo/LinuxDoIcon';
 import TwoFAVerification from './TwoFAVerification';
+import LoginAnnouncementsPanel from './LoginAnnouncementsPanel';
+import { getLoginAnnouncements } from './loginAnnouncements';
 import { useTranslation } from 'react-i18next';
 import { SiDiscord } from 'react-icons/si';
 
@@ -135,12 +137,35 @@ const LoginForm = () => {
     (status.custom_oauth_providers || []).length > 0;
   const hasOAuthLoginOptions = Boolean(
     status.github_oauth ||
-      status.discord_oauth ||
-      status.oidc_enabled ||
-      status.wechat_login ||
-      status.linuxdo_oauth ||
-      status.telegram_oauth ||
-      hasCustomOAuthProviders,
+    status.discord_oauth ||
+    status.oidc_enabled ||
+    status.wechat_login ||
+    status.linuxdo_oauth ||
+    status.telegram_oauth ||
+    hasCustomOAuthProviders,
+  );
+  const hasLoginAnnouncements = getLoginAnnouncements(status).length > 0;
+
+  const renderLoginShell = (children) => (
+    <div
+      className={`login-shell flex flex-col items-center ${hasLoginAnnouncements ? 'has-announcements' : ''}`}
+    >
+      <div className='login-brand flex items-center justify-center mb-6 gap-2'>
+        <img src={logo} alt='Logo' className='h-10 rounded-full' />
+        <Title heading={3} className='!text-gray-800'>
+          {systemName}
+        </Title>
+      </div>
+
+      <div className='login-content-grid'>
+        {hasLoginAnnouncements && (
+          <div className='login-announcement-column'>
+            <LoginAnnouncementsPanel status={status} />
+          </div>
+        )}
+        <div className='login-card-column'>{children}</div>
+      </div>
+    </div>
   );
 
   useEffect(() => {
@@ -501,17 +526,8 @@ const LoginForm = () => {
   };
 
   const renderOAuthOptions = () => {
-    return (
-      <div className='flex flex-col items-center'>
-        <div className='w-full max-w-md'>
-          <div className='flex items-center justify-center mb-6 gap-2'>
-            <img src={logo} alt='Logo' className='h-10 rounded-full' />
-            <Title heading={3} className='!text-gray-800'>
-              {systemName}
-            </Title>
-          </div>
-
-          <Card className='border-0 !rounded-2xl overflow-hidden'>
+    return renderLoginShell(
+      <Card className='border-0 !rounded-2xl overflow-hidden'>
             <div className='flex justify-center pt-6 pb-2'>
               <Title heading={3} className='text-gray-800 dark:text-gray-200'>
                 {t('登 录')}
@@ -711,21 +727,12 @@ const LoginForm = () => {
               )}
             </div>
           </Card>
-        </div>
-      </div>
     );
   };
 
   const renderEmailLoginForm = () => {
-    return (
-      <div className='flex flex-col items-center'>
-        <div className='w-full max-w-md'>
-          <div className='flex items-center justify-center mb-6 gap-2'>
-            <img src={logo} alt='Logo' className='h-10 rounded-full' />
-            <Title heading={3}>{systemName}</Title>
-          </div>
-
-          <Card className='border-0 !rounded-2xl overflow-hidden'>
+    return renderLoginShell(
+      <Card className='border-0 !rounded-2xl overflow-hidden'>
             <div className='flex justify-center pt-6 pb-2'>
               <Title heading={3} className='text-gray-800 dark:text-gray-200'>
                 {t('登 录')}
@@ -864,8 +871,6 @@ const LoginForm = () => {
               )}
             </div>
           </Card>
-        </div>
-      </div>
     );
   };
 
@@ -947,7 +952,7 @@ const LoginForm = () => {
   };
 
   return (
-    <div className='classic-page-fill relative overflow-hidden bg-gray-100 flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8'>
+    <div className='classic-page-fill relative min-h-screen overflow-hidden bg-gray-100 flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8'>
       {/* 背景模糊晕染球 */}
       <div
         className='blur-ball blur-ball-indigo'
@@ -957,9 +962,10 @@ const LoginForm = () => {
         className='blur-ball blur-ball-teal'
         style={{ top: '50%', left: '-120px' }}
       />
-      <div className='w-full max-w-sm mt-[60px]'>
-        {showEmailLogin ||
-        !hasOAuthLoginOptions
+      <div
+        className={`login-page-content w-full mx-auto ${hasLoginAnnouncements ? 'max-w-5xl' : 'max-w-sm'}`}
+      >
+        {showEmailLogin || !hasOAuthLoginOptions
           ? renderEmailLoginForm()
           : renderOAuthOptions()}
         {renderWeChatLoginModal()}

@@ -18,11 +18,14 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { SystemInfoSection } from '../general/system-info-section'
 import {
+  parseCustomNavMenus,
   parseHeaderNavModules,
   parseSidebarModulesAdmin,
+  serializeCustomNavMenus,
   serializeHeaderNavModules,
   serializeSidebarModulesAdmin,
 } from '../maintenance/config'
+import { CustomNavMenusSection } from '../maintenance/custom-nav-menus-section'
 import { HeaderNavigationSection } from '../maintenance/header-navigation-section'
 import { NoticeSection } from '../maintenance/notice-section'
 import { SidebarModulesSection } from '../maintenance/sidebar-modules-section'
@@ -86,6 +89,20 @@ const SITE_SECTIONS = [
         <SidebarModulesSection
           config={sidebarConfig}
           initialSerialized={sidebarSerialized}
+        />
+      )
+    },
+  },
+  {
+    id: 'custom-menus',
+    titleKey: 'Custom menus',
+    build: (settings: SiteSettings) => {
+      const customMenusConfig = parseCustomNavMenus(settings.CustomNavMenus)
+      const customMenusSerialized = serializeCustomNavMenus(customMenusConfig)
+      return (
+        <CustomNavMenusSection
+          config={customMenusConfig}
+          initialSerialized={customMenusSerialized}
         />
       )
     },

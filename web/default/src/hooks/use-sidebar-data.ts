@@ -20,6 +20,7 @@ import {
   Activity,
   Box,
   CreditCard,
+  ExternalLink,
   FileText,
   FlaskConical,
   Key,
@@ -34,6 +35,8 @@ import {
   Wallet,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { getEnabledCustomNavMenusForPlacement } from '@/lib/nav-modules'
+import { useStatus } from '@/hooks/use-status'
 import { type SidebarData } from '@/components/layout/types'
 
 /**
@@ -44,111 +47,133 @@ import { type SidebarData } from '@/components/layout/types'
  */
 export function useSidebarData(): SidebarData {
   const { t } = useTranslation()
+  const { status } = useStatus()
+  const customMenus = getEnabledCustomNavMenusForPlacement(
+    status?.CustomNavMenus,
+    'sidebar'
+  )
+
+  const navGroups: SidebarData['navGroups'] = [
+    {
+      id: 'chat',
+      title: t('Chat'),
+      items: [
+        {
+          title: t('Playground'),
+          url: '/playground',
+          icon: FlaskConical,
+        },
+        {
+          title: t('Chat'),
+          icon: MessageSquare,
+          type: 'chat-presets',
+        },
+      ],
+    },
+    {
+      id: 'general',
+      title: t('General'),
+      items: [
+        {
+          title: t('Overview'),
+          url: '/dashboard/overview',
+          icon: Activity,
+        },
+        {
+          title: t('Dashboard'),
+          url: '/dashboard/models',
+          icon: LayoutDashboard,
+        },
+        {
+          title: t('API Keys'),
+          url: '/keys',
+          icon: Key,
+        },
+        {
+          title: t('Usage Logs'),
+          url: '/usage-logs/common',
+          icon: FileText,
+        },
+        {
+          title: t('Task Logs'),
+          url: '/usage-logs/task',
+          activeUrls: ['/usage-logs/drawing'],
+          configUrls: ['/usage-logs/drawing', '/usage-logs/task'],
+          icon: ListTodo,
+        },
+      ],
+    },
+    {
+      id: 'personal',
+      title: t('Personal'),
+      items: [
+        {
+          title: t('Wallet'),
+          url: '/wallet',
+          icon: Wallet,
+        },
+        {
+          title: t('Profile'),
+          url: '/profile',
+          icon: User,
+        },
+      ],
+    },
+    {
+      id: 'admin',
+      title: t('Admin'),
+      items: [
+        {
+          title: t('Channels'),
+          url: '/channels',
+          icon: Radio,
+        },
+        {
+          title: t('Models'),
+          url: '/models/metadata',
+          icon: Box,
+        },
+        {
+          title: t('Users'),
+          url: '/users',
+          icon: Users,
+        },
+        {
+          title: t('Redemption Codes'),
+          url: '/redemption-codes',
+          icon: Ticket,
+        },
+        {
+          title: t('Subscription Management'),
+          url: '/subscriptions',
+          icon: CreditCard,
+        },
+        {
+          title: t('System Settings'),
+          url: '/system-settings/site',
+          activeUrls: ['/system-settings'],
+          icon: Settings,
+        },
+      ],
+    },
+  ]
+
+  if (customMenus.length > 0) {
+    navGroups.push({
+      id: 'custom',
+      title: t('Custom menus'),
+      items: customMenus.map((menu) => ({
+        title: menu.title,
+        url: menu.url,
+        icon: ExternalLink,
+        external: /^https?:\/\//.test(menu.url),
+        openInNewTab: menu.openInNewTab,
+        requiresAuth: menu.requireAuth,
+      })),
+    })
+  }
 
   return {
-    navGroups: [
-      {
-        id: 'chat',
-        title: t('Chat'),
-        items: [
-          {
-            title: t('Playground'),
-            url: '/playground',
-            icon: FlaskConical,
-          },
-          {
-            title: t('Chat'),
-            icon: MessageSquare,
-            type: 'chat-presets',
-          },
-        ],
-      },
-      {
-        id: 'general',
-        title: t('General'),
-        items: [
-          {
-            title: t('Overview'),
-            url: '/dashboard/overview',
-            icon: Activity,
-          },
-          {
-            title: t('Dashboard'),
-            url: '/dashboard/models',
-            icon: LayoutDashboard,
-          },
-          {
-            title: t('API Keys'),
-            url: '/keys',
-            icon: Key,
-          },
-          {
-            title: t('Usage Logs'),
-            url: '/usage-logs/common',
-            icon: FileText,
-          },
-          {
-            title: t('Task Logs'),
-            url: '/usage-logs/task',
-            activeUrls: ['/usage-logs/drawing'],
-            configUrls: ['/usage-logs/drawing', '/usage-logs/task'],
-            icon: ListTodo,
-          },
-        ],
-      },
-      {
-        id: 'personal',
-        title: t('Personal'),
-        items: [
-          {
-            title: t('Wallet'),
-            url: '/wallet',
-            icon: Wallet,
-          },
-          {
-            title: t('Profile'),
-            url: '/profile',
-            icon: User,
-          },
-        ],
-      },
-      {
-        id: 'admin',
-        title: t('Admin'),
-        items: [
-          {
-            title: t('Channels'),
-            url: '/channels',
-            icon: Radio,
-          },
-          {
-            title: t('Models'),
-            url: '/models/metadata',
-            icon: Box,
-          },
-          {
-            title: t('Users'),
-            url: '/users',
-            icon: Users,
-          },
-          {
-            title: t('Redemption Codes'),
-            url: '/redemption-codes',
-            icon: Ticket,
-          },
-          {
-            title: t('Subscription Management'),
-            url: '/subscriptions',
-            icon: CreditCard,
-          },
-          {
-            title: t('System Settings'),
-            url: '/system-settings/site',
-            activeUrls: ['/system-settings'],
-            icon: Settings,
-          },
-        ],
-      },
-    ],
+    navGroups,
   }
 }

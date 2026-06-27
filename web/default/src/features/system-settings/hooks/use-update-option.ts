@@ -20,13 +20,14 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import i18next from 'i18next'
 import { toast } from 'sonner'
 import { updateSystemOption } from '../api'
-import type { UpdateOptionRequest } from '../types'
+import type { SystemOptionsResponse, UpdateOptionRequest } from '../types'
 
 // Configuration keys that require status refresh
 const STATUS_RELATED_KEYS = [
   'theme.frontend',
   'HeaderNavModules',
   'SidebarModulesAdmin',
+  'CustomNavMenus',
   'Notice',
   'LogConsumeEnabled',
   'QuotaPerUnit',
@@ -45,11 +46,43 @@ export function useUpdateOption() {
     mutationFn: (request: UpdateOptionRequest) => updateSystemOption(request),
     onSuccess: (data, variables) => {
       if (data.success) {
+        const normalizedValue = String(variables.value)
+
+        queryClient.setQueryData<SystemOptionsResponse>(
+          ['system-options'],
+          (current) => {
+            if (!current?.data) return current
+            const optionExists = current.data.some(
+              (option) => option.key === variables.key
+            )
+            return {
+              ...current,
+              data: optionExists
+                ? current.data.map((option) =>
+                    option.key === variables.key
+                      ? { ...option, value: normalizedValue }
+                      : option
+                  )
+                : [
+                    ...current.data,
+                    { key: variables.key, value: normalizedValue },
+                  ],
+            }
+          }
+        )
+
         // Always refresh system-options
         queryClient.invalidateQueries({ queryKey: ['system-options'] })
 
         // If updating frontend-display-related config, also refresh status
         if (STATUS_RELATED_KEYS.includes(variables.key)) {
+          queryClient.setQueryData<Record<string, unknown> | null>(
+            ['status'],
+            (current) =>
+              current
+                ? { ...current, [variables.key]: normalizedValue }
+                : current
+          )
           queryClient.invalidateQueries({ queryKey: ['status'] })
           try {
             window.localStorage.removeItem('status')

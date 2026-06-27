@@ -75,6 +75,50 @@ code {
     monospace;
 }
 
+/* ==================== 登录页公告布局 ==================== */
+.login-page-content {
+  position: relative;
+  z-index: 1;
+}
+
+.login-content-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+  align-items: center;
+  width: 100%;
+}
+
+.login-card-column,
+.login-announcement-column {
+  width: 100%;
+  max-width: 448px;
+  margin: 0 auto;
+}
+
+.login-announcements-panel {
+  width: 100%;
+}
+
+.login-announcements-content {
+  max-height: 320px;
+}
+
+@media (min-width: 1024px) {
+  .login-shell.has-announcements .login-content-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(360px, 448px);
+    gap: 48px;
+  }
+
+  .login-shell.has-announcements .login-announcement-column {
+    max-width: none;
+  }
+
+  .login-shell.has-announcements .login-announcements-content {
+    max-height: 520px;
+  }
+}
+
 /* ==================== 布局相关样式 ==================== */
 .semi-layout::-webkit-scrollbar,
 .semi-layout-content::-webkit-scrollbar,

@@ -18,45 +18,61 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { Link, useSearch } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
+import { cn } from '@/lib/utils'
 import { useStatus } from '@/hooks/use-status'
 import { AuthLayout } from '../auth-layout'
 import { TermsFooter } from '../components/terms-footer'
+import { LoginAnnouncements } from './components/login-announcements'
+import { getLoginAnnouncements } from './lib/login-announcements'
 import { UserAuthForm } from './components/user-auth-form'
 
 export function SignIn() {
   const { t } = useTranslation()
   const { redirect } = useSearch({ from: '/(auth)/sign-in' })
   const { status } = useStatus()
+  const hasAnnouncements = getLoginAnnouncements(status).length > 0
 
   return (
-    <AuthLayout>
-      <div className='w-full space-y-8'>
-        <div className='space-y-2'>
-          <h2 className='text-center text-2xl font-semibold tracking-tight sm:text-left'>
-            {t('Sign in')}
-          </h2>
-          {!status?.self_use_mode_enabled &&
-            status?.register_enabled !== false && (
-              <p className='text-muted-foreground text-left text-sm sm:text-base'>
-                {t("Don't have an account?")}{' '}
-                <Link
-                  to='/sign-up'
-                  className='hover:text-primary font-medium underline underline-offset-4'
-                >
-                  {t('Sign up')}
-                </Link>
-                .
-              </p>
-            )}
+    <AuthLayout
+      contentClassName={cn(hasAnnouncements && 'sm:w-full lg:max-w-5xl')}
+    >
+      <div
+        className={cn(
+          'w-full space-y-8',
+          hasAnnouncements &&
+            'grid gap-8 space-y-0 lg:grid-cols-[minmax(0,1fr)_480px] lg:items-center lg:gap-12'
+        )}
+      >
+        <LoginAnnouncements className='lg:sticky lg:top-28' />
+
+        <div className='w-full space-y-8'>
+          <div className='space-y-2'>
+            <h2 className='text-center text-2xl font-semibold tracking-tight sm:text-left'>
+              {t('Sign in')}
+            </h2>
+            {!status?.self_use_mode_enabled &&
+              status?.register_enabled !== false && (
+                <p className='text-muted-foreground text-left text-sm sm:text-base'>
+                  {t("Don't have an account?")}{' '}
+                  <Link
+                    to='/sign-up'
+                    className='hover:text-primary font-medium underline underline-offset-4'
+                  >
+                    {t('Sign up')}
+                  </Link>
+                  .
+                </p>
+              )}
+          </div>
+
+          <UserAuthForm redirectTo={redirect} />
+
+          <TermsFooter
+            variant='sign-in'
+            status={status}
+            className='text-center'
+          />
         </div>
-
-        <UserAuthForm redirectTo={redirect} />
-
-        <TermsFooter
-          variant='sign-in'
-          status={status}
-          className='text-center'
-        />
       </div>
     </AuthLayout>
   )

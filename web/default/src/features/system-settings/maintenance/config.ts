@@ -38,6 +38,18 @@ export type SidebarSectionConfig = {
 
 export type SidebarModulesAdminConfig = Record<string, SidebarSectionConfig>
 
+export type CustomNavPlacement = 'top' | 'sidebar' | 'both'
+
+export type CustomNavMenuConfig = {
+  id: string
+  title: string
+  url: string
+  enabled: boolean
+  placement: CustomNavPlacement
+  openInNewTab: boolean
+  requireAuth: boolean
+}
+
 export const HEADER_NAV_DEFAULT: HeaderNavModulesConfig = {
   home: true,
   console: true,
@@ -82,6 +94,8 @@ export const SIDEBAR_MODULES_DEFAULT: SidebarModulesAdminConfig = {
     subscription: true,
   },
 }
+
+export const CUSTOM_NAV_MENUS_DEFAULT: CustomNavMenuConfig[] = []
 
 const toBoolean = (value: unknown, fallback: boolean): boolean => {
   if (typeof value === 'boolean') return value
@@ -238,5 +252,51 @@ export function parseSidebarModulesAdmin(
 export function serializeSidebarModulesAdmin(
   config: SidebarModulesAdminConfig
 ): string {
+  return JSON.stringify(config)
+}
+
+const isCustomNavPlacement = (value: unknown): value is CustomNavPlacement =>
+  value === 'top' || value === 'sidebar' || value === 'both'
+
+export function parseCustomNavMenus(
+  value: string | null | undefined
+): CustomNavMenuConfig[] {
+  if (!value || value.trim() === '') return CUSTOM_NAV_MENUS_DEFAULT
+
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed)) return CUSTOM_NAV_MENUS_DEFAULT
+
+    const seenIds = new Set<string>()
+    return parsed.reduce<CustomNavMenuConfig[]>((acc, raw) => {
+      if (!raw || typeof raw !== 'object') return acc
+
+      const item = raw as Record<string, unknown>
+      const id = typeof item.id === 'string' ? item.id.trim() : ''
+      const title = typeof item.title === 'string' ? item.title.trim() : ''
+      const url = typeof item.url === 'string' ? item.url.trim() : ''
+      const placement = item.placement
+
+      if (!id || seenIds.has(id) || !title || !url) return acc
+      if (!isCustomNavPlacement(placement)) return acc
+
+      seenIds.add(id)
+      acc.push({
+        id,
+        title,
+        url,
+        enabled: toBoolean(item.enabled, true),
+        placement,
+        openInNewTab: toBoolean(item.openInNewTab, false),
+        requireAuth: toBoolean(item.requireAuth, false),
+      })
+      return acc
+    }, [])
+  } catch {
+    return CUSTOM_NAV_MENUS_DEFAULT
+  }
+}
+
+export function serializeCustomNavMenus(config: CustomNavMenuConfig[]): string {
   return JSON.stringify(config)
 }

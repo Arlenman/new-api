@@ -120,12 +120,26 @@ function NavBadge({ children }: { children: ReactNode }) {
  */
 function SidebarMenuLink({ item, href }: { item: NavLink; href: string }) {
   const { setOpenMobile } = useSidebar()
+  const linkTarget = item.openInNewTab ? '_blank' : undefined
+  const linkRel = item.openInNewTab ? 'noopener noreferrer' : undefined
+
+  const renderLink = item.external ? (
+    <a
+      href={item.url as string}
+      target={linkTarget}
+      rel={linkRel}
+      onClick={() => setOpenMobile(false)}
+    />
+  ) : (
+    <Link to={item.url} onClick={() => setOpenMobile(false)} />
+  )
+
   return (
     <SidebarMenuItem>
       <SidebarMenuButton
         isActive={checkIsActive(href, item)}
         tooltip={item.title}
-        render={<Link to={item.url} onClick={() => setOpenMobile(false)} />}
+        render={renderLink}
       >
         {item.icon && <item.icon className='shrink-0' />}
         <span className='min-w-0 flex-1 truncate'>{item.title}</span>
@@ -182,7 +196,21 @@ function SidebarMenuCollapsible({
               <SidebarMenuSubButton
                 isActive={checkIsActive(href, subItem)}
                 render={
-                  <Link to={subItem.url} onClick={() => setOpenMobile(false)} />
+                  subItem.external ? (
+                    <a
+                      href={subItem.url as string}
+                      target={subItem.openInNewTab ? '_blank' : undefined}
+                      rel={
+                        subItem.openInNewTab ? 'noopener noreferrer' : undefined
+                      }
+                      onClick={() => setOpenMobile(false)}
+                    />
+                  ) : (
+                    <Link
+                      to={subItem.url}
+                      onClick={() => setOpenMobile(false)}
+                    />
+                  )
                 }
               >
                 {subItem.icon && <subItem.icon className='shrink-0' />}
@@ -234,10 +262,19 @@ function SidebarMenuCollapsedDropdown({
               <DropdownMenuItem
                 key={`${sub.title}-${sub.url}`}
                 render={
-                  <Link
-                    to={sub.url}
-                    className={`${checkIsActive(href, sub) ? 'bg-secondary' : ''}`}
-                  />
+                  sub.external ? (
+                    <a
+                      href={sub.url as string}
+                      target={sub.openInNewTab ? '_blank' : undefined}
+                      rel={sub.openInNewTab ? 'noopener noreferrer' : undefined}
+                      className={`${checkIsActive(href, sub) ? 'bg-secondary' : ''}`}
+                    />
+                  ) : (
+                    <Link
+                      to={sub.url}
+                      className={`${checkIsActive(href, sub) ? 'bg-secondary' : ''}`}
+                    />
+                  )
                 }
               >
                 {sub.icon && <sub.icon />}
