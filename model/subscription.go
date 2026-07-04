@@ -933,6 +933,70 @@ func AdminInvalidateUserSubscription(userSubscriptionId int) (string, error) {
 	return "", nil
 }
 
+// AdminUpdateUserSubscription updates a user subscription's expiry and total quota.
+func AdminUpdateUserSubscription(userSubscriptionId int, endTime int64, quotaMode string, quotaValue int64) (string, error) {
+	if userSubscriptionId <= 0 {
+		return "", errors.New("invalid userSubscriptionId")
+	}
+	if endTime <= 0 {
+		return "", errors.New("invalid end_time")
+	}
+	quotaMode = strings.TrimSpace(quotaMode)
+	if quotaMode == "" {
+		quotaMode = "override"
+	}
+	if quotaMode != "add" && quotaMode != "subtract" && quotaMode != "override" {
+		return "", errors.New("invalid quota_mode")
+	}
+	if quotaMode == "override" {
+		if quotaValue < 0 {
+			return "", errors.New("quota_value must be >= 0")
+		}
+	} else if quotaValue <= 0 {
+		return "", errors.New("quota_value must be > 0")
+	}
+
+	now := common.GetTimestamp()
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var sub UserSubscription
+		if err := tx.Set("gorm:query_option", "FOR UPDATE").
+			Where("id = ?", userSubscriptionId).First(&sub).Error; err != nil {
+			return err
+		}
+
+		nextAmountTotal := sub.AmountTotal
+		switch quotaMode {
+		case "add":
+			nextAmountTotal += quotaValue
+		case "subtract":
+			nextAmountTotal -= quotaValue
+			if nextAmountTotal < 0 {
+				return errors.New("amount_total must be >= 0")
+			}
+		case "override":
+			nextAmountTotal = quotaValue
+		}
+
+		updates := map[string]interface{}{
+			"end_time":     endTime,
+			"amount_total": nextAmountTotal,
+			"updated_at":   now,
+		}
+		if sub.Status != "cancelled" {
+			if endTime > now {
+				updates["status"] = "active"
+			} else {
+				updates["status"] = "expired"
+			}
+		}
+		return tx.Model(&sub).Updates(updates).Error
+	})
+	if err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
 // AdminDeleteUserSubscription hard-deletes a user subscription.
 func AdminDeleteUserSubscription(userSubscriptionId int) (string, error) {
 	if userSubscriptionId <= 0 {

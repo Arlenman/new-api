@@ -289,6 +289,18 @@ func (token *Token) Insert() error {
 	return err
 }
 
+func (token *Token) InsertWithTags(tags *[]string) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(token).Error; err != nil {
+			return err
+		}
+		if tags == nil {
+			return nil
+		}
+		return ReplaceTokenTagsTx(tx, token.UserId, token.Id, *tags)
+	})
+}
+
 // Update Make sure your token's fields is completed, because this will update non-zero values
 func (token *Token) Update() (err error) {
 	defer func() {
@@ -303,6 +315,30 @@ func (token *Token) Update() (err error) {
 	}()
 	err = DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
 		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry").Updates(token).Error
+	return err
+}
+
+func (token *Token) UpdateWithTags(tags *[]string) (err error) {
+	defer func() {
+		if shouldUpdateRedis(true, err) {
+			gopool.Go(func() {
+				err := cacheSetToken(*token)
+				if err != nil {
+					common.SysLog("failed to update token cache: " + err.Error())
+				}
+			})
+		}
+	}()
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
+			"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry").Updates(token).Error; err != nil {
+			return err
+		}
+		if tags == nil {
+			return nil
+		}
+		return ReplaceTokenTagsTx(tx, token.UserId, token.Id, *tags)
+	})
 	return err
 }
 

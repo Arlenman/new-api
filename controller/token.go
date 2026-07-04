@@ -14,21 +14,42 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func buildMaskedTokenResponse(token *model.Token) *model.Token {
+type tokenRequest struct {
+	model.Token
+	Tags *[]string `json:"tags"`
+}
+
+type tokenResponse struct {
+	model.Token
+	Tags []string `json:"tags"`
+}
+
+func buildMaskedTokenResponse(token *model.Token) (*tokenResponse, error) {
 	if token == nil {
-		return nil
+		return nil, nil
 	}
 	maskedToken := *token
 	maskedToken.Key = token.GetMaskedKey()
-	return &maskedToken
+	tags, err := model.GetTokenTagNames(maskedToken.UserId, maskedToken.Id)
+	if err != nil {
+		return nil, err
+	}
+	return &tokenResponse{
+		Token: maskedToken,
+		Tags:  tags,
+	}, nil
 }
 
-func buildMaskedTokenResponses(tokens []*model.Token) []*model.Token {
-	maskedTokens := make([]*model.Token, 0, len(tokens))
+func buildMaskedTokenResponses(tokens []*model.Token) ([]*tokenResponse, error) {
+	maskedTokens := make([]*tokenResponse, 0, len(tokens))
 	for _, token := range tokens {
-		maskedTokens = append(maskedTokens, buildMaskedTokenResponse(token))
+		maskedToken, err := buildMaskedTokenResponse(token)
+		if err != nil {
+			return nil, err
+		}
+		maskedTokens = append(maskedTokens, maskedToken)
 	}
-	return maskedTokens
+	return maskedTokens, nil
 }
 
 func GetAllTokens(c *gin.Context) {
@@ -40,8 +61,13 @@ func GetAllTokens(c *gin.Context) {
 		return
 	}
 	total, _ := model.CountUserTokens(userId)
+	maskedTokens, err := buildMaskedTokenResponses(tokens)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(buildMaskedTokenResponses(tokens))
+	pageInfo.SetItems(maskedTokens)
 	common.ApiSuccess(c, pageInfo)
 }
 
@@ -57,8 +83,13 @@ func SearchTokens(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	maskedTokens, err := buildMaskedTokenResponses(tokens)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(buildMaskedTokenResponses(tokens))
+	pageInfo.SetItems(maskedTokens)
 	common.ApiSuccess(c, pageInfo)
 }
 
@@ -74,7 +105,12 @@ func GetToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, buildMaskedTokenResponse(token))
+	maskedToken, err := buildMaskedTokenResponse(token)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, maskedToken)
 }
 
 func GetTokenKey(c *gin.Context) {
@@ -165,12 +201,13 @@ func GetTokenUsage(c *gin.Context) {
 }
 
 func AddToken(c *gin.Context) {
-	token := model.Token{}
-	err := c.ShouldBindJSON(&token)
+	req := tokenRequest{}
+	err := c.ShouldBindJSON(&req)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	token := req.Token
 	if len(token.Name) > 50 {
 		common.ApiErrorI18n(c, i18n.MsgTokenNameTooLong)
 		return
@@ -222,7 +259,7 @@ func AddToken(c *gin.Context) {
 		Group:              token.Group,
 		CrossGroupRetry:    token.CrossGroupRetry,
 	}
-	err = cleanToken.Insert()
+	err = cleanToken.InsertWithTags(req.Tags)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -250,12 +287,13 @@ func DeleteToken(c *gin.Context) {
 func UpdateToken(c *gin.Context) {
 	userId := c.GetInt("id")
 	statusOnly := c.Query("status_only")
-	token := model.Token{}
-	err := c.ShouldBindJSON(&token)
+	req := tokenRequest{}
+	err := c.ShouldBindJSON(&req)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	token := req.Token
 	if len(token.Name) > 50 {
 		common.ApiErrorI18n(c, i18n.MsgTokenNameTooLong)
 		return
@@ -300,7 +338,16 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.Group = token.Group
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
 	}
-	err = cleanToken.Update()
+	var tags *[]string
+	if statusOnly == "" {
+		tags = req.Tags
+	}
+	err = cleanToken.UpdateWithTags(tags)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	maskedToken, err := buildMaskedTokenResponse(cleanToken)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -308,8 +355,17 @@ func UpdateToken(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    buildMaskedTokenResponse(cleanToken),
+		"data":    maskedToken,
 	})
+}
+
+func GetTokenTags(c *gin.Context) {
+	tags, err := model.ListTokenTagsByUser(c.GetInt("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, tags)
 }
 
 type TokenBatch struct {

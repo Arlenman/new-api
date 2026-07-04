@@ -66,6 +66,10 @@ func GetAllTasks(startIdx int, num int, queryParams TaskQueryParams) []*Midjourn
 
 	// 初始化查询构建器
 	query := DB
+	query, err = applyHiddenUserFilter(query, "user_id", true)
+	if err != nil {
+		return nil
+	}
 
 	// 添加过滤条件
 	if queryParams.ChannelID != "" {
@@ -199,6 +203,10 @@ func MjBulkUpdateByTaskIds(taskIDs []int, params map[string]any) error {
 func CountAllTasks(queryParams TaskQueryParams) int64 {
 	var total int64
 	query := DB.Model(&Midjourney{})
+	query, err := applyHiddenUserFilter(query, "user_id", true)
+	if err != nil {
+		return 0
+	}
 	if queryParams.ChannelID != "" {
 		query = query.Where("channel_id = ?", queryParams.ChannelID)
 	}

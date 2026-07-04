@@ -442,6 +442,36 @@ func AdminInvalidateUserSubscription(c *gin.Context) {
 	common.ApiSuccess(c, nil)
 }
 
+type AdminUpdateUserSubscriptionRequest struct {
+	EndTime    int64  `json:"end_time"`
+	QuotaMode  string `json:"quota_mode"`
+	QuotaValue int64  `json:"quota_value"`
+}
+
+// AdminUpdateUserSubscription edits a user subscription expiry and total quota.
+func AdminUpdateUserSubscription(c *gin.Context) {
+	subId, _ := strconv.Atoi(c.Param("id"))
+	if subId <= 0 {
+		common.ApiErrorMsg(c, "无效的订阅ID")
+		return
+	}
+	var req AdminUpdateUserSubscriptionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ApiErrorMsg(c, "参数错误")
+		return
+	}
+	msg, err := model.AdminUpdateUserSubscription(subId, req.EndTime, req.QuotaMode, req.QuotaValue)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if msg != "" {
+		common.ApiSuccess(c, gin.H{"message": msg})
+		return
+	}
+	common.ApiSuccess(c, nil)
+}
+
 // AdminDeleteUserSubscription hard-deletes a user subscription.
 func AdminDeleteUserSubscription(c *gin.Context) {
 	subId, _ := strconv.Atoi(c.Param("id"))
