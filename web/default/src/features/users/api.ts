@@ -39,8 +39,12 @@ import type {
 export async function getUsers(
   params: GetUsersParams = {}
 ): Promise<GetUsersResponse> {
-  const { p = 1, page_size = 10 } = params
-  const res = await api.get(`/api/user/?p=${p}&page_size=${page_size}`)
+  const { p = 1, page_size = 10, show_hidden = false } = params
+  const queryParams = new URLSearchParams()
+  queryParams.set('p', String(p))
+  queryParams.set('page_size', String(page_size))
+  if (show_hidden) queryParams.set('show_hidden', 'true')
+  const res = await api.get(`/api/user/?${queryParams.toString()}`)
   return res.data
 }
 
@@ -57,12 +61,14 @@ export async function searchUsers(
     status = '',
     p = 1,
     page_size = 10,
+    show_hidden = false,
   } = params
   const queryParams = new URLSearchParams()
   queryParams.set('keyword', keyword)
   queryParams.set('group', group)
   if (role) queryParams.set('role', role)
   if (status) queryParams.set('status', status)
+  if (show_hidden) queryParams.set('show_hidden', 'true')
   queryParams.set('p', String(p))
   queryParams.set('page_size', String(page_size))
   const res = await api.get(`/api/user/search?${queryParams.toString()}`)

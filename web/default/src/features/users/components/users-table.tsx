@@ -51,6 +51,9 @@ export function UsersTable() {
   const columns = useUsersColumns()
   const { refreshTrigger } = useUsers()
   const isMobile = useMediaQuery('(max-width: 640px)')
+  const search = route.useSearch()
+  const navigate = route.useNavigate()
+  const showHidden = search.showHidden === true
 
   const {
     globalFilter,
@@ -61,8 +64,8 @@ export function UsersTable() {
     onPaginationChange,
     ensurePageInRange,
   } = useTableUrlState({
-    search: route.useSearch(),
-    navigate: route.useNavigate(),
+    search,
+    navigate,
     pagination: { defaultPage: 1, defaultPageSize: isMobile ? 10 : 20 },
     globalFilter: { enabled: true, key: 'filter' },
     columnFilters: [
@@ -93,6 +96,7 @@ export function UsersTable() {
       statusFilter,
       roleFilter,
       groupFilter,
+      showHidden,
       refreshTrigger,
     ],
     queryFn: async () => {
@@ -102,6 +106,7 @@ export function UsersTable() {
       const params = {
         p: pagination.pageIndex + 1,
         page_size: pagination.pageSize,
+        show_hidden: showHidden,
       }
 
       const result =
@@ -112,6 +117,7 @@ export function UsersTable() {
               status: statusFilter[0] ?? '',
               role: roleFilter[0] ?? '',
               group: groupFilter,
+              show_hidden: showHidden,
             })
           : await getUsers(params)
 

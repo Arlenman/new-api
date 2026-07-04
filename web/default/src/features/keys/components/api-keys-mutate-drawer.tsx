@@ -55,6 +55,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { DateTimePicker } from '@/components/datetime-picker'
+import { TagInput } from '@/components/tag-input'
 import {
   SideDrawerSection,
   SideDrawerSectionHeader,
@@ -342,6 +343,27 @@ export function ApiKeysMutateDrawer({
                   )}
                 />
               )}
+
+              <FormField
+                control={form.control}
+                name='tags'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Key Tags')}</FormLabel>
+                    <FormControl>
+                      <TagInput
+                        value={field.value || []}
+                        onChange={field.onChange}
+                        placeholder={t('Add key tags')}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t('Group distributed keys for logs and cost analytics')}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
 
               <FormField
                 control={form.control}

@@ -35,6 +35,14 @@ const usersSearchSchema = z.object({
     .optional()
     .catch([]),
   group: z.string().optional().catch(''),
+  showHidden: z
+    .preprocess((value) => {
+      if (value === 'true') return true
+      if (value === 'false') return false
+      return value
+    }, z.boolean())
+    .optional()
+    .catch(false),
 })
 
 export const Route = createFileRoute('/_authenticated/users/')({

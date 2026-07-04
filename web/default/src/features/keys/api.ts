@@ -24,6 +24,7 @@ import type {
   GetApiKeysResponse,
   SearchApiKeysParams,
   ApiKeyFormData,
+  ApiKeyTag,
 } from './types'
 
 // ============================================================================
@@ -113,5 +114,10 @@ export async function fetchTokenKeysBatch(ids: number[]): Promise<{
   data?: { keys: Record<number, string> }
 }> {
   const res = await api.post('/api/token/batch/keys', { ids })
+  return res.data
+}
+
+export async function getApiKeyTags(): Promise<ApiResponse<ApiKeyTag[]>> {
+  const res = await api.get('/api/token/tags')
   return res.data
 }

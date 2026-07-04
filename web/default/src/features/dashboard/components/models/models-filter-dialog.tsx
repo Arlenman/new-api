@@ -281,6 +281,18 @@ export function ModelsFilter(props: ModelsFilterProps) {
             </Select>
           </div>
 
+          <SectionDivider label={t('Key Filters')} />
+
+          <div className='grid gap-2'>
+            <Label htmlFor='token_tag'>{t('Key Tag')}</Label>
+            <Input
+              id='token_tag'
+              placeholder={t('Filter by key tag')}
+              value={filters.token_tag}
+              onChange={(e) => handleChange('token_tag', e.target.value)}
+            />
+          </div>
+
           {/* Admin-only fields */}
           {isAdmin && (
             <>

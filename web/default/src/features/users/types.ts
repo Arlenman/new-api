@@ -52,6 +52,7 @@ export const userSchema = z.object({
   inviter_id: z.number().optional(),
   linux_do_id: z.string().optional(),
   status: userStatusSchema,
+  hidden: z.boolean().optional().default(false),
   role: userRoleSchema,
   created_at: z.number().optional(),
   updated_at: z.number().optional(),
@@ -78,6 +79,7 @@ export interface ApiResponse<T = unknown> {
 export interface GetUsersParams {
   p?: number
   page_size?: number
+  show_hidden?: boolean
 }
 
 export interface GetUsersResponse {
@@ -98,6 +100,7 @@ export interface SearchUsersParams {
   status?: string
   p?: number
   page_size?: number
+  show_hidden?: boolean
 }
 
 export interface UserFormData {
@@ -108,6 +111,7 @@ export interface UserFormData {
   quota?: number // Only used when updating user
   group?: string // Only used when updating user
   remark?: string // Only used when updating user
+  hidden?: boolean // Only used when updating user
   admin_permissions?: AdminPermissionMatrix
 }
 

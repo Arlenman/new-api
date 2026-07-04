@@ -48,6 +48,27 @@ export interface FlowQuotaDataItem {
   quota?: number
 }
 
+export interface TokenTagQuotaDataItem {
+  tag_id: number
+  tag_name: string
+  user_id?: number
+  username?: string
+  token_id: number
+  token_name?: string
+  token_used?: number
+  count?: number
+  quota?: number
+  last_used_at?: number
+}
+
+export interface TokenTagOptionItem {
+  id: number
+  user_id: number
+  name: string
+  created_at?: number
+  updated_at?: number
+}
+
 export type FlowMetric = 'quota' | 'tokens' | 'requests'
 
 export type FlowOverflowMode = 'aggregate' | 'hide'
@@ -189,6 +210,7 @@ export interface DashboardFilters {
   end_timestamp?: Date
   time_granularity?: TimeGranularity
   username?: string
+  token_tag?: string
 }
 
 export type ConsumptionDistributionChartType = 'bar' | 'area'

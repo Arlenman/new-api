@@ -117,6 +117,14 @@ export interface CreateUserSubscriptionRequest {
   plan_id: number
 }
 
+export type SubscriptionQuotaAdjustMode = 'add' | 'subtract' | 'override'
+
+export interface UpdateUserSubscriptionRequest {
+  end_time: number
+  quota_mode: SubscriptionQuotaAdjustMode
+  quota_value: number
+}
+
 // ============================================================================
 // Self Subscription Data (user-facing)
 // ============================================================================

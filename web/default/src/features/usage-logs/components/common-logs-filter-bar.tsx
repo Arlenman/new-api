@@ -82,6 +82,7 @@ function buildSearchSourceKey(values: {
   channel?: unknown
   model?: unknown
   token?: unknown
+  tokenTag?: unknown
   group?: unknown
   username?: unknown
   requestId?: unknown
@@ -94,6 +95,7 @@ function buildSearchSourceKey(values: {
     values.channel,
     values.model,
     values.token,
+    values.tokenTag,
     values.group,
     values.username,
     values.requestId,
@@ -127,6 +129,7 @@ export function CommonLogsFilterBar<TData>(
       channel: searchParams.channel,
       model: searchParams.model,
       token: searchParams.token,
+      tokenTag: searchParams.tokenTag,
       group: searchParams.group,
       username: searchParams.username,
       requestId: searchParams.requestId,
@@ -141,6 +144,7 @@ export function CommonLogsFilterBar<TData>(
       channel: searchParams.channel || undefined,
       model: searchParams.model || undefined,
       token: searchParams.token || undefined,
+      tokenTag: searchParams.tokenTag || undefined,
       group: searchParams.group || undefined,
       username: searchParams.username || undefined,
       requestId: searchParams.requestId || undefined,
@@ -157,6 +161,7 @@ export function CommonLogsFilterBar<TData>(
     searchParams.channel,
     searchParams.model,
     searchParams.token,
+    searchParams.tokenTag,
     searchParams.group,
     searchParams.username,
     searchParams.requestId,
@@ -234,6 +239,7 @@ export function CommonLogsFilterBar<TData>(
 
   const hasExpandedFilters =
     !!filters.token ||
+    !!filters.tokenTag ||
     !!filters.username ||
     !!filters.channel ||
     !!filters.requestId ||
@@ -245,6 +251,7 @@ export function CommonLogsFilterBar<TData>(
 
   const expandedFilterCount = [
     filters.token,
+    filters.tokenTag,
     isAdmin ? filters.username : undefined,
     isAdmin ? filters.channel : undefined,
     filters.requestId,
@@ -365,6 +372,15 @@ export function CommonLogsFilterBar<TData>(
           type={sensitiveType}
           value={filters.token || ''}
           onChange={(e) => handleChange('token', e.target.value)}
+          onKeyDown={handleKeyDown}
+        />
+      </LogsFilterField>
+      <LogsFilterField>
+        <LogsFilterInput
+          placeholder={t('Key Tag')}
+          type={sensitiveType}
+          value={filters.tokenTag || ''}
+          onChange={(e) => handleChange('tokenTag', e.target.value)}
           onKeyDown={handleKeyDown}
         />
       </LogsFilterField>

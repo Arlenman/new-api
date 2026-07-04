@@ -17,10 +17,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Plus } from 'lucide-react'
+import { Pencil, Plus } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
+import dayjs from '@/lib/dayjs'
+import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -37,6 +41,7 @@ import {
   SheetDescription,
 } from '@/components/ui/sheet'
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import { Dialog } from '@/components/dialog'
 import { StaticDataTable } from '@/components/data-table'
 import {
   sideDrawerContentClassName,
@@ -51,10 +56,15 @@ import {
   createUserSubscription,
   invalidateUserSubscription,
   deleteUserSubscription,
+  updateUserSubscription,
 } from '../../api'
-import { formatQuota } from '@/lib/format'
+import { formatQuota, parseQuotaFromDollars, quotaUnitsToDollars } from '@/lib/format'
 import { formatTimestamp } from '../../lib'
-import type { PlanRecord, UserSubscriptionRecord } from '../../types'
+import type {
+  PlanRecord,
+  SubscriptionQuotaAdjustMode,
+  UserSubscriptionRecord,
+} from '../../types'
 
 interface Props {
   open: boolean
@@ -96,6 +106,205 @@ function SubscriptionStatusBadge(props: {
   )
 }
 
+function formatSubscriptionInput(timestamp: number) {
+  if (!timestamp || timestamp < 0) return ''
+  return dayjs(timestamp * 1000).format('YYYY-MM-DDTHH:mm:ss')
+}
+
+function parseSubscriptionInput(value: string) {
+  if (!value) return 0
+  const timestamp = Math.floor(new Date(value).getTime() / 1000)
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
+function formatAmountInput(value: number, tokensOnly: boolean) {
+  if (!Number.isFinite(value)) return ''
+  return tokensOnly ? String(Math.round(value)) : value.toFixed(6)
+}
+
+function getAdjustedQuota(
+  current: number,
+  mode: SubscriptionQuotaAdjustMode,
+  value: number
+) {
+  switch (mode) {
+    case 'add':
+      return current + value
+    case 'subtract':
+      return current - value
+    case 'override':
+      return value
+  }
+}
+
+function EditUserSubscriptionDialog(props: {
+  record: UserSubscriptionRecord | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onSaved: () => Promise<void>
+}) {
+  const { t } = useTranslation()
+  const [endTime, setEndTime] = useState('')
+  const [mode, setMode] = useState<SubscriptionQuotaAdjustMode>('override')
+  const [amount, setAmount] = useState('')
+  const [saving, setSaving] = useState(false)
+  const { meta: currencyMeta } = getCurrencyDisplay()
+  const currencyLabel = getCurrencyLabel()
+  const tokensOnly = currencyMeta.kind === 'tokens'
+
+  const sub = props.record?.subscription
+
+  useEffect(() => {
+    if (!props.open || !sub) return
+    setEndTime(formatSubscriptionInput(sub.end_time))
+    setMode('override')
+    setAmount(formatAmountInput(quotaUnitsToDollars(sub.amount_total || 0), tokensOnly))
+  }, [props.open, sub, tokensOnly])
+
+  const amountValue = parseFloat(amount) || 0
+  const quotaValue =
+    mode === 'override'
+      ? parseQuotaFromDollars(amountValue)
+      : parseQuotaFromDollars(Math.abs(amountValue))
+  const currentTotal = Number(sub?.amount_total || 0)
+  const nextTotal = getAdjustedQuota(currentTotal, mode, quotaValue)
+
+  const handleCancel = () => {
+    props.onOpenChange(false)
+  }
+
+  const handleSave = async () => {
+    if (!sub) return
+    const parsedEndTime = parseSubscriptionInput(endTime)
+    if (parsedEndTime <= 0) {
+      toast.error(t('Please select an expiration time'))
+      return
+    }
+    if (mode !== 'override' && quotaValue <= 0) {
+      toast.error(t('Please enter a quota amount'))
+      return
+    }
+    if (nextTotal < 0) {
+      toast.error(t('Total quota cannot be negative'))
+      return
+    }
+
+    setSaving(true)
+    try {
+      const res = await updateUserSubscription(sub.id, {
+        end_time: parsedEndTime,
+        quota_mode: mode,
+        quota_value: quotaValue,
+      })
+      if (res.success) {
+        toast.success(res.data?.message || t('Saved successfully'))
+        props.onOpenChange(false)
+        await props.onSaved()
+      } else {
+        toast.error(res.message || t('Save failed'))
+      }
+    } catch {
+      toast.error(t('Request failed'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Dialog
+      open={props.open}
+      onOpenChange={props.onOpenChange}
+      title={t('Edit subscription')}
+      description={sub ? `#${sub.id}` : ''}
+      contentHeight='auto'
+      bodyClassName='space-y-4'
+      footer={
+        <>
+          <Button variant='outline' onClick={handleCancel}>
+            {t('Cancel')}
+          </Button>
+          <Button onClick={handleSave} disabled={saving}>
+            {saving ? t('Saving...') : t('Save changes')}
+          </Button>
+        </>
+      }
+    >
+      <div className='space-y-4'>
+        <div className='space-y-2'>
+          <Label>{t('Expiration time')}</Label>
+          <Input
+            type='datetime-local'
+            step={1}
+            value={endTime}
+            onChange={(event) => setEndTime(event.target.value)}
+          />
+        </div>
+
+        <div className='space-y-2'>
+          <Label>{t('Mode')}</Label>
+          <div className='flex gap-1'>
+            {(['add', 'subtract', 'override'] as const).map((item) => (
+              <Button
+                key={item}
+                type='button'
+                variant={mode === item ? 'default' : 'outline'}
+                size='sm'
+                onClick={() => {
+                  setMode(item)
+                  setAmount(
+                    item === 'override' && sub
+                      ? formatAmountInput(
+                          quotaUnitsToDollars(sub.amount_total || 0),
+                          tokensOnly
+                        )
+                      : ''
+                  )
+                }}
+              >
+                {item === 'add'
+                  ? t('Add')
+                  : item === 'subtract'
+                    ? t('Subtract')
+                    : t('Override')}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        <div className='space-y-2'>
+          <Label>
+            {t('Total Quota')} ({currencyLabel})
+          </Label>
+          <Input
+            type='number'
+            step={tokensOnly ? 1 : 0.000001}
+            min={mode === 'subtract' || mode === 'add' ? 0 : undefined}
+            value={amount}
+            onChange={(event) => setAmount(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') handleSave()
+            }}
+          />
+        </div>
+
+        {sub && (
+          <div className='text-muted-foreground space-y-1 text-sm'>
+            <div>
+              {t('Used')}: {formatQuota(sub.amount_used || 0)}
+            </div>
+            <div>
+              {t('Current total')}: {currentTotal > 0 ? formatQuota(currentTotal) : t('Unlimited')}
+            </div>
+            <div>
+              {t('New total')}: {nextTotal > 0 ? formatQuota(nextTotal) : t('Unlimited')}
+            </div>
+          </div>
+        )}
+      </div>
+    </Dialog>
+  )
+}
+
 export function UserSubscriptionsDialog(props: Props) {
   const { t } = useTranslation()
   const [loading, setLoading] = useState(false)
@@ -107,6 +316,8 @@ export function UserSubscriptionsDialog(props: Props) {
     type: 'invalidate' | 'delete'
     subId: number
   } | null>(null)
+  const [editingRecord, setEditingRecord] =
+    useState<UserSubscriptionRecord | null>(null)
 
   const planTitleMap = useMemo(() => {
     const map = new Map<number, string>()
@@ -346,6 +557,14 @@ export function UserSubscriptionsDialog(props: Props) {
                         >
                           {t('Delete')}
                         </Button>
+                        <Button
+                          size='sm'
+                          variant='outline'
+                          onClick={() => setEditingRecord(record)}
+                        >
+                          <Pencil className='mr-1 h-3.5 w-3.5' />
+                          {t('Edit')}
+                        </Button>
                       </div>
                     )
                   },
@@ -378,6 +597,18 @@ export function UserSubscriptionsDialog(props: Props) {
           destructive={confirmAction.type === 'delete'}
         />
       )}
+      <EditUserSubscriptionDialog
+        open={editingRecord != null}
+        record={editingRecord}
+        onOpenChange={(open) => {
+          if (!open) setEditingRecord(null)
+        }}
+        onSaved={async () => {
+          setEditingRecord(null)
+          await loadData()
+          props.onSuccess?.()
+        }}
+      />
     </>
   )
 }

@@ -110,6 +110,13 @@ export function useUsersColumns(): ColumnDef<User>[] {
                   </TooltipContent>
                 </Tooltip>
               )}
+              {row.original.hidden && (
+                <StatusBadge
+                  label={t('Hidden')}
+                  variant='neutral'
+                  copyable={false}
+                />
+              )}
             </div>
             {displayName && displayName !== username && (
               <LongText className='text-muted-foreground max-w-[180px] text-xs'>

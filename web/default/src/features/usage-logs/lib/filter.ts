@@ -52,6 +52,7 @@ export function buildSearchParams(
         ...baseParams,
         ...(commonFilters.model && { model: commonFilters.model }),
         ...(commonFilters.token && { token: commonFilters.token }),
+        ...(commonFilters.tokenTag && { tokenTag: commonFilters.tokenTag }),
         ...(commonFilters.group && { group: commonFilters.group }),
         ...(commonFilters.username && { username: commonFilters.username }),
         ...(commonFilters.requestId && { requestId: commonFilters.requestId }),

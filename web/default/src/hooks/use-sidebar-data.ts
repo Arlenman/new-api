@@ -30,6 +30,7 @@ import {
   Radio,
   ServerCog,
   Settings,
+  Tags,
   Ticket,
   User,
   Users,
@@ -90,6 +91,11 @@ export function useSidebarData(): SidebarData {
           title: t('API Keys'),
           url: '/keys',
           icon: Key,
+        },
+        {
+          title: t('Key Tag Analytics'),
+          url: '/token-tags',
+          icon: Tags,
         },
         {
           title: t('Usage Logs'),
