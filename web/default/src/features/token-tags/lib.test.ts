@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import {
+  TOKEN_TAGS_CONTENT_CLASS,
+  TOKEN_TAGS_FIXED_CONTENT,
   buildTokenTagOptionNames,
   formatTokenTagLastUsedAt,
   groupTokenTagRows,
@@ -8,6 +10,12 @@ import {
 } from './lib.ts'
 
 describe('token tag analytics helpers', () => {
+  test('uses page-level scrolling for long ranking tables', () => {
+    assert.equal(TOKEN_TAGS_FIXED_CONTENT, false)
+    assert.doesNotMatch(TOKEN_TAGS_CONTENT_CLASS, /\boverflow-hidden\b/)
+    assert.doesNotMatch(TOKEN_TAGS_CONTENT_CLASS, /\bh-full\b/)
+  })
+
   test('groups rows by tag and keeps latest use time', () => {
     const rows = [
       {

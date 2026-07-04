@@ -7,6 +7,10 @@ import dayjs from 'dayjs'
 export type TokenTagSortKey = 'quota' | 'token_used' | 'count' | 'last_used_at'
 export type SortDirection = 'asc' | 'desc'
 
+export const TOKEN_TAGS_FIXED_CONTENT = false
+export const TOKEN_TAGS_CONTENT_CLASS =
+  'flex flex-col gap-4 pb-4'
+
 export interface TokenTagSortState {
   key: TokenTagSortKey
   direction: SortDirection

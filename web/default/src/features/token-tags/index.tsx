@@ -48,6 +48,8 @@ import {
 import { SectionPageLayout } from '@/components/layout'
 import { CompactDateTimeRangePicker } from '@/features/usage-logs/components/compact-date-time-range-picker'
 import {
+  TOKEN_TAGS_CONTENT_CLASS,
+  TOKEN_TAGS_FIXED_CONTENT,
   buildTokenTagOptionNames,
   formatTokenTagLastUsedAt,
   groupTokenTagRows,
@@ -242,10 +244,10 @@ export function TokenTagsDashboard() {
   }
 
   return (
-    <SectionPageLayout fixedContent>
+    <SectionPageLayout fixedContent={TOKEN_TAGS_FIXED_CONTENT}>
       <SectionPageLayout.Title>{t('Key Tag Analytics')}</SectionPageLayout.Title>
       <SectionPageLayout.Content>
-        <div className='flex flex-col gap-4'>
+        <div className={TOKEN_TAGS_CONTENT_CLASS}>
           <div className='flex flex-wrap items-center gap-2'>
             <div className='min-w-[280px]'>
               <CompactDateTimeRangePicker
