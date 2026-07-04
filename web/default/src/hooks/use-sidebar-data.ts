@@ -40,6 +40,7 @@ import { getEnabledCustomNavMenusForPlacement } from '@/lib/nav-modules'
 import { ROLE } from '@/lib/roles'
 import { useStatus } from '@/hooks/use-status'
 import { type SidebarData } from '@/components/layout/types'
+import { ROLE } from '@/lib/roles'
 
 /**
  * Root navigation groups for the application sidebar.
