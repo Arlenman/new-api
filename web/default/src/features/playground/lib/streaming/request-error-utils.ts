@@ -16,14 +16,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { ERROR_MESSAGES } from '../../constants'
+import { ERROR_MESSAGES } from '../../constants.ts'
 
 type RequestErrorLike = {
   message?: string
   response?: {
+    status?: number
     data?: {
       error?: {
         code?: string
+        message?: string
       }
       message?: string
     }
@@ -37,12 +39,18 @@ export type RequestErrorDetails = {
 
 export function parseRequestErrorDetails(error: unknown): RequestErrorDetails {
   const requestError = error as RequestErrorLike
+  const responseMessage =
+    requestError?.response?.data?.error?.message ||
+    requestError?.response?.data?.message
+  const status = requestError?.response?.status
+  const errorMessage =
+    responseMessage ||
+    requestError?.message ||
+    ERROR_MESSAGES.API_REQUEST_ERROR
 
   return {
     errorCode: requestError?.response?.data?.error?.code || undefined,
     errorMessage:
-      requestError?.response?.data?.message ||
-      requestError?.message ||
-      ERROR_MESSAGES.API_REQUEST_ERROR,
+      status && responseMessage ? `HTTP ${status}: ${responseMessage}` : errorMessage,
   }
 }

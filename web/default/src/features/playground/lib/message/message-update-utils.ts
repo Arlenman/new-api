@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { ERROR_MESSAGES, MESSAGE_ROLES, MESSAGE_STATUS } from '../../constants'
 import type { Message } from '../../types'
+import { normalizeImageGenerationRetryableMessage } from './image-generation-error-utils'
 import { completeAssistantTiming } from './message-timing-utils'
 import { updateCurrentVersionContent } from './message-utils'
 
@@ -36,12 +37,14 @@ export function updateAssistantMessageWithError(
       `${title}: ${errorMessage}`
     )
 
-    return completeAssistantTiming({
+    const updatedErrorMessage = completeAssistantTiming({
       ...updatedMessage,
       status: MESSAGE_STATUS.ERROR,
       isReasoningStreaming: false,
       errorCode: errorCode || null,
     })
+
+    return normalizeImageGenerationRetryableMessage(updatedErrorMessage)
   })
 }
 

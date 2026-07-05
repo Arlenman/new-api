@@ -18,19 +18,19 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { t } from 'i18next'
 
-import { ERROR_MESSAGES, MESSAGE_ROLES, MESSAGE_STATUS } from '../../constants'
-import type { ChatCompletionResponse, Message } from '../../types'
-import { parseThinkTags } from './message-reasoning-utils'
+import { ERROR_MESSAGES, MESSAGE_ROLES, MESSAGE_STATUS } from '../../constants.ts'
+import type { ChatCompletionResponse, Message } from '../../types.ts'
+import { parseThinkTags } from './message-reasoning-utils.ts'
 import {
   completeAssistantTiming,
   completeReasoningTiming,
   startReasoningTiming,
-} from './message-timing-utils'
+} from './message-timing-utils.ts'
 import {
   getCurrentVersion,
   hasMessageContent,
   updateCurrentVersionContent,
-} from './message-utils'
+} from './message-utils.ts'
 
 /**
  * Process content chunk during streaming.
@@ -229,8 +229,13 @@ export function sanitizeMessagesOnLoad(messages: Message[]): Message[] {
   if (targetIndex === -1) return messages
 
   const finalized = finalizeMessage(messages[targetIndex])
+  const isImageMessage =
+    finalized.mode === 'image' || finalized.imageGeneration != null
   const hasContent = hasMessageContent(finalized)
   const hasReasoning = finalized.reasoning?.content?.trim()
+  const retryableImageContent =
+    t(ERROR_MESSAGES.IMAGE_GENERATION_RETRYABLE) ||
+    ERROR_MESSAGES.IMAGE_GENERATION_RETRYABLE
 
   const sanitized: Message =
     hasContent || hasReasoning
@@ -238,16 +243,46 @@ export function sanitizeMessagesOnLoad(messages: Message[]): Message[] {
           ...finalized,
           status: MESSAGE_STATUS.COMPLETE,
           isReasoningStreaming: false,
+          imageGeneration:
+            finalized.imageGeneration?.status === 'pending'
+              ? {
+                  ...finalized.imageGeneration,
+                  status: 'complete',
+                  completedAt:
+                    finalized.completedAt ?? finalized.imageGeneration.completedAt,
+                }
+              : finalized.imageGeneration,
         })
       : completeAssistantTiming({
           ...updateCurrentVersionContent(
             finalized,
-            `${t(ERROR_MESSAGES.API_REQUEST_ERROR)}: ${t(
-              ERROR_MESSAGES.INTERRUPTED
-            )}`
+            isImageMessage
+              ? retryableImageContent
+              : `${t(ERROR_MESSAGES.API_REQUEST_ERROR)}: ${t(
+                  ERROR_MESSAGES.INTERRUPTED
+                )}`
           ),
-          status: MESSAGE_STATUS.ERROR,
+          status:
+            isImageMessage
+              ? MESSAGE_STATUS.COMPLETE
+              : MESSAGE_STATUS.ERROR,
           isReasoningStreaming: false,
+          imageGeneration:
+            finalized.imageGeneration?.status === 'pending'
+              ? {
+                  ...finalized.imageGeneration,
+                  status:
+                    isImageMessage
+                      ? 'retryable'
+                      : 'error',
+                  completedAt:
+                    finalized.completedAt ?? finalized.imageGeneration.completedAt,
+                  error:
+                    isImageMessage
+                      ? undefined
+                      : ERROR_MESSAGES.INTERRUPTED,
+                }
+              : finalized.imageGeneration,
         })
 
   const result = [...messages]

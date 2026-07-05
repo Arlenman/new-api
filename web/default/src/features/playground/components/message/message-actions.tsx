@@ -39,6 +39,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
+import { cn } from '@/lib/utils'
 
 import { MESSAGE_ACTION_LABELS } from '../../constants'
 import { useMessageActionGuard } from '../../hooks/use-message-action-guard'
@@ -59,6 +60,7 @@ interface MessageActionsProps {
   isSourceVisible?: boolean
   isGenerating?: boolean
   alwaysVisible?: boolean
+  compactFloating?: boolean
   className?: string
 }
 
@@ -81,6 +83,7 @@ export function MessageActions({
   isSourceVisible = false,
   isGenerating = false,
   alwaysVisible = false,
+  compactFloating = false,
   className = '',
 }: MessageActionsProps) {
   const { t } = useTranslation()
@@ -161,31 +164,48 @@ export function MessageActions({
 
   return (
     <>
-      <TooltipProvider delay={300}>
-        <div
-          className={`hidden items-center gap-0.5 transition-opacity md:flex ${visibilityClass} ${className}`}
-        >
-          {actions.map((action) => (
-            <MessageActionButton
-              className={action.className}
-              disabled={action.disabled}
-              icon={action.icon}
-              key={action.label}
-              label={t(action.label)}
-              onClick={action.onClick}
-              variant={action.variant}
-            />
-          ))}
-        </div>
-      </TooltipProvider>
+      {!compactFloating && (
+        <TooltipProvider delay={300}>
+          <div
+            className={cn(
+              'hidden items-center gap-0.5 transition-opacity md:flex',
+              visibilityClass,
+              className
+            )}
+          >
+            {actions.map((action) => (
+              <MessageActionButton
+                className={action.className}
+                disabled={action.disabled}
+                icon={action.icon}
+                key={action.label}
+                label={t(action.label)}
+                onClick={action.onClick}
+                variant={action.variant}
+              />
+            ))}
+          </div>
+        </TooltipProvider>
+      )}
 
-      <div className={`md:hidden ${className}`}>
+      <div
+        className={cn(
+          compactFloating ? '' : 'md:hidden',
+          compactFloating && 'absolute top-1 right-1 z-10 mt-0',
+          className
+        )}
+      >
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger
             render={
               <Button
                 aria-label={t('Open menu')}
-                className='data-popup-open:bg-muted text-muted-foreground hover:text-foreground size-11'
+                className={cn(
+                  'data-popup-open:bg-muted text-muted-foreground hover:text-foreground',
+                  compactFloating
+                    ? 'bg-background/80 size-8 shadow-sm backdrop-blur'
+                    : 'size-11'
+                )}
                 size='icon'
                 variant='ghost'
               />

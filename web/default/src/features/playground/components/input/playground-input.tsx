@@ -21,18 +21,25 @@ import { useTranslation } from 'react-i18next'
 
 import {
   PromptInput,
+  PromptInputAttachment,
+  PromptInputAttachments,
   PromptInputFooter,
+  PromptInputHeader,
   PromptInputTextarea,
   type PromptInputMessage,
 } from '@/components/ai-elements/prompt-input'
 
 import { getSubmittableInputText } from '../../lib'
-import type { ModelOption, GroupOption } from '../../types'
+import type {
+  ModelOption,
+  GroupOption,
+  PlaygroundSubmitPayload,
+} from '../../types'
 import { PlaygroundInputControls } from './playground-input-controls'
 import { PlaygroundInputTools } from './playground-input-tools'
 
 interface PlaygroundInputProps {
-  onSubmit: (text: string) => void
+  onSubmit: (payload: PlaygroundSubmitPayload) => void
   onStop?: () => void
   disabled?: boolean
   isGenerating?: boolean
@@ -43,6 +50,8 @@ interface PlaygroundInputProps {
   groups: GroupOption[]
   groupValue: string
   onGroupChange: (value: string) => void
+  imageSizeValue: string
+  onImageSizeChange: (value: string) => void
   hasMessages?: boolean
   onClearMessages?: () => void
 }
@@ -59,6 +68,8 @@ export function PlaygroundInput({
   groups,
   groupValue,
   onGroupChange,
+  imageSizeValue,
+  onImageSizeChange,
   hasMessages = false,
   onClearMessages,
 }: PlaygroundInputProps) {
@@ -66,15 +77,24 @@ export function PlaygroundInput({
   const [text, setText] = useState('')
 
   const handleSubmit = (message: PromptInputMessage) => {
-    const submittableText = getSubmittableInputText(message, disabled)
+    if (disabled) {
+      return
+    }
 
-    if (!submittableText) return
-    onSubmit(submittableText)
+    const submittableText = getSubmittableInputText(message)
+    const files = message.files ?? []
+
+    if (!submittableText && files.length === 0) return
+    onSubmit({
+      text: submittableText ?? t('Generate an image from this reference'),
+      files,
+      imageSize: imageSizeValue,
+    })
     setText('')
   }
 
   return (
-    <div className='grid shrink-0 gap-4 px-1 md:pb-4'>
+    <div className='grid shrink-0 gap-4'>
       <PromptInput
         className='relative'
         groupClassName='bg-background/95 dark:bg-background/80 border-border/70 shadow-[0_18px_60px_-32px_rgba(0,0,0,0.65)] ring-1 ring-foreground/5 rounded-xl overflow-hidden transition-all duration-200 focus-within:border-primary/45 focus-within:ring-primary/15 focus-within:shadow-[0_22px_70px_-34px_rgba(0,0,0,0.75)]'
@@ -92,6 +112,12 @@ export function PlaygroundInput({
           value={text}
         />
 
+        <PromptInputHeader className='px-3 pt-3'>
+          <PromptInputAttachments>
+            {(attachment) => <PromptInputAttachment data={attachment} />}
+          </PromptInputAttachments>
+        </PromptInputHeader>
+
         <PromptInputFooter className='border-border/60 bg-muted/20 dark:bg-muted/10 border-t px-3 py-2.5 backdrop-blur'>
           <PlaygroundInputControls
             disabled={disabled}
@@ -102,6 +128,8 @@ export function PlaygroundInput({
             models={models}
             modelValue={modelValue}
             onGroupChange={onGroupChange}
+            imageSizeValue={imageSizeValue}
+            onImageSizeChange={onImageSizeChange}
             onModelChange={onModelChange}
             onStop={onStop}
             text={text}

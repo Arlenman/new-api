@@ -23,6 +23,25 @@ export type MessageStatus = 'loading' | 'streaming' | 'complete' | 'error'
 
 export type PlaygroundMessageLayoutMode = 'alternating' | 'left'
 
+export type PlaygroundMessageMode = 'chat' | 'image'
+
+export type ImageGenerationTaskStatus =
+  | 'pending'
+  | 'complete'
+  | 'retryable'
+  | 'error'
+  | 'cancelled'
+
+export interface MessageImageGenerationState {
+  taskId: string
+  prompt: string
+  size: string
+  status: ImageGenerationTaskStatus
+  startedAt?: number
+  completedAt?: number
+  error?: string
+}
+
 export interface MessageVersion {
   id: string
   content: string
@@ -32,6 +51,8 @@ export interface Message {
   key: string
   from: MessageRole
   versions: MessageVersion[]
+  mode?: PlaygroundMessageMode
+  imageGeneration?: MessageImageGenerationState
   createdAt?: number
   startedAt?: number
   completedAt?: number
@@ -50,6 +71,20 @@ export interface Message {
   status?: MessageStatus
   errorCode?: string | null
 }
+
+export interface PlaygroundSession {
+  id: string
+  title: string
+  messages: Message[]
+  createdAt: number
+  updatedAt: number
+}
+
+export interface PlaygroundSessionsResponse {
+  sessions?: PlaygroundSession[]
+}
+
+export interface PlaygroundSessionMutationResponse extends PlaygroundSession {}
 
 // API payload types
 export interface ChatCompletionMessage {
@@ -115,10 +150,46 @@ export interface ChatCompletionResponse {
   }
 }
 
+export interface ImageGenerationRequest {
+  model: string
+  prompt: string
+  group?: string
+  n?: number
+  size?: string
+  stream?: boolean
+  partial_images?: number
+  response_format?: 'url' | 'b64_json'
+  session_id?: string
+  message_key?: string
+}
+
+export interface ImageGenerationResponse {
+  created?: number
+  status?: 'pending' | 'complete' | 'error' | string
+  data?: Array<{
+    url?: string
+    b64_json?: string
+    revised_prompt?: string
+  }>
+}
+
+export interface PlaygroundImageFile {
+  url?: string
+  mediaType?: string
+  filename?: string
+}
+
+export interface PlaygroundSubmitPayload {
+  text: string
+  files?: PlaygroundImageFile[]
+  imageSize?: string
+}
+
 // Configuration types
 export interface PlaygroundConfig {
   model: string
   group: string
+  imageSize: string
   temperature: number
   top_p: number
   max_tokens: number
@@ -148,4 +219,9 @@ export interface GroupOption {
   value: string
   ratio: number
   desc?: string
+}
+
+export interface PlaygroundImageSizeOption {
+  label: string
+  value: string
 }

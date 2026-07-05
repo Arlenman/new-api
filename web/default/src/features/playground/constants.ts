@@ -35,18 +35,26 @@ export const MESSAGE_STATUS = {
 // API endpoints
 export const API_ENDPOINTS = {
   CHAT_COMPLETIONS: '/pg/chat/completions',
+  IMAGE_GENERATIONS: '/pg/images/generations',
+  IMAGE_EDITS: '/pg/images/edits',
   USER_MODELS: '/api/user/models',
   USER_GROUPS: '/api/user/self/groups',
+  PLAYGROUND_SESSIONS: '/api/playground/sessions',
+  PLAYGROUND_SESSIONS_IMPORT: '/api/playground/sessions/import',
 } as const
 
 // Default group — uses 'default' as the safe fallback; auto-group is
 // only selected when the backend confirms it is available for the user.
 export const DEFAULT_GROUP = 'default' as const
 
+export const DEFAULT_IMAGE_SIZE = 'auto' as const
+export const PLAYGROUND_IMAGE_STREAM_PARTIAL_IMAGES = 1 as const
+
 // Default configuration
 export const DEFAULT_CONFIG: PlaygroundConfig = {
   model: 'gpt-4o',
   group: DEFAULT_GROUP,
+  imageSize: DEFAULT_IMAGE_SIZE,
   temperature: 0.7,
   top_p: 1,
   max_tokens: 4096,
@@ -70,11 +78,15 @@ export const STORAGE_KEYS = {
   CONFIG: 'playground_config',
   MESSAGES: 'playground_messages',
   PARAMETER_ENABLED: 'playground_parameter_enabled',
+  SESSIONS: 'playground_sessions',
+  ACTIVE_SESSION_ID: 'playground_active_session_id',
 } as const
 
 // Error messages
 export const ERROR_MESSAGES = {
   API_REQUEST_ERROR: 'Request error occurred',
+  IMAGE_GENERATION_RETRYABLE:
+    'Image generation did not finish. You can retry.',
   NETWORK_ERROR: 'Network connection failed or server not responding',
   PARSE_ERROR: 'Error parsing response data',
   STREAM_START_ERROR: 'Error establishing connection',

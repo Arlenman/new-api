@@ -16,13 +16,21 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { z } from 'zod'
+
 import { MESSAGE_STATUS, STORAGE_KEYS } from '../../constants'
-import type { PlaygroundConfig, ParameterEnabled, Message } from '../../types'
+import type {
+  PlaygroundConfig,
+  ParameterEnabled,
+  Message,
+  PlaygroundSession,
+} from '../../types'
 import {
   finalizeMessage,
   isAssistantMessagePending,
   sanitizeMessagesOnLoad,
 } from '../message/message-streaming-utils'
+import { normalizeImageGenerationRetryableMessage } from '../message/image-generation-error-utils'
 import { completeAssistantTiming } from '../message/message-timing-utils'
 import { hasMessageContent } from '../message/message-utils'
 import {
@@ -34,6 +42,7 @@ import {
   messagesSchema,
   parameterEnabledSchema,
   playgroundConfigSchema,
+  playgroundSessionsSchema,
 } from './storage-schema'
 
 type StoredEnvelope<T> = {
@@ -223,7 +232,9 @@ function normalizeStoredMessageForLoad(message: Message): Message {
     changed = true
   }
 
-  const normalized = changed ? { ...message, versions, reasoning } : message
+  const normalized = normalizeImageGenerationRetryableMessage(
+    changed ? { ...message, versions, reasoning } : message
+  )
 
   if (!isAssistantMessagePending(normalized)) {
     return normalized
@@ -383,6 +394,75 @@ export function saveMessages(messages: Message[]): void {
   }
 }
 
+function normalizeStoredSessionForLoad(
+  session: PlaygroundSession
+): PlaygroundSession {
+  const normalizedMessages = session.messages.map(normalizeStoredMessageForLoad)
+  const trimmed = trimMessages(normalizedMessages)
+  const sizeTrimmed = trimMessagesByContentSize(trimmed)
+  const sanitized = sanitizeMessagesOnLoad(sizeTrimmed)
+
+  return {
+    ...session,
+    messages: sanitized,
+  }
+}
+
+export function loadSessions(): PlaygroundSession[] | null {
+  try {
+    const saved = readStoredValue(STORAGE_KEYS.SESSIONS)
+    if (!saved) return null
+
+    const parsed = playgroundSessionsSchema.parse(
+      unwrapStoredValue(saved)
+    ) as PlaygroundSession[]
+
+    return parsed.map(normalizeStoredSessionForLoad)
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error('Failed to load playground sessions:', error)
+  }
+  return null
+}
+
+export function saveSessions(sessions: PlaygroundSession[]): void {
+  try {
+    const parsed = playgroundSessionsSchema.parse(
+      sessions.map((session) => ({
+        ...session,
+        messages: trimMessages(session.messages),
+      }))
+    ) as PlaygroundSession[]
+
+    writeStoredValue(STORAGE_KEYS.SESSIONS, parsed)
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error('Failed to save playground sessions:', error)
+  }
+}
+
+export function loadActiveSessionId(): string | null {
+  try {
+    const saved = readStoredValue(STORAGE_KEYS.ACTIVE_SESSION_ID)
+    if (!saved) return null
+
+    return z.string().parse(unwrapStoredValue(saved))
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error('Failed to load active playground session id:', error)
+  }
+  return null
+}
+
+export function saveActiveSessionId(sessionId: string): void {
+  try {
+    writeStoredValue(STORAGE_KEYS.ACTIVE_SESSION_ID, sessionId)
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error('Failed to save active playground session id:', error)
+  }
+}
+
 /**
  * Clear all playground data
  */
@@ -391,6 +471,8 @@ export function clearPlaygroundData(): void {
     localStorage.removeItem(STORAGE_KEYS.CONFIG)
     localStorage.removeItem(STORAGE_KEYS.PARAMETER_ENABLED)
     localStorage.removeItem(STORAGE_KEYS.MESSAGES)
+    localStorage.removeItem(STORAGE_KEYS.SESSIONS)
+    localStorage.removeItem(STORAGE_KEYS.ACTIVE_SESSION_ID)
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('Failed to clear playground data:', error)

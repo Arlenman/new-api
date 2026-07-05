@@ -16,8 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
+
 import { PlaygroundChat } from './components/chat/playground-chat'
 import { PlaygroundInput } from './components/input/playground-input'
+import { PlaygroundSessionSidebar } from './components/session/playground-session-sidebar'
 import {
   useChatHandler,
   usePlaygroundConversation,
@@ -26,10 +30,13 @@ import {
 } from './hooks'
 
 export function Playground() {
+  const { t } = useTranslation()
   const {
     config,
     parameterEnabled,
     messages,
+    sessions,
+    activeSessionId,
     isLoadingMessages,
     models,
     groups,
@@ -38,9 +45,15 @@ export function Playground() {
     setGroups,
     updateConfig,
     clearMessages,
+    commitActiveSessionMessages,
+    createSession,
+    selectSession,
+    renameSession,
+    deleteSession,
+    renameActiveSessionFromMessage,
   } = usePlaygroundState()
 
-  const { sendChat, stopGeneration, isGenerating } = useChatHandler({
+  const { sendChat, sendImage, stopGeneration, isGenerating } = useChatHandler({
     config,
     parameterEnabled,
     onMessageUpdate: updateMessages,
@@ -56,8 +69,15 @@ export function Playground() {
     handleDeleteMessage,
   } = usePlaygroundConversation({
     messages,
+    model: config.model,
+    imageSize: config.imageSize,
     updateMessages,
+    commitActiveSessionMessages,
     sendChat,
+    sendImage,
+    onFirstMessage: renameActiveSessionFromMessage,
+    onInvalidImageModel: () =>
+      toast.error(t('Switch to an image model to generate images')),
   })
 
   const handleClearMessages = () => {
@@ -74,41 +94,55 @@ export function Playground() {
   })
 
   return (
-    <div className='relative flex size-full min-h-0 flex-col overflow-hidden'>
-      {/* Full-width scroll container: scrolling works even over side whitespace */}
-      <div className='flex min-h-0 flex-1 flex-col overflow-hidden'>
-        <PlaygroundChat
-          messages={messages}
-          isLoadingMessages={isLoadingMessages}
-          onRegenerateMessage={handleRegenerateMessage}
-          onEditMessage={handleEditMessage}
-          onDeleteMessage={handleDeleteMessage}
-          onSelectPrompt={handleSendMessage}
-          isGenerating={isGenerating}
-          editingKey={editingMessageKey}
-          onCancelEdit={handleEditOpenChange}
-          onSaveEdit={(newContent) => applyEdit(newContent, false)}
-          onSaveEditAndSubmit={(newContent) => applyEdit(newContent, true)}
-        />
-      </div>
+    <div className='relative flex size-full min-h-0 flex-col overflow-hidden md:flex-row'>
+      <PlaygroundSessionSidebar
+        activeSessionId={activeSessionId}
+        disabled={isGenerating}
+        sessions={sessions}
+        onCreateSession={createSession}
+        onDeleteSession={deleteSession}
+        onRenameSession={renameSession}
+        onSelectSession={selectSession}
+      />
 
-      {/* Input area: center content and constrain to the same container width */}
-      <div className='mx-auto w-full max-w-4xl'>
-        <PlaygroundInput
-          disabled={isGenerating}
-          groups={groups}
-          groupValue={config.group}
-          isGenerating={isGenerating}
-          isModelLoading={isLoadingModels}
-          modelValue={config.model}
-          models={models}
-          onGroupChange={(value) => updateConfig('group', value)}
-          onClearMessages={handleClearMessages}
-          onModelChange={(value) => updateConfig('model', value)}
-          onStop={stopGeneration}
-          onSubmit={handleSendMessage}
-          hasMessages={messages.length > 0}
-        />
+      <div className='relative flex min-h-0 flex-1 flex-col overflow-hidden'>
+        {/* Full-width scroll container: scrolling works even over side whitespace */}
+        <div className='flex min-h-0 flex-1 flex-col overflow-hidden'>
+          <PlaygroundChat
+            messages={messages}
+            isLoadingMessages={isLoadingMessages}
+            onRegenerateMessage={handleRegenerateMessage}
+            onEditMessage={handleEditMessage}
+            onDeleteMessage={handleDeleteMessage}
+            onSelectPrompt={(prompt) => handleSendMessage(prompt)}
+            isGenerating={isGenerating}
+            editingKey={editingMessageKey}
+            onCancelEdit={handleEditOpenChange}
+            onSaveEdit={(newContent) => applyEdit(newContent, false)}
+            onSaveEditAndSubmit={(newContent) => applyEdit(newContent, true)}
+          />
+        </div>
+
+        {/* Keep the input aligned with the readable conversation column. */}
+        <div className='mx-auto w-full max-w-[88rem] px-4 pb-3 md:px-6 lg:px-8 xl:px-10'>
+          <PlaygroundInput
+            disabled={isGenerating}
+            groups={groups}
+            groupValue={config.group}
+            isGenerating={isGenerating}
+            isModelLoading={isLoadingModels}
+            modelValue={config.model}
+            models={models}
+            onGroupChange={(value) => updateConfig('group', value)}
+            imageSizeValue={config.imageSize}
+            onClearMessages={handleClearMessages}
+            onModelChange={(value) => updateConfig('model', value)}
+            onImageSizeChange={(value) => updateConfig('imageSize', value)}
+            onStop={stopGeneration}
+            onSubmit={handleSendMessage}
+            hasMessages={messages.length > 0}
+          />
+        </div>
       </div>
     </div>
   )

@@ -26,6 +26,7 @@ import type { Message } from '../../types'
 
 type MessageMetadataProps = {
   alignment: MessageAlignment
+  compact?: boolean
   message: Message
 }
 
@@ -68,7 +69,10 @@ export function MessageMetadata(props: MessageMetadataProps) {
   return (
     <div
       className={cn(
-        'text-muted-foreground mt-1 flex min-h-4 items-center gap-1.5 text-[11px] leading-none',
+        'text-muted-foreground flex items-center gap-1.5 leading-none',
+        props.compact
+          ? 'mt-0.5 min-h-3 text-[10px]'
+          : 'mt-1 min-h-4 text-[11px]',
         props.alignment === 'right' && 'justify-end'
       )}
     >
