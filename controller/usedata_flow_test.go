@@ -65,20 +65,26 @@ func setupFlowControllerTestDB(t *testing.T) {
 		TokenUsed: 30,
 	}).Error)
 	require.NoError(t, model.LOG_DB.Create(&model.Log{
-		UserId:    1,
-		Username:  "alice",
-		TokenId:   11,
-		TokenName: "primary",
-		Type:      model.LogTypeConsume,
-		CreatedAt: 1199,
+		UserId:           1,
+		Username:         "alice",
+		TokenId:          11,
+		TokenName:        "primary",
+		Type:             model.LogTypeConsume,
+		Quota:            100,
+		PromptTokens:     20,
+		CompletionTokens: 20,
+		CreatedAt:        1199,
 	}).Error)
 	require.NoError(t, model.LOG_DB.Create(&model.Log{
-		UserId:    2,
-		Username:  "bob",
-		TokenId:   22,
-		TokenName: "backup",
-		Type:      model.LogTypeConsume,
-		CreatedAt: 1299,
+		UserId:           2,
+		Username:         "bob",
+		TokenId:          22,
+		TokenName:        "backup",
+		Type:             model.LogTypeConsume,
+		Quota:            70,
+		PromptTokens:     10,
+		CompletionTokens: 20,
+		CreatedAt:        1299,
 	}).Error)
 }
 

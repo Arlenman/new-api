@@ -382,7 +382,7 @@ export function TokenTagsDashboard() {
                     <TableRow key={`${row.username || 'self'}-${row.tag_name}`}>
                       <TableCell>{index + 1}</TableCell>
                       {isAdmin && <TableCell>{row.username || '-'}</TableCell>}
-                      <TableCell className='font-medium'>{row.tag_name}</TableCell>
+                      <TableCell className='font-medium'>{row.tag_name || t('No tags')}</TableCell>
                       <TableCell className='text-right'>{formatQuota(row.quota || 0)}</TableCell>
                       <TableCell className='text-right'>{formatNumber(row.token_used)}</TableCell>
                       <TableCell className='text-right'>{formatNumber(row.count)}</TableCell>
@@ -447,7 +447,7 @@ export function TokenTagsDashboard() {
                     <TableRow key={`${row.tag_id}-${row.token_id}-${row.username || ''}`}>
                       <TableCell>{index + 1}</TableCell>
                       {isAdmin && <TableCell>{row.username || '-'}</TableCell>}
-                      <TableCell>{row.tag_name}</TableCell>
+                      <TableCell>{row.tag_name || t('No tags')}</TableCell>
                       <TableCell>{row.token_name || `#${row.token_id}`}</TableCell>
                       <TableCell className='text-right'>{formatQuota(row.quota || 0)}</TableCell>
                       <TableCell className='text-right'>{formatNumber(row.token_used)}</TableCell>

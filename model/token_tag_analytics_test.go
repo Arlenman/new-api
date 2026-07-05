@@ -48,36 +48,48 @@ func seedTaggedQuotaData(t *testing.T) {
 	}).Error)
 
 	require.NoError(t, LOG_DB.Create(&Log{
-		UserId:    1,
-		Username:  "alice",
-		TokenId:   101,
-		TokenName: "client",
-		Type:      LogTypeConsume,
-		CreatedAt: 1111,
+		UserId:           1,
+		Username:         "alice",
+		TokenId:          101,
+		TokenName:        "client",
+		Type:             LogTypeConsume,
+		Quota:            40,
+		PromptTokens:     10,
+		CompletionTokens: 10,
+		CreatedAt:        1111,
 	}).Error)
 	require.NoError(t, LOG_DB.Create(&Log{
-		UserId:    1,
-		Username:  "alice",
-		TokenId:   101,
-		TokenName: "client",
-		Type:      LogTypeConsume,
-		CreatedAt: 1188,
+		UserId:           1,
+		Username:         "alice",
+		TokenId:          101,
+		TokenName:        "client",
+		Type:             LogTypeConsume,
+		Quota:            60,
+		PromptTokens:     10,
+		CompletionTokens: 10,
+		CreatedAt:        1188,
 	}).Error)
 	require.NoError(t, LOG_DB.Create(&Log{
-		UserId:    1,
-		Username:  "alice",
-		TokenId:   102,
-		TokenName: "internal",
-		Type:      LogTypeConsume,
-		CreatedAt: 1255,
+		UserId:           1,
+		Username:         "alice",
+		TokenId:          102,
+		TokenName:        "internal",
+		Type:             LogTypeConsume,
+		Quota:            200,
+		PromptTokens:     40,
+		CompletionTokens: 40,
+		CreatedAt:        1255,
 	}).Error)
 	require.NoError(t, LOG_DB.Create(&Log{
-		UserId:    2,
-		Username:  "bob",
-		TokenId:   201,
-		TokenName: "client",
-		Type:      LogTypeConsume,
-		CreatedAt: 1399,
+		UserId:           2,
+		Username:         "bob",
+		TokenId:          201,
+		TokenName:        "client",
+		Type:             LogTypeConsume,
+		Quota:            300,
+		PromptTokens:     60,
+		CompletionTokens: 60,
+		CreatedAt:        1399,
 	}).Error)
 }
 
@@ -147,6 +159,53 @@ func TestGetTokenTagQuotaDataFiltersBySelectedTag(t *testing.T) {
 	require.Equal(t, "Client A", selfRows[0].TagName)
 	require.Empty(t, selfRows[0].Username)
 	require.EqualValues(t, 1188, selfRows[0].LastUsedAt)
+}
+
+func TestGetTokenTagQuotaDataIncludesUntaggedLogKeys(t *testing.T) {
+	truncateTables(t)
+	require.NoError(t, DB.Create(&User{Id: 1, Username: "alice", Password: "password123", AffCode: "alice-aff"}).Error)
+	seedTokenForTags(t, Token{Id: 301, UserId: 1, Key: "quota-user-1-untagged", Name: "untagged"})
+	require.NoError(t, LOG_DB.Create(&Log{
+		UserId:           1,
+		Username:         "alice",
+		TokenId:          301,
+		TokenName:        "untagged-log-name",
+		Type:             LogTypeConsume,
+		Quota:            100,
+		PromptTokens:     10,
+		CompletionTokens: 5,
+		CreatedAt:        1100,
+	}).Error)
+	require.NoError(t, LOG_DB.Create(&Log{
+		UserId:           1,
+		Username:         "alice",
+		TokenId:          301,
+		TokenName:        "untagged-log-name",
+		Type:             LogTypeConsume,
+		Quota:            150,
+		PromptTokens:     20,
+		CompletionTokens: 15,
+		CreatedAt:        1200,
+	}).Error)
+
+	adminRows, err := GetTokenTagQuotaData(1000, 2000, "", 0, common.RoleAdminUser, "")
+	require.NoError(t, err)
+	require.Len(t, adminRows, 1)
+	require.Equal(t, 0, adminRows[0].TagID)
+	require.Empty(t, adminRows[0].TagName)
+	require.Equal(t, "alice", adminRows[0].Username)
+	require.Equal(t, 301, adminRows[0].TokenID)
+	require.Equal(t, "untagged", adminRows[0].TokenName)
+	require.Equal(t, 2, adminRows[0].Count)
+	require.Equal(t, 250, adminRows[0].Quota)
+	require.Equal(t, 50, adminRows[0].TokenUsed)
+	require.EqualValues(t, 1200, adminRows[0].LastUsedAt)
+
+	selfRows, err := GetTokenTagQuotaData(1000, 2000, "", 1, common.RoleCommonUser, "")
+	require.NoError(t, err)
+	require.Len(t, selfRows, 1)
+	require.Empty(t, selfRows[0].Username)
+	require.Empty(t, selfRows[0].TagName)
 }
 
 func TestListTokenTagOptionsScopesForDashboard(t *testing.T) {

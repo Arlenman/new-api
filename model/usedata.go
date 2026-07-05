@@ -227,25 +227,31 @@ func GetAllQuotaDates(startTime int64, endTime int64, username string, tokenTag 
 
 func GetTokenTagQuotaData(startTime int64, endTime int64, username string, userID int, role int, tokenTag string) ([]*TokenTagQuotaData, error) {
 	rows := make([]*TokenTagQuotaData, 0)
-	selectFields := "token_tags.id as tag_id, token_tags.name as tag_name, quota_data.user_id, quota_data.username, quota_data.token_id, tokens.name as token_name, sum(quota_data.count) as count, sum(quota_data.quota) as quota, sum(quota_data.token_used) as token_used"
-	groupFields := "token_tags.id, token_tags.name, quota_data.user_id, quota_data.username, quota_data.token_id, tokens.name"
-	query := DB.Table("quota_data").
-		Joins("join token_tag_bindings on token_tag_bindings.token_id = quota_data.token_id").
-		Joins("join token_tags on token_tags.id = token_tag_bindings.tag_id").
-		Joins("left join tokens on tokens.id = quota_data.token_id").
-		Where("quota_data.created_at >= ? and quota_data.created_at <= ?", startTime, endTime)
+	logDB := LOG_DB
+	if logDB == nil {
+		logDB = DB
+	}
+	selectFields := "coalesce(token_tags.id, 0) as tag_id, coalesce(token_tags.name, '') as tag_name, logs.user_id, logs.username, logs.token_id, coalesce(nullif(tokens.name, ''), max(logs.token_name)) as token_name, count(logs.id) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used"
+	groupFields := "token_tags.id, token_tags.name, logs.user_id, logs.username, logs.token_id, tokens.name"
+	query := logDB.Table("logs").
+		Joins("left join token_tag_bindings on token_tag_bindings.token_id = logs.token_id").
+		Joins("left join token_tags on token_tags.id = token_tag_bindings.tag_id and token_tags.user_id = logs.user_id").
+		Joins("left join tokens on tokens.id = logs.token_id").
+		Where("logs.type = ?", LogTypeConsume).
+		Where("logs.created_at >= ? and logs.created_at <= ?", startTime, endTime).
+		Where("logs.token_id > 0")
 
 	if role < common.RoleAdminUser {
-		selectFields = "token_tags.id as tag_id, token_tags.name as tag_name, quota_data.token_id, tokens.name as token_name, sum(quota_data.count) as count, sum(quota_data.quota) as quota, sum(quota_data.token_used) as token_used"
-		groupFields = "token_tags.id, token_tags.name, quota_data.token_id, tokens.name"
-		query = query.Where("quota_data.user_id = ? and token_tags.user_id = ?", userID, userID)
+		selectFields = "coalesce(token_tags.id, 0) as tag_id, coalesce(token_tags.name, '') as tag_name, logs.token_id, coalesce(nullif(tokens.name, ''), max(logs.token_name)) as token_name, count(logs.id) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used"
+		groupFields = "token_tags.id, token_tags.name, logs.token_id, tokens.name"
+		query = query.Where("logs.user_id = ?", userID)
 	} else {
 		var err error
-		if query, err = applyHiddenUserFilter(query, "quota_data.user_id", true); err != nil {
+		if query, err = applyHiddenUserFilter(query, "logs.user_id", true); err != nil {
 			return rows, err
 		}
 		if username != "" {
-			query = query.Where("quota_data.username = ?", username)
+			query = query.Where("logs.username = ?", username)
 		}
 	}
 	if tokenTag != "" {
