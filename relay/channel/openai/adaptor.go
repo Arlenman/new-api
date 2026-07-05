@@ -11,6 +11,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -450,15 +451,22 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 		}
 
 		// 写入所有非文件字段
+		wroteStreamField := false
 		if mf != nil {
 			for key, values := range mf.Value {
 				if key == "model" {
 					continue
 				}
+				if key == "stream" {
+					wroteStreamField = true
+				}
 				for _, value := range values {
 					writer.WriteField(key, value)
 				}
 			}
+		}
+		if request.Stream != nil && !wroteStreamField {
+			writer.WriteField("stream", strconv.FormatBool(*request.Stream))
 		}
 
 		if mf != nil && mf.File != nil {

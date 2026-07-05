@@ -301,6 +301,18 @@ func SetApiRouter(router *gin.Engine) {
 		dataRoute.GET("/token-tags", middleware.AdminAuth(), controller.GetAllTokenTagQuotaDates)
 		dataRoute.GET("/token-tags/self", middleware.UserAuth(), controller.GetUserTokenTagQuotaDates)
 
+		playgroundRoute := apiRouter.Group("/playground")
+		playgroundRoute.Use(middleware.UserAuth())
+		{
+			playgroundRoute.GET("/sessions", controller.GetPlaygroundSessions)
+			playgroundRoute.POST("/sessions", controller.CreatePlaygroundSessionAPI)
+			playgroundRoute.POST("/sessions/import", controller.ImportPlaygroundSessionsAPI)
+			playgroundRoute.PUT("/sessions/:id", controller.UpdatePlaygroundSessionAPI)
+			playgroundRoute.DELETE("/sessions/:id", controller.DeletePlaygroundSessionAPI)
+			playgroundRoute.PUT("/sessions/:id/messages", controller.SavePlaygroundSessionMessagesAPI)
+			playgroundRoute.GET("/files/:id/content", controller.GetPlaygroundFileContent)
+		}
+
 		logRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
 		{
 			logRoute.GET("/token", middleware.TokenAuthReadOnly(), controller.GetLogByKey)
