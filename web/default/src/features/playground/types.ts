@@ -51,6 +51,7 @@ export interface Message {
   key: string
   from: MessageRole
   versions: MessageVersion[]
+  attachments?: PlaygroundImageFile[]
   mode?: PlaygroundMessageMode
   imageGeneration?: MessageImageGenerationState
   createdAt?: number
@@ -173,15 +174,26 @@ export interface ImageGenerationResponse {
   }>
 }
 
+export type PlaygroundAttachmentExtractionStatus =
+  | 'pending'
+  | 'complete'
+  | 'empty'
+  | 'unsupported'
+  | 'error'
+
 export interface PlaygroundImageFile {
   url?: string
   mediaType?: string
   filename?: string
+  size?: number
+  extractedText?: string
+  extractionStatus?: PlaygroundAttachmentExtractionStatus
+  error?: string
 }
 
 export interface PlaygroundSubmitPayload {
   text: string
-  files?: PlaygroundImageFile[]
+  files?: (PlaygroundImageFile & { file?: Blob })[]
   imageSize?: string
 }
 

@@ -92,14 +92,9 @@ export function usePlaygroundConversation({
     (payload: PlaygroundSubmitPayload | string) => {
       const text = typeof payload === 'string' ? payload : payload.text
       const files = typeof payload === 'string' ? [] : (payload.files ?? [])
-      const hasImageFiles = files.length > 0
-      const shouldGenerateImage = shouldUseImageGenerationPath(
-        model,
-        text,
-        hasImageFiles
-      )
+      const shouldGenerateImage = shouldUseImageGenerationPath(model, text)
 
-      if (shouldBlockImageSubmissionForModel(model, text, hasImageFiles)) {
+      if (shouldBlockImageSubmissionForModel(model, text)) {
         onInvalidImageModel?.()
         return
       }
@@ -107,7 +102,7 @@ export function usePlaygroundConversation({
       onFirstMessage?.(text)
 
       if (shouldGenerateImage) {
-        const nextMessages = appendUserImageMessagePair(messages, text)
+        const nextMessages = appendUserImageMessagePair(messages, text, files)
         const assistantMessageKey = getLastAssistantMessageKey(nextMessages)
         const commitResult = commitActiveSessionMessages(nextMessages, text)
         if (!assistantMessageKey || !commitResult) {
@@ -128,7 +123,7 @@ export function usePlaygroundConversation({
         return
       }
 
-      const nextMessages = appendUserMessagePair(messages, text)
+      const nextMessages = appendUserMessagePair(messages, text, files)
       updateMessages(nextMessages)
       sendChat(nextMessages)
     },

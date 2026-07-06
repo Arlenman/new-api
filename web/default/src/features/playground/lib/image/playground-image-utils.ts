@@ -43,16 +43,18 @@ export function hasImageGenerationIntent(text: string): boolean {
   return IMAGE_PROMPT_INTENT_PATTERN.test(text)
 }
 
+export function getAttachmentOnlySubmitText(
+  model: string,
+  imageGenerationFallback: string
+): string {
+  return isImageGenerationModel(model) ? imageGenerationFallback : ''
+}
+
 export function shouldUseImageGenerationPath(
   model: string,
-  text: string,
-  hasImageFiles: boolean
+  _text: string
 ): boolean {
-  return (
-    hasImageFiles ||
-    isImageGenerationModel(model) ||
-    hasImageGenerationIntent(text)
-  )
+  return isImageGenerationModel(model)
 }
 
 export function shouldBlockImageActionForModel(
@@ -63,14 +65,10 @@ export function shouldBlockImageActionForModel(
 }
 
 export function shouldBlockImageSubmissionForModel(
-  model: string,
-  text: string,
-  hasImageFiles: boolean
+  _model: string,
+  _text: string
 ): boolean {
-  return (
-    (hasImageFiles || hasImageGenerationIntent(text)) &&
-    !isImageGenerationModel(model)
-  )
+  return false
 }
 
 const AUTO_SIZE_OPTION: PlaygroundImageSizeOption = {
@@ -85,7 +83,9 @@ function sizeOption(
   return { label, value }
 }
 
-export function getImageSizeOptions(model: string): PlaygroundImageSizeOption[] {
+export function getImageSizeOptions(
+  model: string
+): PlaygroundImageSizeOption[] {
   const normalizedModel = model.toLowerCase()
 
   if (/dall[-_ ]?e[-_ ]?2/.test(normalizedModel)) {
@@ -166,7 +166,7 @@ const MARKDOWN_IMAGE_PATTERN = /!\[([^\]]*)\]\(([^)\s]+)\)/g
 export function extractMarkdownImageReferences(
   content: string
 ): PlaygroundFileImageReference[] {
-  return Array.from(content.matchAll(MARKDOWN_IMAGE_PATTERN)).map((match) => ({
+  return [...content.matchAll(MARKDOWN_IMAGE_PATTERN)].map((match) => ({
     alt: match[1] || 'Generated image',
     url: match[2],
   }))
@@ -182,8 +182,8 @@ export function extractPlaygroundFileImageReferences(
 
 export function stripMarkdownImageReferences(content: string): string {
   return content
-    .replace(MARKDOWN_IMAGE_PATTERN, '')
-    .replace(/\n{3,}/g, '\n\n')
+    .replaceAll(MARKDOWN_IMAGE_PATTERN, '')
+    .replaceAll(/\n{3,}/g, '\n\n')
     .trim()
 }
 
@@ -196,7 +196,7 @@ export function isImageOnlyMarkdownContent(content: string): boolean {
 
 export function stripPlaygroundFileImageMarkdown(content: string): string {
   return content
-    .replace(PLAYGROUND_FILE_IMAGE_MARKDOWN_PATTERN, '')
-    .replace(/\n{3,}/g, '\n\n')
+    .replaceAll(PLAYGROUND_FILE_IMAGE_MARKDOWN_PATTERN, '')
+    .replaceAll(/\n{3,}/g, '\n\n')
     .trim()
 }

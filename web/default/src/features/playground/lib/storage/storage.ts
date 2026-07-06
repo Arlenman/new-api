@@ -25,12 +25,12 @@ import type {
   Message,
   PlaygroundSession,
 } from '../../types'
+import { normalizeImageGenerationRetryableMessage } from '../message/image-generation-error-utils'
 import {
   finalizeMessage,
   isAssistantMessagePending,
   sanitizeMessagesOnLoad,
 } from '../message/message-streaming-utils'
-import { normalizeImageGenerationRetryableMessage } from '../message/image-generation-error-utils'
 import { completeAssistantTiming } from '../message/message-timing-utils'
 import { hasMessageContent } from '../message/message-utils'
 import {
@@ -109,8 +109,16 @@ function getMessageSize(message: Message): number {
     0
   )
   const reasoningSize = message.reasoning?.content.length ?? 0
+  const attachmentsSize =
+    message.attachments?.reduce(
+      (total, attachment) =>
+        total +
+        (attachment.url?.length ?? 0) +
+        (attachment.extractedText?.length ?? 0),
+      0
+    ) ?? 0
 
-  return versionsSize + reasoningSize
+  return versionsSize + reasoningSize + attachmentsSize
 }
 
 function truncateText(text: string, maxLength: number): string {

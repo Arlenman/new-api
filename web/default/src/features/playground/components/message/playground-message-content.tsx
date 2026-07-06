@@ -60,6 +60,7 @@ import { ImageGenerationProgress } from './image-generation-progress'
 import { MessageError } from './message-error'
 import { MessageMetadata } from './message-metadata'
 import { PlaygroundFileImage } from './playground-file-image'
+import { PlaygroundMessageAttachments } from './playground-message-attachments'
 
 type PlaygroundMessageContentProps = {
   actions: ReactNode
@@ -122,6 +123,7 @@ export function PlaygroundMessageContent({
       {responseDisplayContent && (
         <Response final={isMessageFinal}>{responseDisplayContent}</Response>
       )}
+      <PlaygroundMessageAttachments attachments={message.attachments} />
     </MessageContent>
   )
 
@@ -159,7 +161,9 @@ export function PlaygroundMessageContent({
         </Reasoning>
       )}
 
-      {isImageLoading && <ImageGenerationProgress message={normalizedMessage} />}
+      {isImageLoading && (
+        <ImageGenerationProgress message={normalizedMessage} />
+      )}
 
       {showLoader && !isImageLoading && (
         <div className='flex items-center gap-2 py-2'>
@@ -180,7 +184,7 @@ export function PlaygroundMessageContent({
 
       {!isError && showMessageContent && (
         <>
-          {isSourceVisible ? (
+          {isSourceVisible && (
             <CodeBlock
               code={normalizedVersionContent}
               className='my-0 group-[.is-assistant]:w-full group-[.is-assistant]:max-w-[78ch]'
@@ -194,18 +198,14 @@ export function PlaygroundMessageContent({
             >
               <CodeBlockCopyButton />
             </CodeBlock>
-          ) : (
-            <>
-              {isImageOnlyMessage ? (
-                <div className='relative w-fit max-w-full'>
-                  {messageContent}
-                  {actions}
-                </div>
-              ) : (
-                messageContent
-              )}
-            </>
           )}
+          {!isSourceVisible && isImageOnlyMessage && (
+            <div className='relative w-fit max-w-full'>
+              {messageContent}
+              {actions}
+            </div>
+          )}
+          {!isSourceVisible && !isImageOnlyMessage && messageContent}
           <MessageMetadata
             alignment={alignment}
             compact={isImageOnlyMessage}

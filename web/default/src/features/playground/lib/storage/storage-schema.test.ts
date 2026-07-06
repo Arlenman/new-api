@@ -4,6 +4,47 @@ import { describe, test } from 'node:test'
 import { playgroundSessionsSchema } from './storage-schema.ts'
 
 describe('playground storage schema', () => {
+  test('preserves chat message attachments', () => {
+    const parsed = playgroundSessionsSchema.parse([
+      {
+        id: 'session-1',
+        title: 'Attachment session',
+        createdAt: 1000,
+        updatedAt: 1000,
+        messages: [
+          {
+            key: 'user-1',
+            from: 'user',
+            versions: [{ id: 'version-1', content: '提取图片里的文字' }],
+            attachments: [
+              {
+                url: 'data:image/png;base64,c2NyZWVuc2hvdA==',
+                mediaType: 'image/png',
+                filename: 'screenshot.png',
+                size: 4096,
+                extractedText: 'ocr text',
+                extractionStatus: 'complete',
+                error: 'ignored in this scenario',
+              },
+            ],
+          },
+        ],
+      },
+    ])
+
+    assert.deepEqual(parsed[0].messages[0].attachments, [
+      {
+        url: 'data:image/png;base64,c2NyZWVuc2hvdA==',
+        mediaType: 'image/png',
+        filename: 'screenshot.png',
+        size: 4096,
+        extractedText: 'ocr text',
+        extractionStatus: 'complete',
+        error: 'ignored in this scenario',
+      },
+    ])
+  })
+
   test('preserves image message mode and generation metadata', () => {
     const parsed = playgroundSessionsSchema.parse([
       {

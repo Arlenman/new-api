@@ -25,3 +25,7 @@ declare module '@visactor/react-vchart' {
 declare module '@visactor/vchart-semi-theme' {
   export const initVChartSemiTheme: (opts?: Record<string, unknown>) => void
 }
+
+declare module 'pdfjs-dist/legacy/webpack.mjs' {
+  export * from 'pdfjs-dist/legacy/build/pdf.mjs'
+}

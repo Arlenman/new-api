@@ -5,6 +5,7 @@ import {
   buildImageAssistantContent,
   extractMarkdownImageReferences,
   extractPlaygroundFileImageReferences,
+  getAttachmentOnlySubmitText,
   getImageGenerationUrls,
   hasImageGenerationIntent,
   isImageOnlyMarkdownContent,
@@ -40,59 +41,81 @@ describe('playground image utils', () => {
     assert.equal(hasImageGenerationIntent('解释一下图数据库'), false)
   })
 
-  test('uses image generation path for model, prompt, or reference image', () => {
+  test('only uses image fallback text for attachment-only image models', () => {
     assert.equal(
-      shouldUseImageGenerationPath('gpt-5.4-mini', '一只小猫，生成图片', false),
+      getAttachmentOnlySubmitText(
+        'gpt-5.4',
+        'Generate an image from this reference'
+      ),
+      ''
+    )
+    assert.equal(
+      getAttachmentOnlySubmitText(
+        'gpt-image-2',
+        'Generate an image from this reference'
+      ),
+      'Generate an image from this reference'
+    )
+  })
+
+  test('uses image generation path only when the selected model is image capable', () => {
+    assert.equal(
+      shouldUseImageGenerationPath('gpt-5.4-mini', '一只小猫，生成图片'),
+      false
+    )
+    assert.equal(
+      shouldUseImageGenerationPath('smallice-生图', '一只小猫'),
       true
     )
     assert.equal(
-      shouldUseImageGenerationPath('smallice-生图', '一只小猫', false),
+      shouldUseImageGenerationPath('gpt-5.4-mini', '提取图片里的文字'),
+      false
+    )
+    assert.equal(
+      shouldUseImageGenerationPath('gpt-image-2', '修改这张图'),
       true
     )
     assert.equal(
-      shouldUseImageGenerationPath('gpt-5.4-mini', '修改这张图', true),
-      true
+      shouldUseImageGenerationPath('gpt-5.4-mini', '解释一下这段代码'),
+      false
     )
     assert.equal(
-      shouldUseImageGenerationPath('gpt-5.4-mini', '解释一下这段代码', false),
+      shouldUseImageGenerationPath(
+        'gpt-5.4',
+        'CodeDesk APP有什么mcp或者Skill可以直接调用gpt-image-2直接生成图片的？'
+      ),
       false
     )
   })
 
   test('blocks image retry and edit actions when current model is not image capable', () => {
-    assert.equal(
-      shouldBlockImageActionForModel('image', 'gpt-5.4-mini'),
-      true
-    )
-    assert.equal(
-      shouldBlockImageActionForModel('image', 'gpt-image-2'),
-      false
-    )
-    assert.equal(
-      shouldBlockImageActionForModel('chat', 'gpt-5.4-mini'),
-      false
-    )
+    assert.equal(shouldBlockImageActionForModel('image', 'gpt-5.4-mini'), true)
+    assert.equal(shouldBlockImageActionForModel('image', 'gpt-image-2'), false)
+    assert.equal(shouldBlockImageActionForModel('chat', 'gpt-5.4-mini'), false)
   })
 
-  test('blocks image submissions when current model is not image capable', () => {
+  test('does not block plain chat submissions just because text mentions image generation', () => {
     assert.equal(
-      shouldBlockImageSubmissionForModel('gpt-5.4-mini', '修改这张图', true),
-      true
+      shouldBlockImageSubmissionForModel('gpt-5.4-mini', '提取图片里的文字'),
+      false
+    )
+    assert.equal(
+      shouldBlockImageSubmissionForModel('gpt-5.4-mini', '一只小猫，生成图片'),
+      false
     )
     assert.equal(
       shouldBlockImageSubmissionForModel(
-        'gpt-5.4-mini',
-        '一只小猫，生成图片',
-        false
+        'gpt-5.4',
+        'CodeDesk APP有什么mcp或者Skill可以直接调用gpt-image-2直接生成图片的？'
       ),
-      true
-    )
-    assert.equal(
-      shouldBlockImageSubmissionForModel('gpt-image-2', '修改这张图', true),
       false
     )
     assert.equal(
-      shouldBlockImageSubmissionForModel('gpt-5.4-mini', '解释一下代码', false),
+      shouldBlockImageSubmissionForModel('gpt-image-2', '修改这张图'),
+      false
+    )
+    assert.equal(
+      shouldBlockImageSubmissionForModel('gpt-5.4-mini', '解释一下代码'),
       false
     )
   })

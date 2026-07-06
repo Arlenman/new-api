@@ -27,6 +27,11 @@ const playgroundMessageContentSource = readFileSync(
   'utf8'
 )
 
+const playgroundMessageAttachmentsSource = readFileSync(
+  new URL('../message/playground-message-attachments.tsx', import.meta.url),
+  'utf8'
+)
+
 const imageGenerationProgressSource = readFileSync(
   new URL('../message/image-generation-progress.tsx', import.meta.url),
   'utf8'
@@ -69,15 +74,27 @@ describe('Playground wide layout', () => {
   test('keeps generated images as contained left-aligned previews', () => {
     assert.match(playgroundChatSource, /isImageOnlyMarkdownContent/)
     assert.match(playgroundChatSource, /useCompactImageActions/)
-    assert.match(playgroundChatSource, /alwaysShowActions && !useCompactImageActions/)
-    assert.match(playgroundChatSource, /compactFloating=\{useCompactImageActions\}/)
+    assert.match(
+      playgroundChatSource,
+      /alwaysShowActions && !useCompactImageActions/
+    )
+    assert.match(
+      playgroundChatSource,
+      /compactFloating=\{useCompactImageActions\}/
+    )
     assert.match(playgroundChatSource, /py-1\.5/)
-    assert.match(playgroundChatSource, /useCompactImageActions \? 'mt-0' : 'mt-1\.5'/)
+    assert.match(
+      playgroundChatSource,
+      /useCompactImageActions \? 'mt-0' : 'mt-1\.5'/
+    )
     assert.match(messageActionsSource, /compactFloating/)
     assert.match(messageActionsSource, /!\s*compactFloating &&/)
     assert.match(messageActionsSource, /compactFloating \? '' : 'md:hidden'/)
     assert.match(messageActionsSource, /absolute top-1 right-1/)
-    assert.match(messageActionsSource, /bg-background\/80 size-8 shadow-sm backdrop-blur/)
+    assert.match(
+      messageActionsSource,
+      /bg-background\/80 size-8 shadow-sm backdrop-blur/
+    )
     assert.match(messageActionUtilsSource, /pointer-events-none opacity-0/)
     assert.match(messageActionUtilsSource, /group-hover:pointer-events-auto/)
     assert.match(messageMetadataSource, /compact\?: boolean/)
@@ -87,13 +104,28 @@ describe('Playground wide layout', () => {
       playgroundMessageContentSource,
       /group-\[\.is-assistant\]:!max-w-full/
     )
-    assert.match(playgroundMessageContentSource, /group-\[\.is-assistant\]:!w-fit/)
-    assert.doesNotMatch(playgroundMessageContentSource, /group-\[\.is-assistant\]:!mx-auto/)
+    assert.match(
+      playgroundMessageContentSource,
+      /group-\[\.is-assistant\]:!w-fit/
+    )
+    assert.doesNotMatch(
+      playgroundMessageContentSource,
+      /group-\[\.is-assistant\]:!mx-auto/
+    )
     assert.match(playgroundMessageContentSource, /isImageOnlyMessage/)
-    assert.match(playgroundMessageContentSource, /isImageOnlyMessage && 'relative'/)
+    assert.match(
+      playgroundMessageContentSource,
+      /isImageOnlyMessage && 'relative'/
+    )
     assert.match(playgroundMessageContentSource, /relative w-fit max-w-full/)
-    assert.match(playgroundMessageContentSource, /compact=\{isImageOnlyMessage\}/)
-    assert.doesNotMatch(playgroundMessageContentSource, /!items-center text-center/)
+    assert.match(
+      playgroundMessageContentSource,
+      /compact=\{isImageOnlyMessage\}/
+    )
+    assert.doesNotMatch(
+      playgroundMessageContentSource,
+      /!items-center text-center/
+    )
     assert.match(
       playgroundMessageContentSource,
       /gap-0 group-\[\.is-assistant\]:!w-fit group-\[\.is-assistant\]:!max-w-\[15rem\]/
@@ -102,7 +134,10 @@ describe('Playground wide layout', () => {
     assert.doesNotMatch(playgroundFileImageSource, /58svh/)
     assert.doesNotMatch(playgroundFileImageSource, /680px/)
     assert.doesNotMatch(playgroundFileImageSource, /h-\[min\(36svh,420px\)\]/)
-    assert.doesNotMatch(playgroundFileImageSource, /max-w-\[min\(100%,30rem\)\]/)
+    assert.doesNotMatch(
+      playgroundFileImageSource,
+      /max-w-\[min\(100%,30rem\)\]/
+    )
     assert.doesNotMatch(playgroundFileImageSource, /14rem/)
     assert.doesNotMatch(playgroundFileImageSource, /34svh/)
     assert.doesNotMatch(playgroundFileImageSource, /22svh/)
@@ -128,5 +163,12 @@ describe('Playground wide layout', () => {
     assert.match(messageLayoutUtilsSource, /items-end text-right/)
     assert.match(messageStylesSource, /group-\[\.is-user\]:w-fit/)
     assert.match(messageStylesSource, /group-\[\.is-user\]:max-w-\[85%\]/)
+  })
+
+  test('renders uploaded attachments under user messages', () => {
+    assert.match(playgroundMessageContentSource, /PlaygroundMessageAttachments/)
+    assert.match(playgroundMessageContentSource, /message\.attachments/)
+    assert.match(playgroundMessageAttachmentsSource, /filename/)
+    assert.match(playgroundMessageAttachmentsSource, /extractionStatus/)
   })
 })

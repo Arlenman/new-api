@@ -96,12 +96,23 @@ import { cn } from '@/lib/utils'
 // ============================================================================
 
 export type AttachmentsContext = {
-  files: (FileUIPart & { id: string })[]
+  files: PromptInputAttachmentFile[]
   add: (files: File[] | FileList) => void
   remove: (id: string) => void
   clear: () => void
   openFileDialog: () => void
   fileInputRef: RefObject<HTMLInputElement | null>
+}
+
+type PromptInputAttachmentFile = Omit<FileUIPart, 'file'> & {
+  id: string
+  file?: File
+  size?: number
+}
+
+type PromptInputSubmittedFile = Omit<FileUIPart, 'file'> & {
+  file?: File
+  size?: number
 }
 
 export type TextInputContext = {
@@ -170,28 +181,39 @@ export function PromptInputProvider({
   const clearInput = useCallback(() => setTextInput(''), [])
 
   // ----- attachments state (global when wrapped)
-  const [attachements, setAttachements] = useState<
-    (FileUIPart & { id: string })[]
-  >([])
+  const [attachements, setAttachements] = useState<PromptInputAttachmentFile[]>(
+    []
+  )
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const openRef = useRef<() => void>(() => {})
 
-  const add = useCallback((files: File[] | FileList) => {
-    const incoming = Array.from(files)
-    if (incoming.length === 0) return
+  const resetProviderFileInputValue = useCallback(() => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
+  }, [])
 
-    setAttachements((prev) =>
-      prev.concat(
-        incoming.map((file) => ({
+  const add = useCallback(
+    (files: File[] | FileList) => {
+      const incoming = [...files]
+      if (incoming.length === 0) return
+
+      setAttachements((prev) => [
+        ...prev,
+        ...incoming.map((file) => ({
           id: nanoid(),
           type: 'file' as const,
           url: URL.createObjectURL(file),
           mediaType: file.type,
           filename: file.name,
-        }))
-      )
-    )
-  }, [])
+          size: file.size,
+          file,
+        })),
+      ])
+      resetProviderFileInputValue()
+    },
+    [resetProviderFileInputValue]
+  )
 
   const remove = useCallback((id: string) => {
     setAttachements((prev) => {
@@ -206,7 +228,8 @@ export function PromptInputProvider({
       for (const f of prev) if (f.url) URL.revokeObjectURL(f.url)
       return []
     })
-  }, [])
+    resetProviderFileInputValue()
+  }, [resetProviderFileInputValue])
 
   const openFileDialog = useCallback(() => {
     openRef.current?.()
@@ -274,7 +297,7 @@ export const usePromptInputAttachments = () => {
 }
 
 export type PromptInputAttachmentProps = HTMLAttributes<HTMLDivElement> & {
-  data: FileUIPart & { id: string }
+  data: PromptInputAttachmentFile
   className?: string
 }
 
@@ -376,7 +399,7 @@ export type PromptInputAttachmentsProps = Omit<
   HTMLAttributes<HTMLDivElement>,
   'children'
 > & {
-  children: (attachment: FileUIPart & { id: string }) => ReactNode
+  children: (attachment: PromptInputAttachmentFile) => ReactNode
 }
 
 export function PromptInputAttachments({
@@ -422,7 +445,7 @@ export const PromptInputActionAddAttachments = ({
 
 export type PromptInputMessage = {
   text?: string
-  files?: FileUIPart[]
+  files?: PromptInputSubmittedFile[]
 }
 
 export type PromptInputProps = Omit<
@@ -486,8 +509,14 @@ export const PromptInput = ({
   }, [])
 
   // ----- Local attachments (only used when no provider)
-  const [items, setItems] = useState<(FileUIPart & { id: string })[]>([])
+  const [items, setItems] = useState<PromptInputAttachmentFile[]>([])
   const files = usingProvider ? controller.attachments.files : items
+
+  const resetFileInputValue = useCallback(() => {
+    if (inputRef.current) {
+      inputRef.current.value = ''
+    }
+  }, [])
 
   const openFileDialogLocal = useCallback(() => {
     inputRef.current?.click()
@@ -509,7 +538,7 @@ export const PromptInput = ({
 
   const addLocal = useCallback(
     (fileList: File[] | FileList) => {
-      const incoming = Array.from(fileList)
+      const incoming = [...fileList]
       const accepted = incoming.filter((f) => matchesAccept(f))
       if (incoming.length && accepted.length === 0) {
         onError?.({
@@ -542,7 +571,7 @@ export const PromptInput = ({
             message: t('Too many files. Some were not added.'),
           })
         }
-        const next: (FileUIPart & { id: string })[] = []
+        const next: PromptInputAttachmentFile[] = []
         for (const file of capped) {
           next.push({
             id: nanoid(),
@@ -550,9 +579,11 @@ export const PromptInput = ({
             url: URL.createObjectURL(file),
             mediaType: file.type,
             filename: file.name,
+            size: file.size,
+            file,
           })
         }
-        return prev.concat(next)
+        return [...prev, ...next]
       })
     },
     [matchesAccept, maxFiles, maxFileSize, onError, t]
@@ -584,8 +615,11 @@ export const PromptInput = ({
   const clear = useMemo(
     () =>
       controller
-        ? () => controller.attachments.clear()
-        : () =>
+        ? () => {
+            controller.attachments.clear()
+            resetFileInputValue()
+          }
+        : () => {
             setItems((prev) => {
               for (const file of prev) {
                 if (file.url) {
@@ -593,8 +627,10 @@ export const PromptInput = ({
                 }
               }
               return []
-            }),
-    [controller]
+            })
+            resetFileInputValue()
+          },
+    [controller, resetFileInputValue]
   )
 
   const openFileDialog = useMemo(
@@ -684,6 +720,7 @@ export const PromptInput = ({
     if (event.currentTarget.files) {
       add(event.currentTarget.files)
     }
+    resetFileInputValue()
   }
 
   const convertBlobUrlToDataUrl = async (url: string): Promise<string> => {
@@ -691,8 +728,12 @@ export const PromptInput = ({
     const blob = await response.blob()
     return new Promise((resolve, reject) => {
       const reader = new FileReader()
-      reader.onloadend = () => resolve(reader.result as string)
-      reader.onerror = reject
+      reader.addEventListener(
+        'loadend',
+        () => resolve(reader.result as string),
+        { once: true }
+      )
+      reader.addEventListener('error', reject, { once: true })
       reader.readAsDataURL(blob)
     })
   }
@@ -737,33 +778,38 @@ export const PromptInput = ({
         }
         return item
       })
-    ).then((convertedFiles: FileUIPart[]) => {
-      try {
-        const result = onSubmit({ text, files: convertedFiles }, event)
-
-        // Handle both sync and async onSubmit
-        if (result instanceof Promise) {
-          result
-            .then(() => {
-              clear()
-              if (usingProvider) {
-                controller.textInput.clear()
-              }
-            })
-            .catch(() => {
-              // Don't clear on error - user may want to retry
-            })
-        } else {
-          // Sync function completed without throwing, clear attachments
-          clear()
-          if (usingProvider) {
-            controller.textInput.clear()
+    )
+      .then((convertedFiles: PromptInputSubmittedFile[]) => {
+        try {
+          const result = onSubmit({ text, files: convertedFiles }, event)
+          const clearAfterSuccessfulSubmit = () => {
+            clear()
+            resetFileInputValue()
+            if (usingProvider) {
+              controller.textInput.clear()
+            }
           }
+
+          // Handle both sync and async onSubmit
+          if (result instanceof Promise) {
+            result
+              .then(() => {
+                clearAfterSuccessfulSubmit()
+              })
+              .catch(() => {
+                // Don't clear on error - user may want to retry
+              })
+          } else {
+            // Sync function completed without throwing, clear attachments
+            clearAfterSuccessfulSubmit()
+          }
+        } catch {
+          // Don't clear on error - user may want to retry
         }
-      } catch (_error) {
-        // Don't clear on error - user may want to retry
-      }
-    })
+      })
+      .catch(() => {
+        // Don't clear on conversion error - user may want to retry
+      })
   }
 
   // Render with or without local provider
@@ -841,10 +887,7 @@ export const PromptInputTextarea = ({
       attachments.files.length > 0
     ) {
       e.preventDefault()
-      const lastAttachment =
-        attachments.files.length > 0
-          ? attachments.files[attachments.files.length - 1]
-          : undefined
+      const lastAttachment = attachments.files.at(-1)
       if (lastAttachment) {
         attachments.remove(lastAttachment.id)
       }
@@ -1127,20 +1170,20 @@ export const PromptInputSpeechButton = ({
       speechRecognition.interimResults = true
       speechRecognition.lang = 'en-US'
 
-      speechRecognition.onstart = () => {
+      speechRecognition.addEventListener('start', () => {
         setIsListening(true)
-      }
+      })
 
-      speechRecognition.onend = () => {
+      speechRecognition.addEventListener('end', () => {
         setIsListening(false)
-      }
+      })
 
-      speechRecognition.onresult = (event) => {
+      speechRecognition.addEventListener('result', (event) => {
+        const speechEvent = event as SpeechRecognitionEvent
         let finalTranscript = ''
 
-        const results = Array.from(event.results)
-
-        for (const result of results) {
+        for (let index = 0; index < speechEvent.results.length; index++) {
+          const result = speechEvent.results.item(index)
           if (result.isFinal) {
             finalTranscript += result[0]?.transcript ?? ''
           }
@@ -1156,13 +1199,14 @@ export const PromptInputSpeechButton = ({
           textarea.dispatchEvent(new Event('input', { bubbles: true }))
           onTranscriptionChange?.(newValue)
         }
-      }
+      })
 
-      speechRecognition.onerror = (event) => {
+      speechRecognition.addEventListener('error', (event) => {
+        const speechError = event as SpeechRecognitionErrorEvent
         // eslint-disable-next-line no-console
-        console.error('Speech recognition error:', event.error)
+        console.error('Speech recognition error:', speechError.error)
         setIsListening(false)
-      }
+      })
 
       recognitionRef.current = speechRecognition
       // eslint-disable-next-line react-hooks/set-state-in-effect

@@ -24,7 +24,12 @@ import type {
   MessageVersion,
   ChatCompletionMessage,
   ContentPart,
+  PlaygroundImageFile,
 } from '../../types.ts'
+import {
+  buildAttachmentContextText,
+  hasExtractedAttachmentText,
+} from '../attachment/playground-attachment-text.ts'
 
 /**
  * Create a new message version
@@ -55,6 +60,35 @@ export function getMessageContent(message: Message): string {
  */
 export function hasMessageContent(message: Message): boolean {
   return getMessageContent(message).trim() !== ''
+}
+
+function getAttachmentImageUrls(
+  attachments: PlaygroundImageFile[] = []
+): string[] {
+  return attachments
+    .filter(
+      (attachment) =>
+        Boolean(attachment.url?.trim()) &&
+        Boolean(attachment.mediaType?.startsWith('image/'))
+    )
+    .map((attachment) => attachment.url?.trim() ?? '')
+}
+
+function getMessageTextWithAttachmentContext(
+  text: string,
+  attachments: PlaygroundImageFile[] = []
+): string {
+  const attachmentContext = buildAttachmentContextText(attachments)
+
+  if (!attachmentContext) {
+    return text
+  }
+
+  if (!text.trim()) {
+    return attachmentContext
+  }
+
+  return `${text}\n\n${attachmentContext}`
 }
 
 /**
@@ -154,9 +188,15 @@ export function getTextContent(content: string | ContentPart[]): string {
  */
 export function formatMessageForAPI(message: Message): ChatCompletionMessage {
   const currentVersion = getCurrentVersion(message)
+  const imageUrls = getAttachmentImageUrls(message.attachments)
+  const text = getMessageTextWithAttachmentContext(
+    currentVersion.content,
+    message.attachments
+  )
+
   return {
     role: message.from,
-    content: currentVersion.content,
+    content: buildMessageContent(text, imageUrls),
   }
 }
 
@@ -170,6 +210,14 @@ export function isValidMessage(message: Message): boolean {
   // Exclude empty assistant messages (loading/streaming placeholders)
   if (message.from === MESSAGE_ROLES.ASSISTANT && !hasMessageContent(message)) {
     return false
+  }
+
+  if (message.from === MESSAGE_ROLES.USER) {
+    return (
+      hasMessageContent(message) ||
+      getAttachmentImageUrls(message.attachments).length > 0 ||
+      Boolean(message.attachments?.some(hasExtractedAttachmentText))
+    )
   }
 
   return true

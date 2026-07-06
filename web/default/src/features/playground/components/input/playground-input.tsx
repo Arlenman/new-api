@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import {
   PromptInput,
@@ -30,9 +31,16 @@ import {
 } from '@/components/ai-elements/prompt-input'
 
 import { getSubmittableInputText } from '../../lib'
+import {
+  extractPlaygroundAttachmentText,
+  isImageAttachment,
+  stripTransientAttachmentFields,
+} from '../../lib/attachment/playground-attachment-text'
+import { getAttachmentOnlySubmitText } from '../../lib/image/playground-image-utils'
 import type {
   ModelOption,
   GroupOption,
+  PlaygroundImageFile,
   PlaygroundSubmitPayload,
 } from '../../types'
 import { PlaygroundInputControls } from './playground-input-controls'
@@ -76,7 +84,34 @@ export function PlaygroundInput({
   const { t } = useTranslation()
   const [text, setText] = useState('')
 
-  const handleSubmit = (message: PromptInputMessage) => {
+  const parseFilesForSubmit = async (
+    files: NonNullable<PromptInputMessage['files']>
+  ): Promise<PlaygroundImageFile[]> => {
+    const parsedFiles: PlaygroundImageFile[] = []
+
+    for (const file of files) {
+      if (isImageAttachment(file)) {
+        parsedFiles.push(stripTransientAttachmentFields(file))
+        continue
+      }
+
+      const parsedFile = await extractPlaygroundAttachmentText(file)
+      if (parsedFile.extractionStatus !== 'complete') {
+        const filename = parsedFile.filename || t('Attachment')
+        const error = parsedFile.error || t('Failed to read attachment')
+        toast.error(t('Attachment cannot be sent'), {
+          description: `${filename}：${error}`,
+        })
+        throw new Error(error)
+      }
+
+      parsedFiles.push(parsedFile)
+    }
+
+    return parsedFiles
+  }
+
+  const handleSubmit = async (message: PromptInputMessage) => {
     if (disabled) {
       return
     }
@@ -85,9 +120,16 @@ export function PlaygroundInput({
     const files = message.files ?? []
 
     if (!submittableText && files.length === 0) return
+    const attachmentOnlyText = getAttachmentOnlySubmitText(
+      modelValue,
+      t('Generate an image from this reference')
+    )
+
+    const parsedFiles = await parseFilesForSubmit(files)
+
     onSubmit({
-      text: submittableText ?? t('Generate an image from this reference'),
-      files,
+      text: submittableText ?? attachmentOnlyText,
+      files: parsedFiles,
       imageSize: imageSizeValue,
     })
     setText('')
@@ -98,6 +140,7 @@ export function PlaygroundInput({
       <PromptInput
         className='relative'
         groupClassName='bg-background/95 dark:bg-background/80 border-border/70 shadow-[0_18px_60px_-32px_rgba(0,0,0,0.65)] ring-1 ring-foreground/5 rounded-xl overflow-hidden transition-all duration-200 focus-within:border-primary/45 focus-within:ring-primary/15 focus-within:shadow-[0_22px_70px_-34px_rgba(0,0,0,0.75)]'
+        multiple
         onSubmit={handleSubmit}
       >
         <PromptInputTextarea

@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { MESSAGE_ROLES } from '../../constants.ts'
-import type { Message } from '../../types.ts'
+import type { Message, PlaygroundImageFile } from '../../types.ts'
 import {
   createLoadingAssistantMessage,
   createUserMessage,
@@ -25,19 +25,22 @@ import {
   updateCurrentVersionContent,
 } from './message-utils.ts'
 
-type ApplyMessageEditResult = {
-  messages: Message[]
-  shouldSend: false
-} | {
-  messages: Message[]
-  shouldSend: true
-  mode: 'chat'
-} | {
-  messages: Message[]
-  shouldSend: true
-  mode: 'image'
-  prompt: string
-}
+type ApplyMessageEditResult =
+  | {
+      messages: Message[]
+      shouldSend: false
+    }
+  | {
+      messages: Message[]
+      shouldSend: true
+      mode: 'chat'
+    }
+  | {
+      messages: Message[]
+      shouldSend: true
+      mode: 'image'
+      prompt: string
+    }
 
 type ImageActionOptions = {
   forceImage?: boolean
@@ -62,26 +65,33 @@ type ChatMessageRenderState = {
 
 export function appendUserMessagePair(
   messages: Message[],
-  content: string
+  content: string,
+  attachments: PlaygroundImageFile[] = []
 ): Message[] {
   const submittedAt = Date.now()
+  const userMessage = createUserMessage(content, submittedAt)
 
   return [
     ...messages,
-    createUserMessage(content, submittedAt),
+    attachments.length > 0 ? { ...userMessage, attachments } : userMessage,
     createLoadingAssistantMessage(submittedAt),
   ]
 }
 
 export function appendUserImageMessagePair(
   messages: Message[],
-  content: string
+  content: string,
+  attachments: PlaygroundImageFile[] = []
 ): Message[] {
   const submittedAt = Date.now()
+  const userMessage = {
+    ...createUserMessage(content, submittedAt),
+    mode: 'image' as const,
+  }
 
   return [
     ...messages,
-    { ...createUserMessage(content, submittedAt), mode: 'image' },
+    attachments.length > 0 ? { ...userMessage, attachments } : userMessage,
     { ...createLoadingAssistantMessage(submittedAt), mode: 'image' },
   ]
 }
@@ -229,10 +239,7 @@ export function applyMessageEdit(
     : createLoadingAssistantMessage(submittedAt)
 
   return {
-    messages: [
-      ...updatedMessages.slice(0, messageIndex + 1),
-      loadingMessage,
-    ],
+    messages: [...updatedMessages.slice(0, messageIndex + 1), loadingMessage],
     shouldSend: true,
     ...(shouldUseImage
       ? {
