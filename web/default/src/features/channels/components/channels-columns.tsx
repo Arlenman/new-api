@@ -89,7 +89,13 @@ import { NumericSpinnerInput } from './numeric-spinner-input'
 
 type RoutingHelpKind = 'priority' | 'weight'
 
-function RoutingColumnHelp({ kind }: { kind: RoutingHelpKind }) {
+function RoutingColumnHelp({
+  kind,
+  children,
+}: {
+  kind: RoutingHelpKind
+  children: React.ReactNode
+}) {
   const { t } = useTranslation()
   const isPriority = kind === 'priority'
   const helpLabel = isPriority
@@ -101,15 +107,18 @@ function RoutingColumnHelp({ kind }: { kind: RoutingHelpKind }) {
       <Tooltip>
         <TooltipTrigger
           render={
-            <button
-              type='button'
-              className='text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex size-6 cursor-help items-center justify-center rounded-sm focus-visible:ring-2 focus-visible:outline-none'
+            <div
+              className='flex w-fit cursor-help items-center gap-1'
               aria-label={helpLabel}
-            />
+            >
+              {children}
+              <HelpCircle
+                className='text-muted-foreground size-3.5 shrink-0'
+                aria-hidden='true'
+              />
+            </div>
           }
-        >
-          <HelpCircle className='size-3.5' aria-hidden='true' />
-        </TooltipTrigger>
+        />
         <TooltipContent
           side='top'
           align='start'
@@ -1133,10 +1142,9 @@ export function useChannelsColumns(
       {
         accessorKey: 'priority',
         header: ({ column }) => (
-          <div className='flex items-center gap-1'>
+          <RoutingColumnHelp kind='priority'>
             <DataTableColumnHeader column={column} title={t('Priority')} />
-            <RoutingColumnHelp kind='priority' />
-          </div>
+          </RoutingColumnHelp>
         ),
         meta: { mobileHidden: true, label: t('Priority') },
         cell: ({ row }) => <PriorityCell channel={row.original} />,
@@ -1147,10 +1155,9 @@ export function useChannelsColumns(
       {
         accessorKey: 'weight',
         header: ({ column }) => (
-          <div className='flex items-center gap-1'>
+          <RoutingColumnHelp kind='weight'>
             <DataTableColumnHeader column={column} title={t('Weight')} />
-            <RoutingColumnHelp kind='weight' />
-          </div>
+          </RoutingColumnHelp>
         ),
         meta: { mobileHidden: true, label: t('Weight') },
         cell: ({ row }) => <WeightCell channel={row.original} />,
