@@ -270,6 +270,9 @@ function renderHeaderContent<TData>(header: Header<TData, unknown>) {
   if (typeof headerDef === 'string') {
     return <DataTableColumnHeader column={header.column} title={headerDef} />
   }
+  if (typeof headerDef === 'function') {
+    return flexRender(headerDef, header.getContext())
+  }
   if (meta?.label) {
     return <DataTableColumnHeader column={header.column} title={meta.label} />
   }
