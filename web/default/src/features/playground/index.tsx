@@ -44,6 +44,7 @@ export function Playground() {
     setModels,
     setGroups,
     updateConfig,
+    updateParameterEnabled,
     clearMessages,
     commitActiveSessionMessages,
     createSession,
@@ -126,6 +127,7 @@ export function Playground() {
         {/* Keep the input aligned with the readable conversation column. */}
         <div className='mx-auto w-full max-w-[88rem] px-4 pb-3 md:px-6 lg:px-8 xl:px-10'>
           <PlaygroundInput
+            config={config}
             disabled={isGenerating}
             groups={groups}
             groupValue={config.group}
@@ -135,11 +137,14 @@ export function Playground() {
             models={models}
             onGroupChange={(value) => updateConfig('group', value)}
             imageSizeValue={config.imageSize}
+            onConfigChange={updateConfig}
             onClearMessages={handleClearMessages}
             onModelChange={(value) => updateConfig('model', value)}
             onImageSizeChange={(value) => updateConfig('imageSize', value)}
+            onParameterEnabledChange={updateParameterEnabled}
             onStop={stopGeneration}
             onSubmit={handleSendMessage}
+            parameterEnabled={parameterEnabled}
             hasMessages={messages.length > 0}
           />
         </div>
