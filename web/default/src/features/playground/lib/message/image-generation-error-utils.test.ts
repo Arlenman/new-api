@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { ERROR_MESSAGES, MESSAGE_ROLES, MESSAGE_STATUS } from '../../constants.ts'
+import { MESSAGE_ROLES, MESSAGE_STATUS } from '../../constants.ts'
 import type { Message } from '../../types.ts'
 import {
   isRecoverableImageGenerationErrorMessage,
@@ -10,7 +10,7 @@ import {
 } from './image-generation-error-utils.ts'
 
 describe('image generation error utilities', () => {
-  test('normalizes legacy 524 errors without image mode', () => {
+  test('does not infer image mode from a generic 524 chat error', () => {
     const message: Message = {
       key: 'assistant-legacy',
       from: MESSAGE_ROLES.ASSISTANT,
@@ -26,22 +26,11 @@ describe('image generation error utilities', () => {
       ],
     }
 
-    assert.equal(isRecoverableImageGenerationErrorMessage(message), true)
-
-    const normalized = normalizeImageGenerationRetryableMessage(message)
-
-    assert.equal(normalized.mode, 'image')
-    assert.equal(normalized.status, MESSAGE_STATUS.COMPLETE)
-    assert.equal(normalized.imageGeneration?.status, 'retryable')
-    assert.equal(normalized.imageGeneration?.error, undefined)
-    assert.equal(
-      normalized.versions[0].content,
-      ERROR_MESSAGES.IMAGE_GENERATION_RETRYABLE
-    )
-    assert.doesNotMatch(normalized.versions[0].content, /524|Request error/)
+    assert.equal(isRecoverableImageGenerationErrorMessage(message), false)
+    assert.equal(normalizeImageGenerationRetryableMessage(message), message)
   })
 
-  test('normalizes gateway and timeout failures without image mode', () => {
+  test('does not infer image mode from generic gateway and timeout errors', () => {
     const contents = [
       'Request error occurred: Request failed with status code 504',
       'HTTP 502 Bad Gateway from upstream',
@@ -58,19 +47,12 @@ describe('image generation error utilities', () => {
         versions: [{ id: 'version-1', content }],
       }
 
-      const normalized = normalizeImageGenerationRetryableMessage(message)
-
-      assert.equal(normalized.mode, 'image')
-      assert.equal(normalized.status, MESSAGE_STATUS.COMPLETE)
-      assert.equal(normalized.imageGeneration?.status, 'retryable')
-      assert.equal(
-        normalized.versions[0].content,
-        ERROR_MESSAGES.IMAGE_GENERATION_RETRYABLE
-      )
+      assert.equal(isRecoverableImageGenerationErrorMessage(message), false)
+      assert.equal(normalizeImageGenerationRetryableMessage(message), message)
     }
   })
 
-  test('normalizes legacy 524 errors with missing role', () => {
+  test('does not infer image mode when a legacy error has no role or image metadata', () => {
     const message = {
       key: 'assistant-missing-role',
       status: MESSAGE_STATUS.ERROR,
@@ -82,17 +64,28 @@ describe('image generation error utilities', () => {
       ],
     } as Message
 
-    const normalized = normalizeImageGenerationRetryableMessage(message)
+    assert.equal(isRecoverableImageGenerationErrorMessage(message), false)
+    assert.equal(normalizeImageGenerationRetryableMessage(message), message)
+  })
 
-    assert.equal(normalized.from, MESSAGE_ROLES.ASSISTANT)
-    assert.equal(normalized.mode, 'image')
-    assert.equal(normalized.status, MESSAGE_STATUS.COMPLETE)
-    assert.equal(normalized.imageGeneration?.status, 'retryable')
-    assert.equal(
-      normalized.versions[0].content,
-      ERROR_MESSAGES.IMAGE_GENERATION_RETRYABLE
-    )
-    assert.doesNotMatch(normalized.versions[0].content, /524|Request error/)
+  test('keeps PDF chat request failures out of image generation state', () => {
+    const message: Message = {
+      key: 'assistant-pdf-chat',
+      from: MESSAGE_ROLES.ASSISTANT,
+      mode: 'chat',
+      status: MESSAGE_STATUS.ERROR,
+      versions: [
+        {
+          id: 'version-pdf-chat',
+          content: 'Request error occurred: PDF could not be processed',
+        },
+      ],
+    }
+
+    assert.equal(isRecoverableImageGenerationErrorMessage(message), false)
+    assert.equal(normalizeImageGenerationRetryableMessage(message), message)
+    assert.equal(message.mode, 'chat')
+    assert.equal(message.imageGeneration, undefined)
   })
 
   test('fills missing image generation metadata on retryable server messages', () => {

@@ -115,11 +115,53 @@ describe('chat payload builder attachments', () => {
       parameterEnabled
     )
 
-    assert.equal(typeof payload.messages[0].content, 'string')
-    assert.match(payload.messages[0].content as string, /总结文档内容/)
-    assert.match(payload.messages[0].content as string, /附件内容/)
-    assert.match(payload.messages[0].content as string, /contract\.pdf/)
-    assert.match(payload.messages[0].content as string, /甲方为 A 公司/)
+    const content = payload.messages[0].content
+    assert.ok(Array.isArray(content))
+    assert.equal(content[0].type, 'text')
+    if (content[0].type !== 'text') assert.fail('missing text part')
+    assert.match(content[0].text, /总结文档内容/)
+    assert.match(content[0].text, /附件内容/)
+    assert.match(content[0].text, /contract\.pdf/)
+    assert.match(content[0].text, /甲方为 A 公司/)
+    assert.deepEqual(content[1], {
+      type: 'file',
+      file: {
+        filename: 'contract.pdf',
+        file_data: 'data:application/pdf;base64,cGRm',
+      },
+    })
+  })
+
+  test('sends scanned PDFs as raw file parts on the chat payload', () => {
+    const payload = buildChatCompletionPayload(
+      [
+        userMessage({
+          versions: [{ id: 'version-1', content: '总结扫描文档' }],
+          attachments: [
+            {
+              url: 'data:application/pdf;base64,c2Nhbm5lZA==',
+              mediaType: 'application/pdf',
+              filename: 'scanned.pdf',
+              extractionStatus: 'empty',
+              error: '未提取到可读文本',
+            },
+          ],
+        }),
+      ],
+      config,
+      parameterEnabled
+    )
+
+    assert.deepEqual(payload.messages[0].content, [
+      { type: 'text', text: '总结扫描文档' },
+      {
+        type: 'file',
+        file: {
+          filename: 'scanned.pdf',
+          file_data: 'data:application/pdf;base64,c2Nhbm5lZA==',
+        },
+      },
+    ])
   })
 
   test('sends multiple extracted files in one text block', () => {

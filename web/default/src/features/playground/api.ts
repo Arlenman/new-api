@@ -19,6 +19,12 @@ For commercial licensing, please contact support@quantumnous.com
 import { api } from '@/lib/api'
 
 import { API_ENDPOINTS } from './constants'
+import { sanitizePlaygroundMessagesForPersistence } from './lib/attachment/playground-attachment-persistence'
+import {
+  normalizePlaygroundSessionResponse,
+  normalizePlaygroundSessionsResponse,
+  type PlaygroundSessionServerItem,
+} from './lib/session/playground-session-api-utils'
 import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
@@ -29,11 +35,6 @@ import type {
   PlaygroundImageFile,
   PlaygroundSession,
 } from './types'
-import {
-  normalizePlaygroundSessionResponse,
-  normalizePlaygroundSessionsResponse,
-  type PlaygroundSessionServerItem,
-} from './lib/session/playground-session-api-utils'
 
 /**
  * Send chat completion request (non-streaming)
@@ -143,7 +144,9 @@ export async function getPlaygroundSessions(): Promise<PlaygroundSession[]> {
 export async function createPlaygroundSessionRemote(
   session?: Pick<PlaygroundSession, 'id' | 'title' | 'createdAt' | 'updatedAt'>
 ): Promise<PlaygroundSession> {
-  const res = await api.post<PlaygroundAPIResponse<PlaygroundSessionServerItem>>(
+  const res = await api.post<
+    PlaygroundAPIResponse<PlaygroundSessionServerItem>
+  >(
     API_ENDPOINTS.PLAYGROUND_SESSIONS,
     session
       ? {
@@ -187,7 +190,7 @@ export async function savePlaygroundSessionMessages(
     `${API_ENDPOINTS.PLAYGROUND_SESSIONS}/${encodeURIComponent(
       sessionId
     )}/messages`,
-    { messages },
+    { messages: sanitizePlaygroundMessagesForPersistence(messages) },
     { skipErrorHandler: true, skipBusinessError: true }
   )
   return normalizePlaygroundSessionResponse(res.data.data!)
@@ -198,7 +201,12 @@ export async function importPlaygroundSessions(
 ): Promise<PlaygroundSession[]> {
   const res = await api.post<PlaygroundAPIResponse<ServerSessionsPayload>>(
     API_ENDPOINTS.PLAYGROUND_SESSIONS_IMPORT,
-    { sessions },
+    {
+      sessions: sessions.map((session) => ({
+        ...session,
+        messages: sanitizePlaygroundMessagesForPersistence(session.messages),
+      })),
+    },
     { skipErrorHandler: true, skipBusinessError: true }
   )
   return normalizePlaygroundSessionsResponse(res.data.data?.sessions)

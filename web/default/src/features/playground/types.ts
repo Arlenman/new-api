@@ -93,13 +93,24 @@ export interface ChatCompletionMessage {
   content: string | ContentPart[]
 }
 
-export interface ContentPart {
-  type: 'text' | 'image_url'
-  text?: string
-  image_url?: {
-    url: string
-  }
-}
+export type ContentPart =
+  | {
+      type: 'text'
+      text: string
+    }
+  | {
+      type: 'image_url'
+      image_url: {
+        url: string
+      }
+    }
+  | {
+      type: 'file'
+      file: {
+        filename?: string
+        file_data: string
+      }
+    }
 
 export interface ChatCompletionRequest {
   model: string

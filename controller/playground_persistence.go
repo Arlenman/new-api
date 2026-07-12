@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -22,10 +23,11 @@ import (
 )
 
 const (
-	playgroundSessionHeader    = "X-Playground-Session-Id"
-	playgroundMessageKeyHeader = "X-Playground-Message-Key"
-	playgroundAsyncHeader      = "X-Playground-Async"
-	playgroundAsyncTimeout     = 10 * time.Minute
+	playgroundSessionHeader              = "X-Playground-Session-Id"
+	playgroundMessageKeyHeader           = "X-Playground-Message-Key"
+	playgroundAsyncHeader                = "X-Playground-Async"
+	playgroundAsyncTimeout               = 10 * time.Minute
+	maxPlaygroundPersistenceRequestBytes = 128 * 1024 * 1024
 )
 
 type playgroundImageCaptureWriter struct {
@@ -607,10 +609,28 @@ func DeletePlaygroundSessionAPI(c *gin.Context) {
 	common.ApiSuccess(c, gin.H{"deleted": true})
 }
 
+func bindPlaygroundPersistenceJSON(c *gin.Context, target any) bool {
+	if c.Request.ContentLength > maxPlaygroundPersistenceRequestBytes {
+		c.AbortWithStatus(http.StatusRequestEntityTooLarge)
+		return false
+	}
+
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxPlaygroundPersistenceRequestBytes)
+	if err := c.ShouldBindJSON(target); err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			c.AbortWithStatus(http.StatusRequestEntityTooLarge)
+			return false
+		}
+		common.ApiErrorMsg(c, "invalid request")
+		return false
+	}
+	return true
+}
+
 func SavePlaygroundSessionMessagesAPI(c *gin.Context) {
 	var req playgroundMessagesRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		common.ApiErrorMsg(c, "invalid request")
+	if !bindPlaygroundPersistenceJSON(c, &req) {
 		return
 	}
 	session, err := model.SavePlaygroundSessionMessages(c.GetInt("id"), c.Param("id"), req.Messages)
@@ -623,8 +643,7 @@ func SavePlaygroundSessionMessagesAPI(c *gin.Context) {
 
 func ImportPlaygroundSessionsAPI(c *gin.Context) {
 	var req playgroundImportRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		common.ApiErrorMsg(c, "invalid request")
+	if !bindPlaygroundPersistenceJSON(c, &req) {
 		return
 	}
 	sessions := make([]model.PlaygroundSession, 0, len(req.Sessions))

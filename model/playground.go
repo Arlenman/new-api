@@ -239,6 +239,10 @@ func SavePlaygroundSessionMessages(userID int, sessionID string, messages []JSON
 	}
 
 	err := DB.Transaction(func(tx *gorm.DB) error {
+		var lockedSession PlaygroundSession
+		if err := lockForUpdate(tx).Where("id = ? AND user_id = ?", sessionID, userID).First(&lockedSession).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("user_id = ? AND session_id = ?", userID, sessionID).Delete(&PlaygroundMessage{}).Error; err != nil {
 			return err
 		}
@@ -538,11 +542,34 @@ func ResolvePlaygroundFileForUser(userID int, fileID string) (*PlaygroundFile, s
 
 func listPlaygroundMessagePayloads(userID int, sessionID string) ([]JSONValue, error) {
 	var messages []PlaygroundMessage
-	if err := DB.Where("user_id = ? AND session_id = ?", userID, sessionID).Order("sort_order ASC").Find(&messages).Error; err != nil {
+	if err := DB.Where("user_id = ? AND session_id = ?", userID, sessionID).
+		Order("created_time DESC").
+		Order("updated_time DESC").
+		Order("id DESC").
+		Find(&messages).Error; err != nil {
 		return nil, err
 	}
-	payloads := make([]JSONValue, 0, len(messages))
+
+	deduplicated := make([]PlaygroundMessage, 0, len(messages))
+	seenMessageKeys := make(map[string]struct{}, len(messages))
 	for _, message := range messages {
+		if message.MessageKey != "" {
+			if _, exists := seenMessageKeys[message.MessageKey]; exists {
+				continue
+			}
+			seenMessageKeys[message.MessageKey] = struct{}{}
+		}
+		deduplicated = append(deduplicated, message)
+	}
+	sort.SliceStable(deduplicated, func(i, j int) bool {
+		if deduplicated[i].SortOrder == deduplicated[j].SortOrder {
+			return deduplicated[i].ID < deduplicated[j].ID
+		}
+		return deduplicated[i].SortOrder < deduplicated[j].SortOrder
+	})
+
+	payloads := make([]JSONValue, 0, len(deduplicated))
+	for _, message := range deduplicated {
 		payload, err := repairPlaygroundImagePayloadFromFiles(userID, sessionID, message)
 		if err != nil {
 			return nil, err
@@ -730,7 +757,11 @@ func repairPlaygroundImageErrorPayload(raw JSONValue) (JSONValue, bool) {
 	}
 
 	status, _ := payload["status"].(string)
+	payloadMode, _ := payload["mode"].(string)
 	imageGeneration, _ := payload["imageGeneration"].(map[string]any)
+	if payloadMode != "image" && imageGeneration == nil {
+		return raw, false
+	}
 	imageStatus, _ := imageGeneration["status"].(string)
 	content := playgroundPayloadFirstVersionContent(payload)
 	if status != "error" && imageStatus != "error" && !strings.Contains(content, "Request error occurred") {
@@ -802,11 +833,14 @@ func normalizePlaygroundMessagePayload(userID int, sessionID string, raw JSONVal
 	if message.Mode == "" {
 		message.Mode = "chat"
 	}
+
+	var payloadMap map[string]any
+	if err := json.Unmarshal(raw, &payloadMap); err != nil {
+		return message, nil, err
+	}
+	changed := sanitizePlaygroundAttachmentDataURLs(payloadMap)
+
 	if len(message.Versions) > 0 {
-		var payloadMap map[string]any
-		if err := json.Unmarshal(raw, &payloadMap); err != nil {
-			return message, nil, err
-		}
 		rawVersions, ok := payloadMap["versions"].([]any)
 		if ok {
 			for idx := range rawVersions {
@@ -822,19 +856,47 @@ func normalizePlaygroundMessagePayload(userID int, sessionID string, raw JSONVal
 				if err != nil {
 					return message, nil, err
 				}
+				if rewritten != content {
+					changed = true
+				}
 				version["content"] = rewritten
 				if idx < len(message.Versions) {
 					message.Versions[idx].Content = rewritten
 				}
 			}
-			normalized, err := json.Marshal(payloadMap)
-			if err != nil {
-				return message, nil, err
-			}
-			return message, JSONValue(normalized), nil
 		}
 	}
-	return message, raw, nil
+
+	if !changed {
+		return message, raw, nil
+	}
+	normalized, err := json.Marshal(payloadMap)
+	if err != nil {
+		return message, nil, err
+	}
+	return message, JSONValue(normalized), nil
+}
+
+func sanitizePlaygroundAttachmentDataURLs(payload map[string]any) bool {
+	attachments, ok := payload["attachments"].([]any)
+	if !ok {
+		return false
+	}
+
+	changed := false
+	for _, rawAttachment := range attachments {
+		attachment, ok := rawAttachment.(map[string]any)
+		if !ok {
+			continue
+		}
+		url, _ := attachment["url"].(string)
+		if !strings.HasPrefix(strings.ToLower(url), "data:") {
+			continue
+		}
+		delete(attachment, "url")
+		changed = true
+	}
+	return changed
 }
 
 func rewriteInlineBase64Images(userID int, sessionID string, messageKey string, content string) (string, error) {

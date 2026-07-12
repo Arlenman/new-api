@@ -25,6 +25,7 @@ import type {
   Message,
   PlaygroundSession,
 } from '../../types'
+import { sanitizePlaygroundMessagesForPersistence } from '../attachment/playground-attachment-persistence'
 import { normalizeImageGenerationRetryableMessage } from '../message/image-generation-error-utils'
 import {
   finalizeMessage,
@@ -394,7 +395,8 @@ export function loadMessages(): Message[] | null {
 export function saveMessages(messages: Message[]): void {
   try {
     const trimmed = trimMessages(messages)
-    const parsed = messagesSchema.parse(trimmed) as Message[]
+    const persisted = sanitizePlaygroundMessagesForPersistence(trimmed)
+    const parsed = messagesSchema.parse(persisted) as Message[]
     writeStoredValue(STORAGE_KEYS.MESSAGES, parsed)
   } catch (error) {
     // eslint-disable-next-line no-console
@@ -438,7 +440,9 @@ export function saveSessions(sessions: PlaygroundSession[]): void {
     const parsed = playgroundSessionsSchema.parse(
       sessions.map((session) => ({
         ...session,
-        messages: trimMessages(session.messages),
+        messages: sanitizePlaygroundMessagesForPersistence(
+          trimMessages(session.messages)
+        ),
       }))
     ) as PlaygroundSession[]
 

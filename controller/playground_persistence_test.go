@@ -241,3 +241,64 @@ func TestSavePlaygroundSessionMessagesAPIImportsInlineBase64(t *testing.T) {
 	require.Len(t, files, 1)
 	require.False(t, strings.Contains(string(payload.Data), files[0].StoragePath))
 }
+
+func TestSavePlaygroundSessionMessagesAPIRemovesAttachmentDataURL(t *testing.T) {
+	setupPlaygroundControllerTest(t)
+
+	_, err := model.UpsertPlaygroundSession(1, "session-pdf", "PDF session", 1000, 1000)
+	require.NoError(t, err)
+
+	body := map[string]any{
+		"messages": []map[string]any{
+			{
+				"key":  "user-pdf",
+				"from": "user",
+				"mode": "chat",
+				"versions": []map[string]any{
+					{"id": "v1", "content": "分析扫描件"},
+				},
+				"attachments": []map[string]any{
+					{
+						"url":              "data:application/pdf;base64,c2Nhbm5lZA==",
+						"mediaType":        "application/pdf",
+						"filename":         "scanned.pdf",
+						"size":             12,
+						"extractionStatus": "empty",
+					},
+				},
+			},
+		},
+	}
+
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/playground/sessions/session-pdf/messages", body, 1)
+	ctx.Params = gin.Params{{Key: "id", Value: "session-pdf"}}
+
+	SavePlaygroundSessionMessagesAPI(ctx)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var payload playgroundAPIResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.True(t, payload.Success, payload.Message)
+	require.NotContains(t, string(payload.Data), "data:application/pdf;base64")
+	require.Contains(t, string(payload.Data), "scanned.pdf")
+
+	var stored model.PlaygroundMessage
+	require.NoError(t, model.DB.Where("user_id = ? AND session_id = ?", 1, "session-pdf").First(&stored).Error)
+	require.NotContains(t, string(stored.Payload), "data:application/pdf;base64")
+	require.Contains(t, string(stored.Payload), "scanned.pdf")
+}
+
+func TestSavePlaygroundSessionMessagesAPIRejectsOversizedRequest(t *testing.T) {
+	setupPlaygroundControllerTest(t)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Set("id", 1)
+	ctx.Params = gin.Params{{Key: "id", Value: "session-large"}}
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/api/playground/sessions/session-large/messages", strings.NewReader(`{"messages":[]}`))
+	ctx.Request.ContentLength = maxPlaygroundPersistenceRequestBytes + 1
+
+	SavePlaygroundSessionMessagesAPI(ctx)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, recorder.Code)
+}

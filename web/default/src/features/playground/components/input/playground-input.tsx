@@ -30,10 +30,12 @@ import {
   type PromptInputMessage,
 } from '@/components/ai-elements/prompt-input'
 
+import { MAX_PLAYGROUND_ATTACHMENT_FILE_SIZE_BYTES } from '../../constants'
 import { getSubmittableInputText } from '../../lib'
 import {
   extractPlaygroundAttachmentText,
   isImageAttachment,
+  isPdfAttachment,
   stripTransientAttachmentFields,
 } from '../../lib/attachment/playground-attachment-text'
 import { getAttachmentOnlySubmitText } from '../../lib/image/playground-image-utils'
@@ -112,7 +114,10 @@ export function PlaygroundInput({
       }
 
       const parsedFile = await extractPlaygroundAttachmentText(file)
-      if (parsedFile.extractionStatus !== 'complete') {
+      if (
+        parsedFile.extractionStatus !== 'complete' &&
+        !isPdfAttachment(parsedFile)
+      ) {
         const filename = parsedFile.filename || t('Attachment')
         const error = parsedFile.error || t('Failed to read attachment')
         toast.error(t('Attachment cannot be sent'), {
@@ -157,6 +162,8 @@ export function PlaygroundInput({
         className='relative'
         groupClassName='bg-background/95 dark:bg-background/80 border-border/70 shadow-[0_18px_60px_-32px_rgba(0,0,0,0.65)] ring-1 ring-foreground/5 rounded-xl overflow-hidden transition-all duration-200 focus-within:border-primary/45 focus-within:ring-primary/15 focus-within:shadow-[0_22px_70px_-34px_rgba(0,0,0,0.75)]'
         multiple
+        maxFileSize={MAX_PLAYGROUND_ATTACHMENT_FILE_SIZE_BYTES}
+        onError={({ message }) => toast.error(message)}
         onSubmit={handleSubmit}
       >
         <PromptInputTextarea

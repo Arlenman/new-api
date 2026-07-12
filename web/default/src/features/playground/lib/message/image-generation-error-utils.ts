@@ -101,16 +101,13 @@ export function isRecoverableImageGenerationErrorMessage(
   const hasImageState =
     message.mode === 'image' || message.imageGeneration != null
 
-  if (hasImageState) {
-    return (
-      message.status === MESSAGE_STATUS.ERROR ||
-      message.imageGeneration?.status === 'error' ||
-      hasRecoverableImageErrorContent(content)
-    )
+  if (!hasImageState) {
+    return false
   }
 
   return (
-    message.status === MESSAGE_STATUS.ERROR &&
+    message.status === MESSAGE_STATUS.ERROR ||
+    message.imageGeneration?.status === 'error' ||
     hasRecoverableImageErrorContent(content)
   )
 }

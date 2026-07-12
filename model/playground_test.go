@@ -84,6 +84,46 @@ func TestPlaygroundSessionListIsScopedToUserAndOrdered(t *testing.T) {
 	require.Equal(t, "older", sessions[1].ID)
 }
 
+func TestListPlaygroundSessionsDeduplicatesConcurrentMessageSnapshots(t *testing.T) {
+	setupPlaygroundModelTest(t)
+
+	session, err := UpsertPlaygroundSession(1, "duplicate-snapshot", "Duplicate snapshot", 1000, 2000)
+	require.NoError(t, err)
+
+	records := []PlaygroundMessage{
+		{
+			UserID:      1,
+			SessionID:   session.ID,
+			MessageKey:  "assistant-pdf",
+			Role:        "assistant",
+			Mode:        "image",
+			SortOrder:   1,
+			Payload:     JSONValue(`{"key":"assistant-pdf","from":"assistant","mode":"image","status":"complete","imageGeneration":{"status":"retryable"},"versions":[{"id":"old","content":"图片生成未完成，可以点击重新生成。"}]}`),
+			CreatedTime: 1000,
+			UpdatedTime: 1000,
+		},
+		{
+			UserID:      1,
+			SessionID:   session.ID,
+			MessageKey:  "assistant-pdf",
+			Role:        "assistant",
+			Mode:        "chat",
+			SortOrder:   1,
+			Payload:     JSONValue(`{"key":"assistant-pdf","from":"assistant","mode":"chat","status":"complete","versions":[{"id":"new","content":"PDF summary"}]}`),
+			CreatedTime: 2000,
+			UpdatedTime: 2000,
+		},
+	}
+	require.NoError(t, DB.Create(&records).Error)
+
+	sessions, err := ListPlaygroundSessions(1)
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	require.Len(t, sessions[0].Messages, 1)
+	require.Contains(t, string(sessions[0].Messages[0]), "PDF summary")
+	require.NotContains(t, string(sessions[0].Messages[0]), playgroundImageRetryText)
+}
+
 func TestSoftDeletePlaygroundSessionRemovesFileAccess(t *testing.T) {
 	setupPlaygroundModelTest(t)
 
@@ -323,6 +363,34 @@ func TestSavePlaygroundSessionMessagesRepairsLegacyImageMessageWithoutMode(t *te
 	require.Contains(t, string(persisted.Payload), PlaygroundFileURL(file.ID))
 }
 
+func TestSavePlaygroundSessionMessagesKeepsChatRequestErrorsInChatMode(t *testing.T) {
+	setupPlaygroundModelTest(t)
+
+	session, err := UpsertPlaygroundSession(1, "pdf-chat-error", "PDF chat error", 1000, 1000)
+	require.NoError(t, err)
+
+	messages := []JSONValue{
+		JSONValue(`{"key":"user-pdf","from":"user","mode":"chat","attachments":[{"filename":"book.pdf","mediaType":"application/pdf","extractionStatus":"empty"}],"versions":[{"id":"v1","content":"这本电子书主要讲什么内容？"}]}`),
+		JSONValue(`{"key":"assistant-pdf","from":"assistant","mode":"chat","status":"error","versions":[{"id":"v2","content":"Request error occurred: PDF could not be processed"}]}`),
+	}
+
+	saved, err := SavePlaygroundSessionMessages(1, session.ID, messages)
+	require.NoError(t, err)
+	require.Len(t, saved.Messages, 2)
+
+	var assistant map[string]any
+	require.NoError(t, json.Unmarshal(saved.Messages[1], &assistant))
+	require.Equal(t, "chat", assistant["mode"])
+	require.Equal(t, "error", assistant["status"])
+	require.Nil(t, assistant["imageGeneration"])
+	require.Contains(t, string(saved.Messages[1]), "PDF could not be processed")
+	require.NotContains(t, string(saved.Messages[1]), playgroundImageRetryText)
+
+	var persisted PlaygroundMessage
+	require.NoError(t, DB.Where("message_key = ?", "assistant-pdf").First(&persisted).Error)
+	require.Equal(t, "chat", persisted.Mode)
+}
+
 func TestListPlaygroundSessionsConvertsImageGatewayTimeoutToRetryableMessage(t *testing.T) {
 	setupPlaygroundModelTest(t)
 
@@ -358,7 +426,7 @@ func TestListPlaygroundSessionsConvertsImageGatewayTimeoutToRetryableMessage(t *
 	requireImageGenerationMetadata(t, repaired, "image-assistant-timeout", "retryable")
 }
 
-func TestListPlaygroundSessionsConvertsLegacyGatewayTimeoutWithoutMode(t *testing.T) {
+func TestListPlaygroundSessionsKeepsLegacyChatGatewayTimeoutInChatMode(t *testing.T) {
 	setupPlaygroundModelTest(t)
 
 	session, err := UpsertPlaygroundSession(1, "legacy-timeout", "Legacy timeout", 1000, 1000)
@@ -369,9 +437,10 @@ func TestListPlaygroundSessionsConvertsLegacyGatewayTimeoutWithoutMode(t *testin
 		SessionID:  session.ID,
 		MessageKey: "assistant-legacy-timeout",
 		Role:       "assistant",
+		Mode:       "chat",
 		SortOrder:  0,
 		Payload: JSONValue(
-			`{"key":"assistant-legacy-timeout","from":"assistant","status":"error","versions":[{"id":"v1","content":"Request error occurred: Request failed with status code 524"}]}`,
+			`{"key":"assistant-legacy-timeout","from":"assistant","mode":"chat","status":"error","versions":[{"id":"v1","content":"Request error occurred: Request failed with status code 524"}]}`,
 		),
 	}).Error
 	require.NoError(t, err)
@@ -381,19 +450,17 @@ func TestListPlaygroundSessionsConvertsLegacyGatewayTimeoutWithoutMode(t *testin
 	require.Len(t, sessions, 1)
 	require.Len(t, sessions[0].Messages, 1)
 
-	var repaired map[string]any
-	require.NoError(t, json.Unmarshal(sessions[0].Messages[0], &repaired))
-	require.Equal(t, "complete", repaired["status"])
-	require.Equal(t, "image", repaired["mode"])
-	require.NotContains(t, string(sessions[0].Messages[0]), "Request error occurred")
-	require.NotContains(t, string(sessions[0].Messages[0]), "status code 524")
-	require.Contains(t, string(sessions[0].Messages[0]), playgroundImageRetryText)
-	require.Contains(t, string(sessions[0].Messages[0]), `"status":"retryable"`)
-	requireImageGenerationMetadata(t, repaired, "image-assistant-legacy-timeout", "retryable")
+	var loaded map[string]any
+	require.NoError(t, json.Unmarshal(sessions[0].Messages[0], &loaded))
+	require.Equal(t, "error", loaded["status"])
+	require.Equal(t, "chat", loaded["mode"])
+	require.Nil(t, loaded["imageGeneration"])
+	require.Contains(t, string(sessions[0].Messages[0]), "status code 524")
+	require.NotContains(t, string(sessions[0].Messages[0]), playgroundImageRetryText)
 
 	var persisted PlaygroundMessage
 	require.NoError(t, DB.Where("message_key = ?", "assistant-legacy-timeout").First(&persisted).Error)
-	require.Equal(t, "image", persisted.Mode)
+	require.Equal(t, "chat", persisted.Mode)
 }
 
 func TestFailPlaygroundImageMessageStoresRetryableMessage(t *testing.T) {

@@ -29,6 +29,7 @@ import type {
 import {
   buildAttachmentContextText,
   hasExtractedAttachmentText,
+  isPdfAttachment,
 } from '../attachment/playground-attachment-text.ts'
 
 /**
@@ -72,6 +73,22 @@ function getAttachmentImageUrls(
         Boolean(attachment.mediaType?.startsWith('image/'))
     )
     .map((attachment) => attachment.url?.trim() ?? '')
+}
+
+function getAttachmentFileParts(
+  attachments: PlaygroundImageFile[] = []
+): Extract<ContentPart, { type: 'file' }>[] {
+  return attachments
+    .filter(
+      (attachment) => isPdfAttachment(attachment) && attachment.url?.trim()
+    )
+    .map((attachment) => ({
+      type: 'file' as const,
+      file: {
+        filename: attachment.filename,
+        file_data: attachment.url?.trim() ?? '',
+      },
+    }))
 }
 
 function getMessageTextWithAttachmentContext(
@@ -145,11 +162,12 @@ export function createLoadingAssistantMessage(
  */
 export function buildMessageContent(
   text: string,
-  imageUrls: string[] = []
+  imageUrls: string[] = [],
+  fileParts: Extract<ContentPart, { type: 'file' }>[] = []
 ): string | ContentPart[] {
   const validImages = imageUrls.filter((url) => url.trim() !== '')
 
-  if (validImages.length === 0) {
+  if (validImages.length === 0 && fileParts.length === 0) {
     return text
   }
 
@@ -162,6 +180,7 @@ export function buildMessageContent(
       type: 'image_url' as const,
       image_url: { url: url.trim() },
     })),
+    ...fileParts,
   ]
 
   return parts
@@ -189,6 +208,7 @@ export function getTextContent(content: string | ContentPart[]): string {
 export function formatMessageForAPI(message: Message): ChatCompletionMessage {
   const currentVersion = getCurrentVersion(message)
   const imageUrls = getAttachmentImageUrls(message.attachments)
+  const fileParts = getAttachmentFileParts(message.attachments)
   const text = getMessageTextWithAttachmentContext(
     currentVersion.content,
     message.attachments
@@ -196,7 +216,7 @@ export function formatMessageForAPI(message: Message): ChatCompletionMessage {
 
   return {
     role: message.from,
-    content: buildMessageContent(text, imageUrls),
+    content: buildMessageContent(text, imageUrls, fileParts),
   }
 }
 
@@ -216,6 +236,7 @@ export function isValidMessage(message: Message): boolean {
     return (
       hasMessageContent(message) ||
       getAttachmentImageUrls(message.attachments).length > 0 ||
+      getAttachmentFileParts(message.attachments).length > 0 ||
       Boolean(message.attachments?.some(hasExtractedAttachmentText))
     )
   }

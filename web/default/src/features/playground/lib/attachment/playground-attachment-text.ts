@@ -89,6 +89,13 @@ export function isImageAttachment(attachment: PlaygroundImageFile): boolean {
   return Boolean(attachment.mediaType?.toLowerCase().startsWith('image/'))
 }
 
+export function isPdfAttachment(attachment: PlaygroundImageFile): boolean {
+  return (
+    attachment.mediaType?.toLowerCase() === 'application/pdf' ||
+    getFileExtension(attachment.filename) === 'pdf'
+  )
+}
+
 function decodeBase64(value: string): Uint8Array {
   if (typeof atob === 'function') {
     const binary = atob(value)

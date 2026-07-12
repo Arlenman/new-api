@@ -74,6 +74,8 @@ export const DEFAULT_PARAMETER_ENABLED: ParameterEnabled = {
 }
 
 // Storage keys
+export const MAX_PLAYGROUND_ATTACHMENT_FILE_SIZE_BYTES = 50 * 1024 * 1024
+
 export const STORAGE_KEYS = {
   CONFIG: 'playground_config',
   MESSAGES: 'playground_messages',
@@ -85,8 +87,7 @@ export const STORAGE_KEYS = {
 // Error messages
 export const ERROR_MESSAGES = {
   API_REQUEST_ERROR: 'Request error occurred',
-  IMAGE_GENERATION_RETRYABLE:
-    'Image generation did not finish. You can retry.',
+  IMAGE_GENERATION_RETRYABLE: 'Image generation did not finish. You can retry.',
   NETWORK_ERROR: 'Network connection failed or server not responding',
   PARSE_ERROR: 'Error parsing response data',
   STREAM_START_ERROR: 'Error establishing connection',
