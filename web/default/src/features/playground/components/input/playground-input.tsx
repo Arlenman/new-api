@@ -42,12 +42,15 @@ import type {
   GroupOption,
   PlaygroundImageFile,
   PlaygroundSubmitPayload,
+  ParameterEnabled,
+  PlaygroundConfig,
 } from '../../types'
 import { PlaygroundInputControls } from './playground-input-controls'
 import { PlaygroundInputTools } from './playground-input-tools'
 
 interface PlaygroundInputProps {
   onSubmit: (payload: PlaygroundSubmitPayload) => void
+  config: PlaygroundConfig
   onStop?: () => void
   disabled?: boolean
   isGenerating?: boolean
@@ -61,10 +64,20 @@ interface PlaygroundInputProps {
   imageSizeValue: string
   onImageSizeChange: (value: string) => void
   hasMessages?: boolean
+  onConfigChange: <K extends keyof PlaygroundConfig>(
+    key: K,
+    value: PlaygroundConfig[K]
+  ) => void
   onClearMessages?: () => void
+  onParameterEnabledChange: (
+    key: keyof ParameterEnabled,
+    value: boolean
+  ) => void
+  parameterEnabled: ParameterEnabled
 }
 
 export function PlaygroundInput({
+  config,
   onSubmit,
   onStop,
   disabled,
@@ -79,7 +92,10 @@ export function PlaygroundInput({
   imageSizeValue,
   onImageSizeChange,
   hasMessages = false,
+  onConfigChange,
   onClearMessages,
+  onParameterEnabledChange,
+  parameterEnabled,
 }: PlaygroundInputProps) {
   const { t } = useTranslation()
   const [text, setText] = useState('')
@@ -178,9 +194,13 @@ export function PlaygroundInput({
             text={text}
             tools={
               <PlaygroundInputTools
+                config={config}
                 disabled={disabled}
                 hasMessages={hasMessages}
+                onConfigChange={onConfigChange}
                 onClearMessages={onClearMessages}
+                onParameterEnabledChange={onParameterEnabledChange}
+                parameterEnabled={parameterEnabled}
               />
             }
           />

@@ -8,7 +8,9 @@ upload
 build
 *.db-journal
 logs
-logs-next
+logs-next/
+logs-rc16/
+logs-rc16-migrate/
 web/default/dist
 web/classic/dist
 web/node_modules

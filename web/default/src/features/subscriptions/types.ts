@@ -125,6 +125,23 @@ export interface UpdateUserSubscriptionRequest {
   quota_value: number
 }
 
+export interface ResetUserSubscriptionsRequest {
+  plan_id: number
+  advance_reset_time: boolean
+}
+
+export interface ResetPlanSubscriptionsRequest {
+  advance_reset_time: boolean
+}
+
+export interface SubscriptionResetResult {
+  plan_id: number
+  matched_count: number
+  reset_count: number
+  user_count: number
+  advance_reset_time: boolean
+}
+
 // ============================================================================
 // Self Subscription Data (user-facing)
 // ============================================================================
@@ -139,4 +156,8 @@ export interface SelfSubscriptionData {
 // Dialog Types
 // ============================================================================
 
-export type SubscriptionsDialogType = 'create' | 'update' | 'toggle-status'
+export type SubscriptionsDialogType =
+  | 'create'
+  | 'update'
+  | 'toggle-status'
+  | 'reset-subscriptions'
