@@ -5222,6 +5222,16 @@
     "Zero retention": "Без хранения данных",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Include Tags": "Включить теги",
+    "Exclude Tags": "Исключить теги",
+    "Do not exclude tags": "Не исключать теги",
+    "List": "Список",
+    "Ranking Metric": "Показатель рейтинга",
+    "Cost Consumption": "Расход квоты",
+    "Token Count": "Количество токенов",
+    "Unknown Model": "Неизвестная модель",
+    "{{count}} tags selected": "Выбрано тегов: {{count}}",
+    "Current model value": "Значение текущей модели"
   }
 }

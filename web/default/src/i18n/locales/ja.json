@@ -5222,6 +5222,16 @@
     "Zero retention": "データ保持なし",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V 4",
-    "Zoom": "ズーム"
+    "Zoom": "ズーム",
+    "Include Tags": "含めるタグ",
+    "Exclude Tags": "除外するタグ",
+    "Do not exclude tags": "タグを除外しない",
+    "List": "リスト",
+    "Ranking Metric": "ランキング指標",
+    "Cost Consumption": "クォータ消費量",
+    "Token Count": "トークン数",
+    "Unknown Model": "不明なモデル",
+    "{{count}} tags selected": "{{count}} 個のタグを選択中",
+    "Current model value": "現在のモデル値"
   }
 }

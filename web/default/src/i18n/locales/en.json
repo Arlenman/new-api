@@ -5275,6 +5275,16 @@
     "Zhipu V4": "Zhipu V4",
     "Zoom": "Zoom",
     "Zoom in": "Zoom in",
-    "Zoom out": "Zoom out"
+    "Zoom out": "Zoom out",
+    "Include Tags": "Include Tags",
+    "Exclude Tags": "Exclude Tags",
+    "Do not exclude tags": "Do not exclude tags",
+    "List": "List",
+    "Ranking Metric": "Ranking Metric",
+    "Cost Consumption": "Cost Consumption",
+    "Token Count": "Token Count",
+    "Unknown Model": "Unknown Model",
+    "{{count}} tags selected": "{{count}} tags selected",
+    "Current model value": "Current model value"
   }
 }

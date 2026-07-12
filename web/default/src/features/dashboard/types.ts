@@ -55,10 +55,17 @@ export interface TokenTagQuotaDataItem {
   username?: string
   token_id: number
   token_name?: string
+  model_name?: string
   token_used?: number
   count?: number
   quota?: number
   last_used_at?: number
+}
+
+export interface TokenTagQuotaSummary {
+  quota: number
+  token_used: number
+  count: number
 }
 
 export interface TokenTagOptionItem {

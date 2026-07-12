@@ -16,19 +16,31 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useTranslation } from 'react-i18next'
 import {
-  getTokenTagOptions,
-  getTokenTagQuotaDates,
-} from '@/features/dashboard/api'
-import type { TokenTagQuotaDataItem } from '@/features/dashboard/types'
-import { formatNumber, formatQuota } from '@/lib/format'
-import { useIsAdmin } from '@/hooks/use-admin'
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  BarChart3,
+  List,
+  RotateCcw,
+  Search,
+} from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+
+import { SectionPageLayout } from '@/components/layout'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import {
   Table,
   TableBody,
@@ -38,44 +50,51 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { SectionPageLayout } from '@/components/layout'
+  getTokenTagOptions,
+  getTokenTagQuotaDates,
+} from '@/features/dashboard/api'
+import type {
+  TokenTagQuotaDataItem,
+  TokenTagQuotaSummary,
+} from '@/features/dashboard/types'
 import { CompactDateTimeRangePicker } from '@/features/usage-logs/components/compact-date-time-range-picker'
+import { useIsAdmin } from '@/hooks/use-admin'
+import { getChartColor } from '@/lib/colors'
+import { formatNumber, formatQuota } from '@/lib/format'
+
+import { RankingChart } from './components/ranking-chart'
 import {
+  TagMultiSelect,
+  type TagMultiSelectOption,
+} from './components/tag-multi-select'
+import {
+  NO_TAG_FILTER_VALUE,
   TOKEN_TAGS_CONTENT_CLASS,
   TOKEN_TAGS_FIXED_CONTENT,
+  buildKeyRankingChartData,
+  buildTagRankingChartData,
+  buildTokenKeyRows,
   buildTokenTagOptionNames,
+  buildTokenTagSearchParams,
   formatTokenTagLastUsedAt,
+  getTodayRange,
   groupTokenTagRows,
   sortTokenTagRows,
+  type TokenTagRankingMetric,
   type TokenTagSortKey,
   type TokenTagSortState,
 } from './lib'
-import { ArrowDown, ArrowUp, ArrowUpDown, RotateCcw, Search } from 'lucide-react'
 
-const ALL_TAGS_VALUE = '__all__'
+type ViewMode = 'table' | 'chart'
 
-function getDefaultRange() {
-  const end = new Date()
-  const start = new Date(end.getTime() - 30 * 24 * 3600 * 1000)
-  return { start, end }
+const EMPTY_SUMMARY: TokenTagQuotaSummary = {
+  quota: 0,
+  token_used: 0,
+  count: 0,
 }
 
 function toSeconds(date: Date) {
   return Math.floor(date.getTime() / 1000)
-}
-
-function sumRows(
-  rows: TokenTagQuotaDataItem[],
-  key: keyof Pick<TokenTagQuotaDataItem, 'quota' | 'token_used' | 'count'>
-) {
-  return rows.reduce((total, row) => total + (row[key] || 0), 0)
 }
 
 function getErrorMessage(error: unknown) {
@@ -112,7 +131,10 @@ function SortableHead({
   className?: string
 }) {
   const active = sort.key === sortKey
-  const Icon = active ? (sort.direction === 'desc' ? ArrowDown : ArrowUp) : ArrowUpDown
+  let Icon = ArrowUpDown
+  if (active) {
+    Icon = sort.direction === 'desc' ? ArrowDown : ArrowUp
+  }
   return (
     <TableHead className={className}>
       <Button
@@ -132,18 +154,24 @@ function SortableHead({
 export function TokenTagsDashboard() {
   const { t } = useTranslation()
   const isAdmin = useIsAdmin()
-  const defaultRange = useMemo(() => getDefaultRange(), [])
+  const defaultRange = useMemo(() => getTodayRange(), [])
   const [startTime, setStartTime] = useState(defaultRange.start)
   const [endTime, setEndTime] = useState(defaultRange.end)
   const [usernameDraft, setUsernameDraft] = useState('')
-  const [tokenTagDraft, setTokenTagDraft] = useState('')
+  const [includedTagsDraft, setIncludedTagsDraft] = useState<string[]>([])
+  const [excludedTagsDraft, setExcludedTagsDraft] = useState<string[]>([])
   const [appliedFilters, setAppliedFilters] = useState({
     startTime: defaultRange.start,
     endTime: defaultRange.end,
     username: '',
-    tokenTag: '',
+    includedTags: [] as string[],
+    excludedTags: [] as string[],
   })
   const [stableRows, setStableRows] = useState<TokenTagQuotaDataItem[]>([])
+  const [stableSummary, setStableSummary] =
+    useState<TokenTagQuotaSummary>(EMPTY_SUMMARY)
+  const [viewMode, setViewMode] = useState<ViewMode>('table')
+  const [metric, setMetric] = useState<TokenTagRankingMetric>('quota')
   const [tagSort, setTagSort] = useState<TokenTagSortState>({
     key: 'quota',
     direction: 'desc',
@@ -159,21 +187,22 @@ export function TokenTagsDashboard() {
       appliedFilters.startTime.getTime(),
       appliedFilters.endTime.getTime(),
       appliedFilters.username,
-      appliedFilters.tokenTag,
+      appliedFilters.includedTags,
+      appliedFilters.excludedTags,
       isAdmin,
     ],
     queryFn: () =>
       getTokenTagQuotaDates(
-        {
-          start_timestamp: toSeconds(appliedFilters.startTime),
-          end_timestamp: toSeconds(appliedFilters.endTime),
-          ...(isAdmin && appliedFilters.username
-            ? { username: appliedFilters.username }
-            : {}),
-          ...(appliedFilters.tokenTag
-            ? { token_tag: appliedFilters.tokenTag }
-            : {}),
-        },
+        buildTokenTagSearchParams({
+          startTimestamp: toSeconds(appliedFilters.startTime),
+          endTimestamp: toSeconds(appliedFilters.endTime),
+          username:
+            isAdmin && appliedFilters.username
+              ? appliedFilters.username
+              : undefined,
+          includedTags: appliedFilters.includedTags,
+          excludedTags: appliedFilters.excludedTags,
+        }),
         isAdmin
       ),
   })
@@ -182,42 +211,84 @@ export function TokenTagsDashboard() {
   const tagOptionsQuery = useQuery({
     queryKey: ['token-tag-options', isAdmin, optionUsername],
     queryFn: () =>
-      getTokenTagOptions(isAdmin && optionUsername ? { username: optionUsername } : {}),
+      getTokenTagOptions(
+        isAdmin && optionUsername ? { username: optionUsername } : {}
+      ),
     staleTime: 60_000,
   })
 
   useEffect(() => {
     if (query.data?.success) {
       setStableRows(query.data.data || [])
+      setStableSummary(query.data.summary || EMPTY_SUMMARY)
     }
   }, [query.data])
 
   const rows = stableRows
-  const totalQuota = sumRows(rows, 'quota')
-  const totalTokens = sumRows(rows, 'token_used')
-  const totalRequests = sumRows(rows, 'count')
-
-  const tagOptions = useMemo(() => {
-    return buildTokenTagOptionNames(
+  const optionRows = useMemo(() => {
+    if (!isAdmin || !optionUsername) {
+      return rows
+    }
+    return rows.filter((row) => row.username === optionUsername)
+  }, [isAdmin, optionUsername, rows])
+  const tagOptions = useMemo<TagMultiSelectOption[]>(() => {
+    const names = buildTokenTagOptionNames(
       tagOptionsQuery.data?.data,
-      rows,
-      tokenTagDraft
+      optionRows,
+      [...includedTagsDraft, ...excludedTagsDraft].filter(
+        (tag) => tag !== NO_TAG_FILTER_VALUE
+      )
     )
-  }, [tagOptionsQuery.data?.data, rows, tokenTagDraft])
+    return [
+      { value: NO_TAG_FILTER_VALUE, label: t('No tags') },
+      ...names.map((name) => ({ value: name, label: name })),
+    ]
+  }, [
+    excludedTagsDraft,
+    includedTagsDraft,
+    optionRows,
+    tagOptionsQuery.data?.data,
+    t,
+  ])
+  const groupedRows = useMemo(
+    () => sortTokenTagRows(groupTokenTagRows(rows), tagSort),
+    [rows, tagSort]
+  )
+  const keyRows = useMemo(() => buildTokenKeyRows(rows), [rows])
+  const sortedKeyRows = useMemo(
+    () => sortTokenTagRows(keyRows, keySort),
+    [keyRows, keySort]
+  )
 
-  const groupedRows = useMemo(() => {
-    return sortTokenTagRows(groupTokenTagRows(rows), tagSort)
-  }, [rows, tagSort])
+  const chartOptions = useMemo(
+    () => ({
+      isAdmin,
+      noTagLabel: t('No tags'),
+      unknownModelLabel: t('Unknown Model'),
+    }),
+    [isAdmin, t]
+  )
+  const tagChart = useMemo(
+    () => buildTagRankingChartData(rows, metric, chartOptions),
+    [chartOptions, metric, rows]
+  )
+  const keyChart = useMemo(
+    () => buildKeyRankingChartData(rows, metric, chartOptions),
+    [chartOptions, metric, rows]
+  )
+  const modelColorMap = useMemo(() => {
+    const models = [...new Set([...tagChart.models, ...keyChart.models])].sort(
+      (a, b) => a.localeCompare(b)
+    )
+    return new Map(models.map((model, index) => [model, getChartColor(index)]))
+  }, [keyChart.models, tagChart.models])
 
-  const sortedRows = useMemo(() => {
-    return sortTokenTagRows(rows, keySort)
-  }, [rows, keySort])
-
-  const queryErrorMessage = query.isError
-    ? getErrorMessage(query.error) || t('Failed to load data')
-    : query.data && !query.data.success
-      ? query.data.message || t('Failed to load data')
-      : ''
+  let queryErrorMessage = ''
+  if (query.isError) {
+    queryErrorMessage = getErrorMessage(query.error) || t('Failed to load data')
+  } else if (query.data && !query.data.success) {
+    queryErrorMessage = query.data.message || t('Failed to load data')
+  }
   const isInitialLoading = query.isLoading && rows.length === 0
 
   const handleApply = () => {
@@ -225,27 +296,32 @@ export function TokenTagsDashboard() {
       startTime,
       endTime,
       username: isAdmin ? usernameDraft.trim() : '',
-      tokenTag: tokenTagDraft,
+      includedTags: [...includedTagsDraft].sort((a, b) => a.localeCompare(b)),
+      excludedTags: [...excludedTagsDraft].sort((a, b) => a.localeCompare(b)),
     })
   }
 
   const handleReset = () => {
-    const range = getDefaultRange()
+    const range = getTodayRange()
     setStartTime(range.start)
     setEndTime(range.end)
     setUsernameDraft('')
-    setTokenTagDraft('')
+    setIncludedTagsDraft([])
+    setExcludedTagsDraft([])
     setAppliedFilters({
       startTime: range.start,
       endTime: range.end,
       username: '',
-      tokenTag: '',
+      includedTags: [],
+      excludedTags: [],
     })
   }
 
   return (
     <SectionPageLayout fixedContent={TOKEN_TAGS_FIXED_CONTENT}>
-      <SectionPageLayout.Title>{t('Key Tag Analytics')}</SectionPageLayout.Title>
+      <SectionPageLayout.Title>
+        {t('Key Tag Analytics')}
+      </SectionPageLayout.Title>
       <SectionPageLayout.Content>
         <div className={TOKEN_TAGS_CONTENT_CLASS}>
           <div className='flex flex-wrap items-center gap-2'>
@@ -260,43 +336,30 @@ export function TokenTagsDashboard() {
               />
             </div>
             {isAdmin && (
-              <>
-                <Input
-                  className='w-48'
-                  value={usernameDraft}
-                  onChange={(event) => setUsernameDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') handleApply()
-                  }}
-                  placeholder={t('Username')}
-                />
-              </>
+              <Input
+                className='w-48'
+                value={usernameDraft}
+                onChange={(event) => setUsernameDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') handleApply()
+                }}
+                placeholder={t('Username')}
+              />
             )}
-            <Select
-              value={tokenTagDraft || ALL_TAGS_VALUE}
-              onValueChange={(value) =>
-                setTokenTagDraft(!value || value === ALL_TAGS_VALUE ? '' : value)
-              }
-            >
-              <SelectTrigger className='w-48'>
-                <SelectValue>{tokenTagDraft || t('All Tags')}</SelectValue>
-              </SelectTrigger>
-              <SelectContent alignItemWithTrigger={false}>
-                <SelectGroup>
-                  <SelectItem value={ALL_TAGS_VALUE}>{t('All Tags')}</SelectItem>
-                  {tagOptions.map((tag) => (
-                    <SelectItem key={tag} value={tag}>
-                      {tag}
-                    </SelectItem>
-                  ))}
-                  {tagOptions.length === 0 && (
-                    <SelectItem value='__no_tags__' disabled>
-                      {t('No tags')}
-                    </SelectItem>
-                  )}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
+            <TagMultiSelect
+              label={t('Include Tags')}
+              emptyLabel={t('All Tags')}
+              options={tagOptions}
+              selected={includedTagsDraft}
+              onChange={setIncludedTagsDraft}
+            />
+            <TagMultiSelect
+              label={t('Exclude Tags')}
+              emptyLabel={t('Do not exclude tags')}
+              options={tagOptions}
+              selected={excludedTagsDraft}
+              onChange={setExcludedTagsDraft}
+            />
             <Button type='button' onClick={handleApply}>
               <Search className='size-4' />
               {t('View')}
@@ -306,6 +369,7 @@ export function TokenTagsDashboard() {
               {t('Reset')}
             </Button>
           </div>
+
           {queryErrorMessage && (
             <div className='text-destructive text-sm'>{queryErrorMessage}</div>
           )}
@@ -316,7 +380,7 @@ export function TokenTagsDashboard() {
                 <CardTitle>{t('Cost')}</CardTitle>
               </CardHeader>
               <CardContent className='text-2xl font-semibold'>
-                {formatQuota(totalQuota)}
+                {formatQuota(stableSummary.quota)}
               </CardContent>
             </Card>
             <Card size='sm'>
@@ -324,7 +388,7 @@ export function TokenTagsDashboard() {
                 <CardTitle>{t('Tokens')}</CardTitle>
               </CardHeader>
               <CardContent className='text-2xl font-semibold'>
-                {formatNumber(totalTokens)}
+                {formatNumber(stableSummary.token_used)}
               </CardContent>
             </Card>
             <Card size='sm'>
@@ -332,9 +396,62 @@ export function TokenTagsDashboard() {
                 <CardTitle>{t('Requests')}</CardTitle>
               </CardHeader>
               <CardContent className='text-2xl font-semibold'>
-                {formatNumber(totalRequests)}
+                {formatNumber(stableSummary.count)}
               </CardContent>
             </Card>
+          </div>
+
+          <div className='flex flex-wrap items-center justify-between gap-2'>
+            <div className='bg-muted inline-flex rounded-md p-1'>
+              <Button
+                type='button'
+                size='sm'
+                variant={viewMode === 'table' ? 'secondary' : 'ghost'}
+                onClick={() => setViewMode('table')}
+              >
+                <List className='size-4' />
+                {t('List')}
+              </Button>
+              <Button
+                type='button'
+                size='sm'
+                variant={viewMode === 'chart' ? 'secondary' : 'ghost'}
+                onClick={() => setViewMode('chart')}
+              >
+                <BarChart3 className='size-4' />
+                {t('Bar Chart')}
+              </Button>
+            </div>
+            {viewMode === 'chart' && (
+              <div className='flex items-center gap-2'>
+                <span className='text-muted-foreground text-sm'>
+                  {t('Ranking Metric')}
+                </span>
+                <Select
+                  value={metric}
+                  onValueChange={(value) =>
+                    setMetric(value as TokenTagRankingMetric)
+                  }
+                >
+                  <SelectTrigger className='w-40'>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent alignItemWithTrigger={false}>
+                    <SelectGroup>
+                      <SelectItem value='quota'>
+                        {t('Cost Consumption')}
+                      </SelectItem>
+                      <SelectItem value='token_used'>
+                        {t('Token Count')}
+                      </SelectItem>
+                      <SelectItem value='count'>
+                        {t('Request Count')}
+                      </SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
           </div>
 
           <Card>
@@ -342,62 +459,104 @@ export function TokenTagsDashboard() {
               <CardTitle>{t('Tag Ranking')}</CardTitle>
             </CardHeader>
             <CardContent>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className='w-16'>{t('No.')}</TableHead>
-                    {isAdmin && <TableHead>{t('User')}</TableHead>}
-                    <TableHead>{t('Key Tag')}</TableHead>
-                    <SortableHead
-                      label={t('Cost')}
-                      sortKey='quota'
-                      sort={tagSort}
-                      onSort={(key) => setTagSort((current) => getNextSortState(current, key))}
-                      className='text-right'
-                    />
-                    <SortableHead
-                      label={t('Tokens')}
-                      sortKey='token_used'
-                      sort={tagSort}
-                      onSort={(key) => setTagSort((current) => getNextSortState(current, key))}
-                      className='text-right'
-                    />
-                    <SortableHead
-                      label={t('Requests')}
-                      sortKey='count'
-                      sort={tagSort}
-                      onSort={(key) => setTagSort((current) => getNextSortState(current, key))}
-                      className='text-right'
-                    />
-                    <SortableHead
-                      label={t('Last Used At')}
-                      sortKey='last_used_at'
-                      sort={tagSort}
-                      onSort={(key) => setTagSort((current) => getNextSortState(current, key))}
-                    />
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {groupedRows.map((row, index) => (
-                    <TableRow key={`${row.username || 'self'}-${row.tag_name}`}>
-                      <TableCell>{index + 1}</TableCell>
-                      {isAdmin && <TableCell>{row.username || '-'}</TableCell>}
-                      <TableCell className='font-medium'>{row.tag_name || t('No tags')}</TableCell>
-                      <TableCell className='text-right'>{formatQuota(row.quota || 0)}</TableCell>
-                      <TableCell className='text-right'>{formatNumber(row.token_used)}</TableCell>
-                      <TableCell className='text-right'>{formatNumber(row.count)}</TableCell>
-                      <TableCell>{formatTokenTagLastUsedAt(row.last_used_at)}</TableCell>
-                    </TableRow>
-                  ))}
-                  {!isInitialLoading && groupedRows.length === 0 && (
+              {viewMode === 'chart' ? (
+                <RankingChart
+                  data={tagChart}
+                  metric={metric}
+                  colorMap={modelColorMap}
+                  kind='tag'
+                />
+              ) : (
+                <Table>
+                  <TableHeader>
                     <TableRow>
-                      <TableCell colSpan={isAdmin ? 7 : 6} className='text-muted-foreground h-24 text-center'>
-                        {t('No data')}
-                      </TableCell>
+                      <TableHead className='w-16'>{t('No.')}</TableHead>
+                      {isAdmin && <TableHead>{t('User')}</TableHead>}
+                      <TableHead>{t('Key Tag')}</TableHead>
+                      <SortableHead
+                        label={t('Cost')}
+                        sortKey='quota'
+                        sort={tagSort}
+                        onSort={(key) =>
+                          setTagSort((current) =>
+                            getNextSortState(current, key)
+                          )
+                        }
+                        className='text-right'
+                      />
+                      <SortableHead
+                        label={t('Tokens')}
+                        sortKey='token_used'
+                        sort={tagSort}
+                        onSort={(key) =>
+                          setTagSort((current) =>
+                            getNextSortState(current, key)
+                          )
+                        }
+                        className='text-right'
+                      />
+                      <SortableHead
+                        label={t('Requests')}
+                        sortKey='count'
+                        sort={tagSort}
+                        onSort={(key) =>
+                          setTagSort((current) =>
+                            getNextSortState(current, key)
+                          )
+                        }
+                        className='text-right'
+                      />
+                      <SortableHead
+                        label={t('Last Used At')}
+                        sortKey='last_used_at'
+                        sort={tagSort}
+                        onSort={(key) =>
+                          setTagSort((current) =>
+                            getNextSortState(current, key)
+                          )
+                        }
+                      />
                     </TableRow>
-                  )}
-                </TableBody>
-              </Table>
+                  </TableHeader>
+                  <TableBody>
+                    {groupedRows.map((row, index) => (
+                      <TableRow
+                        key={`${row.user_id || row.username || 'self'}-${row.tag_id}-${row.tag_name}`}
+                      >
+                        <TableCell>{index + 1}</TableCell>
+                        {isAdmin && (
+                          <TableCell>{row.username || '-'}</TableCell>
+                        )}
+                        <TableCell className='font-medium'>
+                          {row.tag_name || t('No tags')}
+                        </TableCell>
+                        <TableCell className='text-right'>
+                          {formatQuota(row.quota || 0)}
+                        </TableCell>
+                        <TableCell className='text-right'>
+                          {formatNumber(row.token_used)}
+                        </TableCell>
+                        <TableCell className='text-right'>
+                          {formatNumber(row.count)}
+                        </TableCell>
+                        <TableCell>
+                          {formatTokenTagLastUsedAt(row.last_used_at)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    {!isInitialLoading && groupedRows.length === 0 && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={isAdmin ? 7 : 6}
+                          className='text-muted-foreground h-24 text-center'
+                        >
+                          {t('No data')}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              )}
             </CardContent>
           </Card>
 
@@ -406,64 +565,106 @@ export function TokenTagsDashboard() {
               <CardTitle>{t('Key Ranking')}</CardTitle>
             </CardHeader>
             <CardContent>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className='w-16'>{t('No.')}</TableHead>
-                    {isAdmin && <TableHead>{t('User')}</TableHead>}
-                    <TableHead>{t('Key Tag')}</TableHead>
-                    <TableHead>{t('API Key')}</TableHead>
-                    <SortableHead
-                      label={t('Cost')}
-                      sortKey='quota'
-                      sort={keySort}
-                      onSort={(key) => setKeySort((current) => getNextSortState(current, key))}
-                      className='text-right'
-                    />
-                    <SortableHead
-                      label={t('Tokens')}
-                      sortKey='token_used'
-                      sort={keySort}
-                      onSort={(key) => setKeySort((current) => getNextSortState(current, key))}
-                      className='text-right'
-                    />
-                    <SortableHead
-                      label={t('Requests')}
-                      sortKey='count'
-                      sort={keySort}
-                      onSort={(key) => setKeySort((current) => getNextSortState(current, key))}
-                      className='text-right'
-                    />
-                    <SortableHead
-                      label={t('Last Used At')}
-                      sortKey='last_used_at'
-                      sort={keySort}
-                      onSort={(key) => setKeySort((current) => getNextSortState(current, key))}
-                    />
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {sortedRows.map((row, index) => (
-                    <TableRow key={`${row.tag_id}-${row.token_id}-${row.username || ''}`}>
-                      <TableCell>{index + 1}</TableCell>
-                      {isAdmin && <TableCell>{row.username || '-'}</TableCell>}
-                      <TableCell>{row.tag_name || t('No tags')}</TableCell>
-                      <TableCell>{row.token_name || `#${row.token_id}`}</TableCell>
-                      <TableCell className='text-right'>{formatQuota(row.quota || 0)}</TableCell>
-                      <TableCell className='text-right'>{formatNumber(row.token_used)}</TableCell>
-                      <TableCell className='text-right'>{formatNumber(row.count)}</TableCell>
-                      <TableCell>{formatTokenTagLastUsedAt(row.last_used_at)}</TableCell>
-                    </TableRow>
-                  ))}
-                  {!isInitialLoading && sortedRows.length === 0 && (
+              {viewMode === 'chart' ? (
+                <RankingChart
+                  data={keyChart}
+                  metric={metric}
+                  colorMap={modelColorMap}
+                  kind='key'
+                />
+              ) : (
+                <Table>
+                  <TableHeader>
                     <TableRow>
-                      <TableCell colSpan={isAdmin ? 8 : 7} className='text-muted-foreground h-24 text-center'>
-                        {t('No data')}
-                      </TableCell>
+                      <TableHead className='w-16'>{t('No.')}</TableHead>
+                      {isAdmin && <TableHead>{t('User')}</TableHead>}
+                      <TableHead>{t('Key Tag')}</TableHead>
+                      <TableHead>{t('API Key')}</TableHead>
+                      <SortableHead
+                        label={t('Cost')}
+                        sortKey='quota'
+                        sort={keySort}
+                        onSort={(key) =>
+                          setKeySort((current) =>
+                            getNextSortState(current, key)
+                          )
+                        }
+                        className='text-right'
+                      />
+                      <SortableHead
+                        label={t('Tokens')}
+                        sortKey='token_used'
+                        sort={keySort}
+                        onSort={(key) =>
+                          setKeySort((current) =>
+                            getNextSortState(current, key)
+                          )
+                        }
+                        className='text-right'
+                      />
+                      <SortableHead
+                        label={t('Requests')}
+                        sortKey='count'
+                        sort={keySort}
+                        onSort={(key) =>
+                          setKeySort((current) =>
+                            getNextSortState(current, key)
+                          )
+                        }
+                        className='text-right'
+                      />
+                      <SortableHead
+                        label={t('Last Used At')}
+                        sortKey='last_used_at'
+                        sort={keySort}
+                        onSort={(key) =>
+                          setKeySort((current) =>
+                            getNextSortState(current, key)
+                          )
+                        }
+                      />
                     </TableRow>
-                  )}
-                </TableBody>
-              </Table>
+                  </TableHeader>
+                  <TableBody>
+                    {sortedKeyRows.map((row, index) => (
+                      <TableRow
+                        key={`${row.user_id || row.username || 'self'}-${row.tag_id}-${row.token_id}`}
+                      >
+                        <TableCell>{index + 1}</TableCell>
+                        {isAdmin && (
+                          <TableCell>{row.username || '-'}</TableCell>
+                        )}
+                        <TableCell>{row.tag_name || t('No tags')}</TableCell>
+                        <TableCell>
+                          {row.token_name || `#${row.token_id}`}
+                        </TableCell>
+                        <TableCell className='text-right'>
+                          {formatQuota(row.quota || 0)}
+                        </TableCell>
+                        <TableCell className='text-right'>
+                          {formatNumber(row.token_used)}
+                        </TableCell>
+                        <TableCell className='text-right'>
+                          {formatNumber(row.count)}
+                        </TableCell>
+                        <TableCell>
+                          {formatTokenTagLastUsedAt(row.last_used_at)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    {!isInitialLoading && sortedKeyRows.length === 0 && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={isAdmin ? 8 : 7}
+                          className='text-muted-foreground h-24 text-center'
+                        >
+                          {t('No data')}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              )}
             </CardContent>
           </Card>
         </div>

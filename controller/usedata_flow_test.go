@@ -18,9 +18,10 @@ type flowQuotaResponse struct {
 }
 
 type tokenTagQuotaResponse struct {
-	Success bool                      `json:"success"`
-	Message string                    `json:"message"`
-	Data    []model.TokenTagQuotaData `json:"data"`
+	Success bool                       `json:"success"`
+	Message string                     `json:"message"`
+	Data    []model.TokenTagQuotaData  `json:"data"`
+	Summary model.TokenTagQuotaSummary `json:"summary"`
 }
 
 type tokenTagOptionsResponse struct {
@@ -271,4 +272,97 @@ func TestGetTokenTagOptionsScopesByRoleAndUsername(t *testing.T) {
 	require.True(t, selfPayload.Success, selfPayload.Message)
 	require.Len(t, selfPayload.Data, 1)
 	require.Equal(t, "Client B", selfPayload.Data[0].Name)
+}
+
+func TestGetAllTokenTagQuotaDatesSupportsRepeatedIncludeAndExcludeTags(t *testing.T) {
+	setupFlowControllerTestDB(t)
+	require.NoError(t, model.ReplaceTokenTags(1, 11, []string{"Client A", "Shared"}))
+	require.NoError(t, model.ReplaceTokenTags(2, 22, []string{"Client B"}))
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Set("role", common.RoleAdminUser)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data/token-tags?start_timestamp=1000&end_timestamp=2000&token_tag=Client%20A&token_tag=Client%20B&exclude_token_tag=Shared", nil)
+
+	GetAllTokenTagQuotaDates(ctx)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var payload tokenTagQuotaResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.True(t, payload.Success, payload.Message)
+	require.Len(t, payload.Data, 1)
+	require.Equal(t, "Client B", payload.Data[0].TagName)
+	require.Equal(t, 22, payload.Data[0].TokenID)
+	require.Equal(t, model.TokenTagQuotaSummary{Quota: 70, TokenUsed: 30, Count: 1}, payload.Summary)
+}
+
+func TestGetAllTokenTagQuotaDatesKeepsSingleTokenTagCompatibility(t *testing.T) {
+	setupFlowControllerTestDB(t)
+	require.NoError(t, model.ReplaceTokenTags(1, 11, []string{"Client A", "Shared"}))
+	require.NoError(t, model.ReplaceTokenTags(2, 22, []string{"Client B"}))
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Set("role", common.RoleAdminUser)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data/token-tags?start_timestamp=1000&end_timestamp=2000&token_tag=Client%20A", nil)
+
+	GetAllTokenTagQuotaDates(ctx)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var payload tokenTagQuotaResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.True(t, payload.Success, payload.Message)
+	require.Len(t, payload.Data, 1)
+	require.Equal(t, "Client A", payload.Data[0].TagName)
+	require.Equal(t, 11, payload.Data[0].TokenID)
+	require.Equal(t, model.TokenTagQuotaSummary{Quota: 100, TokenUsed: 40, Count: 1}, payload.Summary)
+}
+
+func TestGetAllTokenTagQuotaDatesParsesUntaggedFilters(t *testing.T) {
+	setupFlowControllerTestDB(t)
+	require.NoError(t, model.ReplaceTokenTags(1, 11, []string{"Client A"}))
+	require.NoError(t, model.DB.Create(&model.Token{Id: 33, UserId: 1, Key: "sk-untagged", Name: "untagged"}).Error)
+	require.NoError(t, model.LOG_DB.Create(&model.Log{
+		UserId:           1,
+		Username:         "alice",
+		TokenId:          33,
+		TokenName:        "untagged",
+		Type:             model.LogTypeConsume,
+		Quota:            30,
+		PromptTokens:     4,
+		CompletionTokens: 6,
+		CreatedAt:        1399,
+	}).Error)
+
+	includeRecorder := httptest.NewRecorder()
+	includeCtx, _ := gin.CreateTestContext(includeRecorder)
+	includeCtx.Set("role", common.RoleAdminUser)
+	includeCtx.Request = httptest.NewRequest(http.MethodGet, "/api/data/token-tags?start_timestamp=1000&end_timestamp=2000&username=alice&include_untagged=true", nil)
+
+	GetAllTokenTagQuotaDates(includeCtx)
+
+	require.Equal(t, http.StatusOK, includeRecorder.Code)
+	var includePayload tokenTagQuotaResponse
+	require.NoError(t, common.Unmarshal(includeRecorder.Body.Bytes(), &includePayload))
+	require.True(t, includePayload.Success, includePayload.Message)
+	require.Len(t, includePayload.Data, 1)
+	require.Equal(t, 33, includePayload.Data[0].TokenID)
+	require.Empty(t, includePayload.Data[0].TagName)
+	require.Equal(t, model.TokenTagQuotaSummary{Quota: 30, TokenUsed: 10, Count: 1}, includePayload.Summary)
+
+	excludeRecorder := httptest.NewRecorder()
+	excludeCtx, _ := gin.CreateTestContext(excludeRecorder)
+	excludeCtx.Set("role", common.RoleAdminUser)
+	excludeCtx.Request = httptest.NewRequest(http.MethodGet, "/api/data/token-tags?start_timestamp=1000&end_timestamp=2000&username=alice&exclude_untagged=true", nil)
+
+	GetAllTokenTagQuotaDates(excludeCtx)
+
+	require.Equal(t, http.StatusOK, excludeRecorder.Code)
+	var excludePayload tokenTagQuotaResponse
+	require.NoError(t, common.Unmarshal(excludeRecorder.Body.Bytes(), &excludePayload))
+	require.True(t, excludePayload.Success, excludePayload.Message)
+	require.Len(t, excludePayload.Data, 1)
+	require.Equal(t, 11, excludePayload.Data[0].TokenID)
+	require.Equal(t, "Client A", excludePayload.Data[0].TagName)
+	require.Equal(t, model.TokenTagQuotaSummary{Quota: 100, TokenUsed: 40, Count: 1}, excludePayload.Summary)
 }

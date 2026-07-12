@@ -23,6 +23,7 @@ import type {
   QuotaDataItem,
   TokenTagOptionItem,
   TokenTagQuotaDataItem,
+  TokenTagQuotaSummary,
   UptimeGroupResult,
 } from './types'
 
@@ -89,18 +90,16 @@ export async function getFlowQuotaDates(
 }
 
 export async function getTokenTagQuotaDates(
-  params: {
-    start_timestamp: number
-    end_timestamp: number
-    username?: string
-    token_tag?: string
-  },
+  params: URLSearchParams,
   isAdmin = false
 ) {
-  const endpoint = isAdmin ? '/api/data/token-tags' : '/api/data/token-tags/self'
+  const endpoint = isAdmin
+    ? '/api/data/token-tags'
+    : '/api/data/token-tags/self'
   const res = await api.get<{
     success: boolean
     data?: TokenTagQuotaDataItem[]
+    summary?: TokenTagQuotaSummary
     message?: string
   }>(endpoint, { params })
   return res.data

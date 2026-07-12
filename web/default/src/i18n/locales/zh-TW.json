@@ -5178,6 +5178,16 @@
     "Zero retention": "零數據保留",
     "Zhipu": "智譜",
     "Zhipu V4": "智譜 V4",
-    "Zoom": "縮放"
+    "Zoom": "縮放",
+    "Include Tags": "包含標籤",
+    "Exclude Tags": "排除標籤",
+    "Do not exclude tags": "不排除標籤",
+    "List": "列表",
+    "Ranking Metric": "排名指標",
+    "Cost Consumption": "額度消耗",
+    "Token Count": "Token 數",
+    "Unknown Model": "未知模型",
+    "{{count}} tags selected": "已選擇 {{count}} 個標籤",
+    "Current model value": "目前模型數值"
   }
 }

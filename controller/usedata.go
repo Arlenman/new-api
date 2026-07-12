@@ -85,8 +85,14 @@ func GetAllTokenTagQuotaDates(c *gin.Context) {
 		return
 	}
 	username := c.Query("username")
-	tokenTag := c.Query("token_tag")
-	dates, err := model.GetTokenTagQuotaData(startTimestamp, endTimestamp, username, 0, c.GetInt("role"), tokenTag)
+	includeUntagged, _ := strconv.ParseBool(c.Query("include_untagged"))
+	excludeUntagged, _ := strconv.ParseBool(c.Query("exclude_untagged"))
+	dates, summary, err := model.GetTokenTagQuotaAnalytics(startTimestamp, endTimestamp, username, 0, c.GetInt("role"), model.TokenTagQuotaFilters{
+		IncludedTags:    c.QueryArray("token_tag"),
+		ExcludedTags:    c.QueryArray("exclude_token_tag"),
+		IncludeUntagged: includeUntagged,
+		ExcludeUntagged: excludeUntagged,
+	})
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -95,6 +101,7 @@ func GetAllTokenTagQuotaDates(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    dates,
+		"summary": summary,
 	})
 }
 
@@ -104,8 +111,14 @@ func GetUserTokenTagQuotaDates(c *gin.Context) {
 	if !ok {
 		return
 	}
-	tokenTag := c.Query("token_tag")
-	dates, err := model.GetTokenTagQuotaData(startTimestamp, endTimestamp, "", userId, common.RoleCommonUser, tokenTag)
+	includeUntagged, _ := strconv.ParseBool(c.Query("include_untagged"))
+	excludeUntagged, _ := strconv.ParseBool(c.Query("exclude_untagged"))
+	dates, summary, err := model.GetTokenTagQuotaAnalytics(startTimestamp, endTimestamp, "", userId, common.RoleCommonUser, model.TokenTagQuotaFilters{
+		IncludedTags:    c.QueryArray("token_tag"),
+		ExcludedTags:    c.QueryArray("exclude_token_tag"),
+		IncludeUntagged: includeUntagged,
+		ExcludeUntagged: excludeUntagged,
+	})
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -114,6 +127,7 @@ func GetUserTokenTagQuotaDates(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    dates,
+		"summary": summary,
 	})
 }
 

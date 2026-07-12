@@ -5222,6 +5222,16 @@
     "Zero retention": "Không lưu dữ liệu",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Include Tags": "Bao gồm thẻ",
+    "Exclude Tags": "Loại trừ thẻ",
+    "Do not exclude tags": "Không loại trừ thẻ",
+    "List": "Danh sách",
+    "Ranking Metric": "Chỉ số xếp hạng",
+    "Cost Consumption": "Mức tiêu thụ hạn mức",
+    "Token Count": "Số token",
+    "Unknown Model": "Mô hình không xác định",
+    "{{count}} tags selected": "Đã chọn {{count}} thẻ",
+    "Current model value": "Giá trị mô hình hiện tại"
   }
 }

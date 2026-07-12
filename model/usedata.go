@@ -45,10 +45,24 @@ type TokenTagQuotaData struct {
 	Username   string `json:"username,omitempty" gorm:"column:username"`
 	TokenID    int    `json:"token_id" gorm:"column:token_id"`
 	TokenName  string `json:"token_name" gorm:"column:token_name"`
+	ModelName  string `json:"model_name" gorm:"column:model_name"`
 	TokenUsed  int    `json:"token_used" gorm:"column:token_used"`
 	Count      int    `json:"count" gorm:"column:count"`
 	Quota      int    `json:"quota" gorm:"column:quota"`
-	LastUsedAt int64  `json:"last_used_at" gorm:"-"`
+	LastUsedAt int64  `json:"last_used_at" gorm:"column:last_used_at"`
+}
+
+type TokenTagQuotaFilters struct {
+	IncludedTags    []string
+	ExcludedTags    []string
+	IncludeUntagged bool
+	ExcludeUntagged bool
+}
+
+type TokenTagQuotaSummary struct {
+	Quota     int `json:"quota" gorm:"column:quota"`
+	TokenUsed int `json:"token_used" gorm:"column:token_used"`
+	Count     int `json:"count" gorm:"column:count"`
 }
 
 func UpdateQuotaData() {
@@ -226,95 +240,276 @@ func GetAllQuotaDates(startTime int64, endTime int64, username string, tokenTag 
 }
 
 func GetTokenTagQuotaData(startTime int64, endTime int64, username string, userID int, role int, tokenTag string) ([]*TokenTagQuotaData, error) {
-	rows := make([]*TokenTagQuotaData, 0)
-	logDB := LOG_DB
-	if logDB == nil {
-		logDB = DB
+	includedTags := make([]string, 0, 1)
+	if tokenTag != "" {
+		includedTags = append(includedTags, tokenTag)
 	}
-	selectFields := "coalesce(token_tags.id, 0) as tag_id, coalesce(token_tags.name, '') as tag_name, logs.user_id, logs.username, logs.token_id, coalesce(nullif(tokens.name, ''), max(logs.token_name)) as token_name, count(logs.id) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used"
-	groupFields := "token_tags.id, token_tags.name, logs.user_id, logs.username, logs.token_id, tokens.name"
+	rows, _, err := GetTokenTagQuotaAnalytics(startTime, endTime, username, userID, role, TokenTagQuotaFilters{
+		IncludedTags: includedTags,
+	})
+	return rows, err
+}
+
+type tokenTagLogAggregate struct {
+	UserID     int    `gorm:"column:user_id"`
+	Username   string `gorm:"column:username"`
+	TokenID    int    `gorm:"column:token_id"`
+	TokenName  string `gorm:"column:token_name"`
+	ModelName  string `gorm:"column:model_name"`
+	TokenUsed  int    `gorm:"column:token_used"`
+	Count      int    `gorm:"column:count"`
+	Quota      int    `gorm:"column:quota"`
+	LastUsedAt int64  `gorm:"column:last_used_at"`
+}
+
+type tokenTagAnalyticsTag struct {
+	TokenID int    `gorm:"column:token_id"`
+	UserID  int    `gorm:"column:user_id"`
+	TagID   int    `gorm:"column:tag_id"`
+	TagName string `gorm:"column:tag_name"`
+	NameKey string `gorm:"column:name_key"`
+}
+
+func getTokenIDsByTagKeys(nameKeys []string, userID int) ([]int, error) {
+	if len(nameKeys) == 0 {
+		return []int{}, nil
+	}
+	query := DB.Table("token_tag_bindings").
+		Distinct("token_tag_bindings.token_id").
+		Joins("join token_tags on token_tags.id = token_tag_bindings.tag_id").
+		Where("token_tags.name_key IN ?", nameKeys)
+	if userID > 0 {
+		query = query.Where("token_tags.user_id = ?", userID)
+	}
+	var tokenIDs []int
+	err := query.Pluck("token_tag_bindings.token_id", &tokenIDs).Error
+	return tokenIDs, err
+}
+
+func getTaggedTokenIDs(userID int) ([]int, error) {
+	query := DB.Table("token_tag_bindings").
+		Distinct("token_tag_bindings.token_id").
+		Joins("join token_tags on token_tags.id = token_tag_bindings.tag_id")
+	if userID > 0 {
+		query = query.Where("token_tags.user_id = ?", userID)
+	}
+	var tokenIDs []int
+	err := query.Pluck("token_tag_bindings.token_id", &tokenIDs).Error
+	return tokenIDs, err
+}
+
+func buildTokenTagLogQuery(logDB *gorm.DB, startTime int64, endTime int64, username string, userID int, role int, includedTokenIDs []int, excludedTokenIDs []int, taggedTokenIDs []int, hasIncludedTags bool, includeUntagged bool, excludeUntagged bool) (*gorm.DB, error) {
 	query := logDB.Table("logs").
-		Joins("left join token_tag_bindings on token_tag_bindings.token_id = logs.token_id").
-		Joins("left join token_tags on token_tags.id = token_tag_bindings.tag_id and token_tags.user_id = logs.user_id").
-		Joins("left join tokens on tokens.id = logs.token_id").
 		Where("logs.type = ?", LogTypeConsume).
 		Where("logs.created_at >= ? and logs.created_at <= ?", startTime, endTime).
 		Where("logs.token_id > 0")
-
 	if role < common.RoleAdminUser {
-		selectFields = "coalesce(token_tags.id, 0) as tag_id, coalesce(token_tags.name, '') as tag_name, logs.token_id, coalesce(nullif(tokens.name, ''), max(logs.token_name)) as token_name, count(logs.id) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used"
-		groupFields = "token_tags.id, token_tags.name, logs.token_id, tokens.name"
 		query = query.Where("logs.user_id = ?", userID)
 	} else {
 		var err error
-		if query, err = applyHiddenUserFilter(query, "logs.user_id", true); err != nil {
-			return rows, err
+		query, err = applyHiddenUserFilter(query, "logs.user_id", true)
+		if err != nil {
+			return nil, err
 		}
 		if username != "" {
 			query = query.Where("logs.username = ?", username)
 		}
 	}
-	if tokenTag != "" {
-		_, nameKeys, err := normalizeTokenTagNames([]string{tokenTag})
-		if err != nil {
-			return nil, err
+	if hasIncludedTags || includeUntagged {
+		switch {
+		case hasIncludedTags && includeUntagged:
+			if len(includedTokenIDs) == 0 {
+				if len(taggedTokenIDs) > 0 {
+					query = query.Where("logs.token_id NOT IN ?", taggedTokenIDs)
+				}
+			} else if len(taggedTokenIDs) == 0 {
+				query = query.Where("logs.token_id IN ?", includedTokenIDs)
+			} else {
+				query = query.Where("(logs.token_id IN ? OR logs.token_id NOT IN ?)", includedTokenIDs, taggedTokenIDs)
+			}
+		case hasIncludedTags:
+			query = query.Where("logs.token_id IN ?", includedTokenIDs)
+		case len(taggedTokenIDs) > 0:
+			query = query.Where("logs.token_id NOT IN ?", taggedTokenIDs)
 		}
-		if len(nameKeys) == 0 {
-			return rows, nil
+	}
+	if len(excludedTokenIDs) > 0 {
+		query = query.Where("logs.token_id NOT IN ?", excludedTokenIDs)
+	}
+	if excludeUntagged {
+		if len(taggedTokenIDs) == 0 {
+			query = query.Where("1 = 0")
+		} else {
+			query = query.Where("logs.token_id IN ?", taggedTokenIDs)
 		}
-		query = query.Where("token_tags.name_key = ?", nameKeys[0])
 	}
-
-	err := query.Select(selectFields).
-		Group(groupFields).
-		Order("quota DESC").
-		Find(&rows).Error
-	if err != nil {
-		return rows, err
-	}
-	return rows, fillTokenTagLastUsedAt(rows, startTime, endTime)
+	return query, nil
 }
 
-func fillTokenTagLastUsedAt(rows []*TokenTagQuotaData, startTime int64, endTime int64) error {
-	if len(rows) == 0 || LOG_DB == nil {
-		return nil
+func GetTokenTagQuotaAnalytics(startTime int64, endTime int64, username string, userID int, role int, filters TokenTagQuotaFilters) ([]*TokenTagQuotaData, TokenTagQuotaSummary, error) {
+	rows := make([]*TokenTagQuotaData, 0)
+	summary := TokenTagQuotaSummary{}
+	_, includedNameKeys, err := normalizeTokenTagNames(filters.IncludedTags)
+	if err != nil {
+		return rows, summary, err
 	}
-	tokenSet := make(map[int]struct{}, len(rows))
-	tokenIDs := make([]int, 0, len(rows))
-	for _, row := range rows {
-		if row.TokenID == 0 {
-			continue
-		}
-		if _, ok := tokenSet[row.TokenID]; ok {
-			continue
-		}
-		tokenSet[row.TokenID] = struct{}{}
-		tokenIDs = append(tokenIDs, row.TokenID)
-	}
-	if len(tokenIDs) == 0 {
-		return nil
+	_, excludedNameKeys, err := normalizeTokenTagNames(filters.ExcludedTags)
+	if err != nil {
+		return rows, summary, err
 	}
 
-	var lastUsedRows []struct {
-		TokenID    int   `gorm:"column:token_id"`
-		LastUsedAt int64 `gorm:"column:last_used_at"`
+	tagUserID := 0
+	if role < common.RoleAdminUser {
+		tagUserID = userID
 	}
-	if err := LOG_DB.Table("logs").
-		Select("token_id, max(created_at) as last_used_at").
-		Where("type = ?", LogTypeConsume).
-		Where("created_at >= ? and created_at <= ?", startTime, endTime).
-		Where("token_id IN ?", tokenIDs).
-		Group("token_id").
-		Scan(&lastUsedRows).Error; err != nil {
-		return err
+	var includedTokenIDs []int
+	if len(includedNameKeys) > 0 {
+		includedTokenIDs, err = getTokenIDsByTagKeys(includedNameKeys, tagUserID)
+		if err != nil {
+			return rows, summary, err
+		}
+		if len(includedTokenIDs) == 0 && !filters.IncludeUntagged {
+			return rows, summary, nil
+		}
+	}
+	excludedTokenIDs, err := getTokenIDsByTagKeys(excludedNameKeys, tagUserID)
+	if err != nil {
+		return rows, summary, err
+	}
+	var taggedTokenIDs []int
+	if filters.IncludeUntagged || filters.ExcludeUntagged {
+		taggedTokenIDs, err = getTaggedTokenIDs(tagUserID)
+		if err != nil {
+			return rows, summary, err
+		}
 	}
 
-	lastUsedByToken := make(map[int]int64, len(lastUsedRows))
-	for _, row := range lastUsedRows {
-		lastUsedByToken[row.TokenID] = row.LastUsedAt
+	logDB := LOG_DB
+	if logDB == nil {
+		logDB = DB
 	}
-	for _, row := range rows {
-		row.LastUsedAt = lastUsedByToken[row.TokenID]
+	detailQuery, err := buildTokenTagLogQuery(logDB, startTime, endTime, username, userID, role, includedTokenIDs, excludedTokenIDs, taggedTokenIDs, len(includedNameKeys) > 0, filters.IncludeUntagged, filters.ExcludeUntagged)
+	if err != nil {
+		return rows, summary, err
 	}
-	return nil
+	var aggregates []tokenTagLogAggregate
+	err = detailQuery.
+		Select("logs.user_id, logs.username, logs.token_id, max(logs.token_name) as token_name, logs.model_name, count(logs.id) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used, max(logs.created_at) as last_used_at").
+		Group("logs.user_id, logs.username, logs.token_id, logs.model_name").
+		Order("quota DESC").
+		Scan(&aggregates).Error
+	if err != nil {
+		return rows, summary, err
+	}
+
+	summaryQuery, err := buildTokenTagLogQuery(logDB, startTime, endTime, username, userID, role, includedTokenIDs, excludedTokenIDs, taggedTokenIDs, len(includedNameKeys) > 0, filters.IncludeUntagged, filters.ExcludeUntagged)
+	if err != nil {
+		return rows, summary, err
+	}
+	err = summaryQuery.
+		Select("coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used, count(logs.id) as count").
+		Scan(&summary).Error
+	if err != nil {
+		return rows, summary, err
+	}
+	if len(aggregates) == 0 {
+		return rows, summary, nil
+	}
+
+	tokenIDs := make([]int, 0, len(aggregates))
+	seenTokenIDs := make(map[int]struct{}, len(aggregates))
+	for _, aggregate := range aggregates {
+		if _, ok := seenTokenIDs[aggregate.TokenID]; ok {
+			continue
+		}
+		seenTokenIDs[aggregate.TokenID] = struct{}{}
+		tokenIDs = append(tokenIDs, aggregate.TokenID)
+	}
+	var tokens []Token
+	if err = DB.Select("id", "name").Where("id IN ?", tokenIDs).Find(&tokens).Error; err != nil {
+		return rows, summary, err
+	}
+	tokenNames := make(map[int]string, len(tokens))
+	for _, token := range tokens {
+		if token.Name != "" {
+			tokenNames[token.Id] = token.Name
+		}
+	}
+
+	var tags []tokenTagAnalyticsTag
+	err = DB.Table("token_tag_bindings").
+		Select("token_tag_bindings.token_id, token_tags.user_id, token_tags.id as tag_id, token_tags.name as tag_name, token_tags.name_key").
+		Joins("join token_tags on token_tags.id = token_tag_bindings.tag_id").
+		Where("token_tag_bindings.token_id IN ?", tokenIDs).
+		Order("token_tags.name_key ASC").
+		Scan(&tags).Error
+	if err != nil {
+		return rows, summary, err
+	}
+	tagsByToken := make(map[[2]int][]tokenTagAnalyticsTag)
+	for _, tag := range tags {
+		key := [2]int{tag.UserID, tag.TokenID}
+		tagsByToken[key] = append(tagsByToken[key], tag)
+	}
+	includedKeySet := make(map[string]struct{}, len(includedNameKeys))
+	for _, nameKey := range includedNameKeys {
+		includedKeySet[nameKey] = struct{}{}
+	}
+
+	for _, aggregate := range aggregates {
+		tokenName := aggregate.TokenName
+		if storedName := tokenNames[aggregate.TokenID]; storedName != "" {
+			tokenName = storedName
+		}
+		matchedTags := tagsByToken[[2]int{aggregate.UserID, aggregate.TokenID}]
+		isUntagged := len(matchedTags) == 0
+		if len(includedKeySet) > 0 {
+			if isUntagged {
+				if !filters.IncludeUntagged || filters.ExcludeUntagged {
+					continue
+				}
+				matchedTags = []tokenTagAnalyticsTag{{}}
+			} else {
+				selectedTags := make([]tokenTagAnalyticsTag, 0, len(matchedTags))
+				for _, tag := range matchedTags {
+					if _, ok := includedKeySet[tag.NameKey]; ok {
+						selectedTags = append(selectedTags, tag)
+					}
+				}
+				matchedTags = selectedTags
+			}
+		} else if filters.IncludeUntagged {
+			if !isUntagged || filters.ExcludeUntagged {
+				continue
+			}
+			matchedTags = []tokenTagAnalyticsTag{{}}
+		}
+		if len(matchedTags) == 0 {
+			if len(includedKeySet) > 0 || filters.IncludeUntagged || filters.ExcludeUntagged {
+				continue
+			}
+			matchedTags = []tokenTagAnalyticsTag{{}}
+		}
+		for _, tag := range matchedTags {
+			row := &TokenTagQuotaData{
+				TagID:      tag.TagID,
+				TagName:    tag.TagName,
+				UserID:     aggregate.UserID,
+				Username:   aggregate.Username,
+				TokenID:    aggregate.TokenID,
+				TokenName:  tokenName,
+				ModelName:  aggregate.ModelName,
+				TokenUsed:  aggregate.TokenUsed,
+				Count:      aggregate.Count,
+				Quota:      aggregate.Quota,
+				LastUsedAt: aggregate.LastUsedAt,
+			}
+			if role < common.RoleAdminUser {
+				row.UserID = 0
+				row.Username = ""
+			}
+			rows = append(rows, row)
+		}
+	}
+	return rows, summary, nil
 }

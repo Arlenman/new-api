@@ -5275,6 +5275,16 @@
     "Zhipu V4": "智谱 V4",
     "Zoom": "缩放",
     "Zoom in": "放大",
-    "Zoom out": "缩小"
+    "Zoom out": "缩小",
+    "Include Tags": "包含标签",
+    "Exclude Tags": "排除标签",
+    "Do not exclude tags": "不排除标签",
+    "List": "列表",
+    "Ranking Metric": "排名指标",
+    "Cost Consumption": "额度消耗",
+    "Token Count": "Token 数",
+    "Unknown Model": "未知模型",
+    "{{count}} tags selected": "已选择 {{count}} 个标签",
+    "Current model value": "当前模型数值"
   }
 }

@@ -5222,6 +5222,16 @@
     "Zero retention": "Aucune rétention",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Include Tags": "Inclure les balises",
+    "Exclude Tags": "Exclure les balises",
+    "Do not exclude tags": "N’exclure aucune balise",
+    "List": "Liste",
+    "Ranking Metric": "Indicateur de classement",
+    "Cost Consumption": "Consommation de quota",
+    "Token Count": "Nombre de tokens",
+    "Unknown Model": "Modèle inconnu",
+    "{{count}} tags selected": "{{count}} balises sélectionnées",
+    "Current model value": "Valeur du modèle actuel"
   }
 }
