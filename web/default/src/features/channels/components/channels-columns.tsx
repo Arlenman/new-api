@@ -23,6 +23,7 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
+  HelpCircle,
   ListOrdered,
   Shuffle,
   SlidersHorizontal,
@@ -32,7 +33,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
-import { BadgeListCell } from '@/components/data-table'
+import { BadgeListCell, DataTableColumnHeader } from '@/components/data-table'
 import { GroupBadge } from '@/components/group-badge'
 import { ProviderBadge } from '@/components/provider-badge'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
@@ -46,12 +47,12 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { toIntlLocale } from '@/i18n/languages'
 import {
   formatCurrencyFromUSD,
   formatQuotaWithCurrency,
   getCurrencyLabel,
 } from '@/lib/currency'
-import { toIntlLocale } from '@/i18n/languages'
 import { formatTimestampToDate } from '@/lib/format'
 import { truncateText } from '@/lib/utils'
 
@@ -85,6 +86,96 @@ import {
   type CodexUsageDialogData,
 } from './dialogs/codex-usage-dialog'
 import { NumericSpinnerInput } from './numeric-spinner-input'
+
+type RoutingHelpKind = 'priority' | 'weight'
+
+function RoutingColumnHelp({ kind }: { kind: RoutingHelpKind }) {
+  const { t } = useTranslation()
+  const isPriority = kind === 'priority'
+  const helpLabel = isPriority
+    ? t('How priority routing works')
+    : t('How weight routing works')
+
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type='button'
+              className='text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex size-6 cursor-help items-center justify-center rounded-sm focus-visible:ring-2 focus-visible:outline-none'
+              aria-label={helpLabel}
+            />
+          }
+        >
+          <HelpCircle className='size-3.5' aria-hidden='true' />
+        </TooltipTrigger>
+        <TooltipContent
+          side='top'
+          align='start'
+          className='max-w-sm flex-col items-stretch gap-2 p-3 text-left leading-relaxed'
+        >
+          {isPriority ? (
+            <>
+              <p>
+                {t(
+                  'Priority determines which tier of channels is used. Higher values are tried first.'
+                )}
+              </p>
+              <p>
+                {t(
+                  'On retry, routing moves through distinct priority values from high to low. It does not try every channel in the same priority first.'
+                )}
+              </p>
+              <div className='border-background/20 bg-background/10 space-y-1 rounded-md border p-2'>
+                <p className='font-semibold'>{t('Example')}</p>
+                <p className='font-mono'>A: P100 / W70</p>
+                <p className='font-mono'>B: P100 / W30</p>
+                <p className='font-mono'>C: P50 / W100</p>
+                <p>
+                  {t('First attempt: choose A or B. First retry: switch to C.')}
+                </p>
+              </div>
+            </>
+          ) : (
+            <>
+              <p>
+                {t(
+                  'Weight only controls random distribution between channels at the currently selected priority.'
+                )}
+              </p>
+              <div className='border-background/20 bg-background/10 space-y-1 rounded-md border p-2'>
+                <p className='font-semibold'>{t('Example')}</p>
+                <p className='font-mono'>A: P100 / W70</p>
+                <p className='font-mono'>B: P100 / W30</p>
+                <p>
+                  {t(
+                    'With memory cache enabled, requests are distributed approximately 70% to A and 30% to B.'
+                  )}
+                </p>
+              </div>
+              <p>
+                {t(
+                  'If all channels in the tier have weight 0, they are selected evenly.'
+                )}
+              </p>
+              <p className='opacity-80'>
+                {t(
+                  'Without memory cache, the database routing path adds a base weight of 10 to every channel.'
+                )}
+              </p>
+            </>
+          )}
+          <p className='border-background/20 border-t pt-2 opacity-80'>
+            {t(
+              'These rules apply to automatic routing. Fixed channel selection or channel affinity may bypass them.'
+            )}
+          </p>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
 
 function parseIonetMeta(otherInfo: string | null | undefined): null | {
   source?: string
@@ -1041,19 +1132,29 @@ export function useChannelsColumns(
       // Priority column
       {
         accessorKey: 'priority',
-        header: t('Priority'),
-        meta: { mobileHidden: true },
+        header: ({ column }) => (
+          <div className='flex items-center gap-1'>
+            <DataTableColumnHeader column={column} title={t('Priority')} />
+            <RoutingColumnHelp kind='priority' />
+          </div>
+        ),
+        meta: { mobileHidden: true, label: t('Priority') },
         cell: ({ row }) => <PriorityCell channel={row.original} />,
-        size: 100,
+        size: 130,
       },
 
       // Weight column
       {
         accessorKey: 'weight',
-        header: t('Weight'),
-        meta: { mobileHidden: true },
+        header: ({ column }) => (
+          <div className='flex items-center gap-1'>
+            <DataTableColumnHeader column={column} title={t('Weight')} />
+            <RoutingColumnHelp kind='weight' />
+          </div>
+        ),
+        meta: { mobileHidden: true, label: t('Weight') },
         cell: ({ row }) => <WeightCell channel={row.original} />,
-        size: 90,
+        size: 110,
         enableSorting: false,
       },
 
