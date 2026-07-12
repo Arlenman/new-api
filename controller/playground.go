@@ -13,6 +13,26 @@ import (
 )
 
 func Playground(c *gin.Context) {
+	PlaygroundRelay(c, types.RelayFormatOpenAI)
+}
+
+func PlaygroundImage(c *gin.Context) {
+	if shouldRunPlaygroundImageAsync(c) {
+		startAsyncPlaygroundImage(c)
+		return
+	}
+
+	originalWriter := c.Writer
+	captureWriter := newPlaygroundImageCaptureWriter(originalWriter)
+	c.Writer = captureWriter
+
+	PlaygroundRelay(c, types.RelayFormatOpenAIImage)
+
+	c.Writer = originalWriter
+	writeCapturedPlaygroundImageResponse(c, captureWriter)
+}
+
+func PlaygroundRelay(c *gin.Context, relayFormat types.RelayFormat) {
 	var newAPIError *types.NewAPIError
 
 	defer func() {
@@ -52,5 +72,5 @@ func Playground(c *gin.Context) {
 	}
 	_ = middleware.SetupContextForToken(c, tempToken)
 
-	Relay(c, types.RelayFormatOpenAI)
+	Relay(c, relayFormat)
 }

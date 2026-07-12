@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -275,7 +276,8 @@ func Register(c *gin.Context) {
 
 func GetAllUsers(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
-	users, total, err := model.GetAllUsers(pageInfo)
+	showHidden := c.Query("show_hidden") == "true"
+	users, total, err := model.GetAllUsers(pageInfo, showHidden)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -291,6 +293,7 @@ func GetAllUsers(c *gin.Context) {
 func SearchUsers(c *gin.Context) {
 	keyword := c.Query("keyword")
 	group := c.Query("group")
+	showHidden := c.Query("show_hidden") == "true"
 	var role *int
 	if roleStr := c.Query("role"); roleStr != "" {
 		if parsed, err := strconv.Atoi(roleStr); err == nil {
@@ -304,7 +307,7 @@ func SearchUsers(c *gin.Context) {
 		}
 	}
 	pageInfo := common.GetPageQuery(c)
-	users, total, err := model.SearchUsers(keyword, group, role, status, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	users, total, err := model.SearchUsers(keyword, group, role, status, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), showHidden)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -626,11 +629,19 @@ func GetUserModels(c *gin.Context) {
 
 func UpdateUser(c *gin.Context) {
 	var updatedUser model.User
-	err := json.NewDecoder(c.Request.Body).Decode(&updatedUser)
+	body, readErr := io.ReadAll(c.Request.Body)
+	if readErr != nil {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
+	err := json.Unmarshal(body, &updatedUser)
 	if err != nil || updatedUser.Id == 0 {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
+	var rawPayload map[string]json.RawMessage
+	_ = json.Unmarshal(body, &rawPayload)
+	_, hiddenTouched := rawPayload["hidden"]
 	if updatedUser.Password == "" {
 		updatedUser.Password = "$I_LOVE_U" // make Validator happy :)
 	}
@@ -646,6 +657,9 @@ func UpdateUser(c *gin.Context) {
 	if updatedUser.Role != common.RoleGuestUser && updatedUser.Role != originUser.Role {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
+	}
+	if !hiddenTouched {
+		updatedUser.Hidden = originUser.Hidden
 	}
 	updatedUser.Role = originUser.Role
 	myRole := c.GetInt("role")

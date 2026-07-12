@@ -40,6 +40,7 @@ import {
   ApiKeyCell,
   ModelLimitsCell,
   IpRestrictionsCell,
+  ApiKeyTagsCell,
 } from './api-keys-cells'
 import { DataTableRowActions } from './data-table-row-actions'
 
@@ -233,6 +234,15 @@ export function useApiKeysColumns(): ColumnDef<ApiKey>[] {
         )
       },
       size: 160,
+      meta: { mobileHidden: true },
+    },
+    {
+      id: 'tags',
+      accessorKey: 'tags',
+      header: t('Key Tags'),
+      cell: ({ row }) => <ApiKeyTagsCell apiKey={row.original} />,
+      enableSorting: false,
+      size: 180,
       meta: { mobileHidden: true },
     },
     {

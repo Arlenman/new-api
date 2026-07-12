@@ -16,8 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { MESSAGE_ROLES } from '../../constants'
-import type { Message } from '../../types'
+import { MESSAGE_ROLES } from '../../constants.ts'
+import type { Message } from '../../types.ts'
 
 export function completeAssistantTiming(
   message: Message,

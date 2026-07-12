@@ -20,11 +20,39 @@ import { useCallback, useState } from 'react'
 
 import {
   appendUserMessagePair,
+  appendUserImageMessagePair,
   applyMessageEdit,
-  createRegeneratedMessages,
+  createRegenerateMessageAction,
+  isImageGenerationModel,
   removeMessageByKey,
+  shouldBlockImageActionForModel,
+  shouldBlockImageSubmissionForModel,
+  shouldUseImageGenerationPath,
 } from '../lib'
-import type { Message } from '../types'
+import type {
+  Message,
+  PlaygroundImageFile,
+  PlaygroundSession,
+  PlaygroundSubmitPayload,
+} from '../types'
+
+type CommitActiveSessionMessages = (
+  messages: Message[],
+  titleContent?: string
+) => {
+  sessionId: string
+  sessions: PlaygroundSession[]
+} | null
+
+type SendImageOptions = {
+  sessionId: string
+  assistantMessageKey: string
+  prompt: string
+  files?: PlaygroundImageFile[]
+  imageSize?: string
+  sessions: PlaygroundSession[]
+  sessionMessages: Message[]
+}
 
 type UsePlaygroundConversationOptions = {
   messages: Message[]
@@ -32,35 +60,134 @@ type UsePlaygroundConversationOptions = {
     updater: Message[] | ((prev: Message[]) => Message[])
   ) => void
   sendChat: (messages: Message[]) => void
+  sendImage: (options: SendImageOptions) => void
+  commitActiveSessionMessages: CommitActiveSessionMessages
+  model: string
+  imageSize: string
+  onFirstMessage?: (content: string) => void
+  onInvalidImageModel?: () => void
+}
+
+function getLastAssistantMessageKey(messages: Message[]): string | null {
+  const message = messages.at(-1)
+  return message?.from === 'assistant' ? message.key : null
 }
 
 export function usePlaygroundConversation({
   messages,
   updateMessages,
   sendChat,
+  sendImage,
+  commitActiveSessionMessages,
+  model,
+  imageSize,
+  onFirstMessage,
+  onInvalidImageModel,
 }: UsePlaygroundConversationOptions) {
   const [editingMessageKey, setEditingMessageKey] = useState<string | null>(
     null
   )
 
   const handleSendMessage = useCallback(
-    (text: string) => {
+    (payload: PlaygroundSubmitPayload | string) => {
+      const text = typeof payload === 'string' ? payload : payload.text
+      const files = typeof payload === 'string' ? [] : (payload.files ?? [])
+      const hasImageFiles = files.length > 0
+      const shouldGenerateImage = shouldUseImageGenerationPath(
+        model,
+        text,
+        hasImageFiles
+      )
+
+      if (shouldBlockImageSubmissionForModel(model, text, hasImageFiles)) {
+        onInvalidImageModel?.()
+        return
+      }
+
+      onFirstMessage?.(text)
+
+      if (shouldGenerateImage) {
+        const nextMessages = appendUserImageMessagePair(messages, text)
+        const assistantMessageKey = getLastAssistantMessageKey(nextMessages)
+        const commitResult = commitActiveSessionMessages(nextMessages, text)
+        if (!assistantMessageKey || !commitResult) {
+          updateMessages(nextMessages)
+          return
+        }
+
+        sendImage({
+          sessionId: commitResult.sessionId,
+          assistantMessageKey,
+          prompt: text,
+          files,
+          imageSize:
+            typeof payload === 'string' ? imageSize : payload.imageSize,
+          sessions: commitResult.sessions,
+          sessionMessages: nextMessages,
+        })
+        return
+      }
+
       const nextMessages = appendUserMessagePair(messages, text)
       updateMessages(nextMessages)
       sendChat(nextMessages)
     },
-    [messages, updateMessages, sendChat]
+    [
+      messages,
+      model,
+      onFirstMessage,
+      commitActiveSessionMessages,
+      imageSize,
+      onInvalidImageModel,
+      sendChat,
+      sendImage,
+      updateMessages,
+    ]
   )
 
   const handleRegenerateMessage = useCallback(
     (message: Message) => {
-      const nextMessages = createRegeneratedMessages(messages, message.key)
-      if (!nextMessages) return
+      const action = createRegenerateMessageAction(messages, message.key, {
+        forceImage: isImageGenerationModel(model),
+      })
+      if (!action) return
 
-      updateMessages(nextMessages)
-      sendChat(nextMessages)
+      updateMessages(action.messages)
+      if (action.mode === 'image') {
+        if (shouldBlockImageActionForModel(action.mode, model)) {
+          onInvalidImageModel?.()
+          return
+        }
+
+        const assistantMessageKey = getLastAssistantMessageKey(action.messages)
+        const commitResult = commitActiveSessionMessages(action.messages)
+        if (!assistantMessageKey || !commitResult) {
+          return
+        }
+
+        sendImage({
+          sessionId: commitResult.sessionId,
+          assistantMessageKey,
+          prompt: action.prompt,
+          imageSize,
+          sessions: commitResult.sessions,
+          sessionMessages: action.messages,
+        })
+        return
+      }
+
+      sendChat(action.messages)
     },
-    [messages, updateMessages, sendChat]
+    [
+      messages,
+      model,
+      updateMessages,
+      sendChat,
+      sendImage,
+      commitActiveSessionMessages,
+      imageSize,
+      onInvalidImageModel,
+    ]
   )
 
   const handleEditMessage = useCallback((message: Message) => {
@@ -81,7 +208,10 @@ export function usePlaygroundConversation({
         messages,
         editingMessageKey,
         newContent,
-        shouldSubmit
+        shouldSubmit,
+        {
+          forceImage: isImageGenerationModel(model),
+        }
       )
       if (!editResult) return
 
@@ -89,10 +219,45 @@ export function usePlaygroundConversation({
       updateMessages(editResult.messages)
 
       if (editResult.shouldSend) {
+        if (editResult.mode === 'image') {
+          if (shouldBlockImageActionForModel(editResult.mode, model)) {
+            onInvalidImageModel?.()
+            return
+          }
+
+          const assistantMessageKey = getLastAssistantMessageKey(
+            editResult.messages
+          )
+          const commitResult = commitActiveSessionMessages(editResult.messages)
+          if (!assistantMessageKey || !commitResult) {
+            return
+          }
+
+          sendImage({
+            sessionId: commitResult.sessionId,
+            assistantMessageKey,
+            prompt: editResult.prompt,
+            imageSize,
+            sessions: commitResult.sessions,
+            sessionMessages: editResult.messages,
+          })
+          return
+        }
+
         sendChat(editResult.messages)
       }
     },
-    [editingMessageKey, messages, updateMessages, sendChat]
+    [
+      editingMessageKey,
+      messages,
+      model,
+      updateMessages,
+      sendChat,
+      sendImage,
+      commitActiveSessionMessages,
+      imageSize,
+      onInvalidImageModel,
+    ]
   )
 
   const handleDeleteMessage = useCallback(

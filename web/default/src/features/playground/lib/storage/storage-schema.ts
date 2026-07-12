@@ -27,6 +27,7 @@ export const MAX_LOADED_MESSAGE_CHARS = 40_000
 export const playgroundConfigSchema = z.object({
   model: z.string().optional(),
   group: z.string().optional(),
+  imageSize: z.string().optional(),
   temperature: z.number().optional(),
   top_p: z.number().optional(),
   max_tokens: z.number().optional(),
@@ -46,11 +47,19 @@ export const parameterEnabledSchema = z.object({
 })
 
 const messageRoleSchema = z.enum(['user', 'assistant', 'system'])
+const messageModeSchema = z.enum(['chat', 'image'])
 const messageStatusSchema = z.enum([
   'loading',
   'streaming',
   'complete',
   'error',
+])
+const imageGenerationTaskStatusSchema = z.enum([
+  'pending',
+  'complete',
+  'retryable',
+  'error',
+  'cancelled',
 ])
 
 const messageVersionSchema = z.object({
@@ -71,10 +80,22 @@ const reasoningSchema = z.object({
   durationMs: z.number().optional(),
 })
 
+const imageGenerationSchema = z.object({
+  taskId: z.string(),
+  prompt: z.string(),
+  size: z.string(),
+  status: imageGenerationTaskStatusSchema,
+  startedAt: z.number().optional(),
+  completedAt: z.number().optional(),
+  error: z.string().optional(),
+})
+
 const messageSchema = z.object({
   key: z.string(),
   from: messageRoleSchema,
   versions: z.array(messageVersionSchema).min(1),
+  mode: messageModeSchema.optional(),
+  imageGeneration: imageGenerationSchema.optional(),
   createdAt: z.number().optional(),
   startedAt: z.number().optional(),
   completedAt: z.number().optional(),
@@ -89,3 +110,13 @@ const messageSchema = z.object({
 })
 
 export const messagesSchema = z.array(messageSchema)
+
+const playgroundSessionSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  messages: messagesSchema,
+  createdAt: z.number(),
+  updatedAt: z.number(),
+})
+
+export const playgroundSessionsSchema = z.array(playgroundSessionSchema)

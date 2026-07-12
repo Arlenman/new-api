@@ -18,23 +18,43 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+import {
+  createPlaygroundSessionRemote,
+  deletePlaygroundSessionRemote,
+  getPlaygroundSessions,
+  importPlaygroundSessions,
+  renamePlaygroundSessionRemote,
+  savePlaygroundSessionMessages,
+} from '../api'
 import { DEFAULT_CONFIG, DEFAULT_PARAMETER_ENABLED } from '../constants'
 import {
   saveConfig,
   saveParameterEnabled,
-  saveMessages,
   applyMessageStateUpdate,
   getInitialParameterEnabled,
   getInitialPlaygroundConfig,
+  buildInitialPlaygroundSessions,
+  createPlaygroundSession,
+  DEFAULT_PLAYGROUND_SESSION_TITLE,
+  deletePlaygroundSession,
+  getSessionTitleFromMessage,
+  loadActiveSessionId,
   loadMessages,
+  loadSessions,
+  renamePlaygroundSession,
+  saveActiveSessionId,
+  saveSessions,
+  updatePlaygroundSessionMessages,
   type MessageStateUpdater,
 } from '../lib'
+import { imageGenerationTaskManager } from '../lib/image/image-generation-task-manager-singleton'
 import type {
   Message,
   PlaygroundConfig,
   ParameterEnabled,
   ModelOption,
   GroupOption,
+  PlaygroundSession,
 } from '../types'
 
 const MESSAGE_SAVE_DEBOUNCE_MS = 500
@@ -53,16 +73,64 @@ export function usePlaygroundState() {
   )
 
   const [messages, setMessages] = useState<Message[]>([])
+  const [sessions, setSessions] = useState<PlaygroundSession[]>([])
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [isLoadingMessages, setIsLoadingMessages] = useState(true)
   const messagesSaveTimerRef = useRef<number | null>(null)
   const latestMessagesRef = useRef<Message[]>(messages)
+  const latestSessionsRef = useRef<PlaygroundSession[]>(sessions)
+  const latestActiveSessionIdRef = useRef<string | null>(activeSessionId)
   const hasLoadedMessagesRef = useRef(false)
+  const serverSyncEnabledRef = useRef(true)
+  const serverSaveTimersRef = useRef<Map<string, number>>(new Map())
+  const pendingServerMessagesRef = useRef<Map<string, Message[]>>(new Map())
 
   const [models, setModels] = useState<ModelOption[]>([])
   const [groups, setGroups] = useState<GroupOption[]>([])
 
-  const persistMessages = useCallback((messagesToSave: Message[]) => {
-    latestMessagesRef.current = messagesToSave
+  const syncSessionMessagesToServer = useCallback(
+    (sessionId: string, messagesToSave: Message[]) => {
+      if (!serverSyncEnabledRef.current) {
+        return
+      }
+
+      pendingServerMessagesRef.current.set(sessionId, messagesToSave)
+      const previousTimer = serverSaveTimersRef.current.get(sessionId)
+      if (previousTimer !== undefined) {
+        window.clearTimeout(previousTimer)
+      }
+
+      const timer = window.setTimeout(() => {
+        serverSaveTimersRef.current.delete(sessionId)
+        const pendingMessages = pendingServerMessagesRef.current.get(sessionId)
+        pendingServerMessagesRef.current.delete(sessionId)
+        if (!pendingMessages) {
+          return
+        }
+        void savePlaygroundSessionMessages(sessionId, pendingMessages).catch(
+          async () => {
+            const session = latestSessionsRef.current.find(
+              (item) => item.id === sessionId
+            )
+            if (!session) {
+              return
+            }
+            try {
+              await createPlaygroundSessionRemote(session)
+              await savePlaygroundSessionMessages(sessionId, pendingMessages)
+            } catch {
+              /* empty */
+            }
+          }
+        )
+      }, MESSAGE_SAVE_DEBOUNCE_MS)
+      serverSaveTimersRef.current.set(sessionId, timer)
+    },
+    []
+  )
+
+  const persistSessions = useCallback((sessionsToSave: PlaygroundSession[]) => {
+    latestSessionsRef.current = sessionsToSave
 
     if (!hasLoadedMessagesRef.current) {
       return
@@ -74,23 +142,102 @@ export function usePlaygroundState() {
 
     messagesSaveTimerRef.current = window.setTimeout(() => {
       messagesSaveTimerRef.current = null
-      saveMessages(latestMessagesRef.current)
+      saveSessions(latestSessionsRef.current)
     }, MESSAGE_SAVE_DEBOUNCE_MS)
   }, [])
+
+  const persistMessages = useCallback(
+    (messagesToSave: Message[]) => {
+      latestMessagesRef.current = messagesToSave
+      const currentSessionId = latestActiveSessionIdRef.current
+
+      if (!hasLoadedMessagesRef.current) {
+        return
+      }
+
+      if (!currentSessionId) {
+        return
+      }
+
+      setSessions((prevSessions) => {
+        const updatedSessions = updatePlaygroundSessionMessages(
+          prevSessions,
+          currentSessionId,
+          messagesToSave
+        )
+        latestSessionsRef.current = updatedSessions
+        persistSessions(updatedSessions)
+        syncSessionMessagesToServer(currentSessionId, messagesToSave)
+        return updatedSessions
+      })
+    },
+    [persistSessions, syncSessionMessagesToServer]
+  )
 
   useEffect(() => {
     let cancelled = false
 
-    window.setTimeout(() => {
-      const loadedMessages = loadMessages() ?? []
+    window.setTimeout(async () => {
+      const storedSessions = loadSessions()
+      const storedActiveSessionId = loadActiveSessionId()
+      const legacyMessages = loadMessages() ?? []
+      let sourceSessions = storedSessions
+      let shouldCreateInitialRemoteSession = false
+
+      try {
+        const serverSessions = await getPlaygroundSessions()
+        if (serverSessions.length > 0) {
+          sourceSessions = serverSessions
+        } else if (storedSessions?.length) {
+          sourceSessions = await importPlaygroundSessions(storedSessions)
+        } else if (legacyMessages.length > 0) {
+          const legacyInitial = buildInitialPlaygroundSessions({
+            storedSessions: null,
+            activeSessionId: null,
+            legacyMessages,
+          })
+          sourceSessions = await importPlaygroundSessions(
+            legacyInitial.sessions
+          )
+        } else {
+          shouldCreateInitialRemoteSession = true
+        }
+      } catch {
+        serverSyncEnabledRef.current = false
+      }
+
+      const initial = buildInitialPlaygroundSessions({
+        storedSessions: sourceSessions,
+        activeSessionId: storedActiveSessionId,
+        legacyMessages,
+      })
       if (cancelled) {
         return
       }
 
-      latestMessagesRef.current = loadedMessages
+      const activeSession =
+        initial.sessions.find(
+          (session) => session.id === initial.activeSessionId
+        ) ?? initial.sessions[0]
+
+      latestSessionsRef.current = initial.sessions
+      latestActiveSessionIdRef.current = activeSession.id
+      latestMessagesRef.current = activeSession.messages
       hasLoadedMessagesRef.current = true
-      setMessages(loadedMessages)
+      setSessions(initial.sessions)
+      setActiveSessionId(activeSession.id)
+      setMessages(activeSession.messages)
+      saveSessions(initial.sessions)
+      saveActiveSessionId(activeSession.id)
       setIsLoadingMessages(false)
+      if (
+        shouldCreateInitialRemoteSession &&
+        serverSyncEnabledRef.current
+      ) {
+        void createPlaygroundSessionRemote(activeSession).catch(
+          () => undefined
+        )
+      }
     }, 0)
 
     return () => {
@@ -102,10 +249,49 @@ export function usePlaygroundState() {
     () => () => {
       if (messagesSaveTimerRef.current !== null) {
         window.clearTimeout(messagesSaveTimerRef.current)
-        saveMessages(latestMessagesRef.current)
+        saveSessions(latestSessionsRef.current)
       }
+      serverSaveTimersRef.current.forEach((timer, sessionId) => {
+        window.clearTimeout(timer)
+        const pendingMessages = pendingServerMessagesRef.current.get(sessionId)
+        if (pendingMessages) {
+          void savePlaygroundSessionMessages(sessionId, pendingMessages).catch(
+            () => undefined
+          )
+        }
+      })
+      serverSaveTimersRef.current.clear()
+      pendingServerMessagesRef.current.clear()
     },
     []
+  )
+
+  useEffect(
+    () =>
+      imageGenerationTaskManager.subscribe((snapshot) => {
+        if (!snapshot.sessions) {
+          return
+        }
+
+        latestSessionsRef.current = snapshot.sessions
+        setSessions(snapshot.sessions)
+
+        const currentSessionId = latestActiveSessionIdRef.current
+        if (!currentSessionId) {
+          return
+        }
+        const activeSession = snapshot.sessions.find(
+          (session) => session.id === currentSessionId
+        )
+        if (!activeSession) {
+          return
+        }
+
+        latestMessagesRef.current = activeSession.messages
+        setMessages(activeSession.messages)
+        syncSessionMessagesToServer(currentSessionId, activeSession.messages)
+      }),
+    [syncSessionMessagesToServer]
   )
 
   // Update config with automatic save
@@ -144,10 +330,160 @@ export function usePlaygroundState() {
     [persistMessages]
   )
 
+  const commitActiveSessionMessages = useCallback(
+    (messagesToSave: Message[], titleContent?: string) => {
+      const currentSessionId = latestActiveSessionIdRef.current
+      if (!currentSessionId) {
+        return null
+      }
+
+      let baseSessions = latestSessionsRef.current
+      const currentSession = baseSessions.find(
+        (session) => session.id === currentSessionId
+      )
+
+      if (
+        titleContent &&
+        currentSession?.title === DEFAULT_PLAYGROUND_SESSION_TITLE &&
+        currentSession.messages.length === 0
+      ) {
+        baseSessions = renamePlaygroundSession(
+          baseSessions,
+          currentSessionId,
+          getSessionTitleFromMessage(titleContent)
+        )
+      }
+
+      const updatedSessions = updatePlaygroundSessionMessages(
+        baseSessions,
+        currentSessionId,
+        messagesToSave
+      )
+
+      latestMessagesRef.current = messagesToSave
+      latestSessionsRef.current = updatedSessions
+      setMessages(messagesToSave)
+      setSessions(updatedSessions)
+      persistSessions(updatedSessions)
+      syncSessionMessagesToServer(currentSessionId, messagesToSave)
+
+      return {
+        sessionId: currentSessionId,
+        sessions: updatedSessions,
+      }
+    },
+    [persistSessions, syncSessionMessagesToServer]
+  )
+
   // Clear all messages
   const clearMessages = useCallback(() => {
     updateMessages([])
   }, [updateMessages])
+
+  const createSession = useCallback(() => {
+    const session = createPlaygroundSession()
+    setSessions((prevSessions) => {
+      const updatedSessions = [session, ...prevSessions]
+      latestSessionsRef.current = updatedSessions
+      persistSessions(updatedSessions)
+      return updatedSessions
+    })
+    latestActiveSessionIdRef.current = session.id
+    latestMessagesRef.current = []
+    setActiveSessionId(session.id)
+    setMessages([])
+    saveActiveSessionId(session.id)
+    if (serverSyncEnabledRef.current) {
+      void createPlaygroundSessionRemote(session).catch(() => undefined)
+    }
+  }, [persistSessions])
+
+  const selectSession = useCallback((sessionId: string) => {
+    const session = latestSessionsRef.current.find(
+      (item) => item.id === sessionId
+    )
+    if (!session) {
+      return
+    }
+
+    latestActiveSessionIdRef.current = sessionId
+    latestMessagesRef.current = session.messages
+    setActiveSessionId(sessionId)
+    setMessages(session.messages)
+    saveActiveSessionId(sessionId)
+  }, [])
+
+  const renameSession = useCallback(
+    (sessionId: string, title: string) => {
+      setSessions((prevSessions) => {
+        const updatedSessions = renamePlaygroundSession(
+          prevSessions,
+          sessionId,
+          title
+        )
+        latestSessionsRef.current = updatedSessions
+        persistSessions(updatedSessions)
+        return updatedSessions
+      })
+      if (serverSyncEnabledRef.current) {
+        void renamePlaygroundSessionRemote(sessionId, title).catch(
+          () => undefined
+        )
+      }
+    },
+    [persistSessions]
+  )
+
+  const deleteSession = useCallback(
+    (sessionId: string) => {
+      const result = deletePlaygroundSession(latestSessionsRef.current, sessionId)
+      const activeSession = result.sessions.find(
+        (session) => session.id === result.activeSessionId
+      )
+
+      latestSessionsRef.current = result.sessions
+      latestActiveSessionIdRef.current = result.activeSessionId
+      latestMessagesRef.current = activeSession?.messages ?? []
+      setSessions(result.sessions)
+      setActiveSessionId(result.activeSessionId)
+      setMessages(activeSession?.messages ?? [])
+      saveActiveSessionId(result.activeSessionId)
+      persistSessions(result.sessions)
+      if (serverSyncEnabledRef.current) {
+        void deletePlaygroundSessionRemote(sessionId).catch(() => undefined)
+      }
+    },
+    [persistSessions]
+  )
+
+  const renameActiveSessionFromMessage = useCallback((content: string) => {
+    const currentSessionId = latestActiveSessionIdRef.current
+    if (!currentSessionId) {
+      return
+    }
+
+    setSessions((prevSessions) => {
+      const currentSession = prevSessions.find(
+        (session) => session.id === currentSessionId
+      )
+      if (
+        !currentSession ||
+        currentSession.title !== DEFAULT_PLAYGROUND_SESSION_TITLE ||
+        currentSession.messages.length > 0
+      ) {
+        return prevSessions
+      }
+
+      const updatedSessions = renamePlaygroundSession(
+        prevSessions,
+        currentSessionId,
+        getSessionTitleFromMessage(content)
+      )
+      latestSessionsRef.current = updatedSessions
+      persistSessions(updatedSessions)
+      return updatedSessions
+    })
+  }, [persistSessions])
 
   // Reset config to defaults
   const resetConfig = useCallback(() => {
@@ -162,6 +498,8 @@ export function usePlaygroundState() {
     config,
     parameterEnabled,
     messages,
+    sessions,
+    activeSessionId,
     isLoadingMessages,
     models,
     groups,
@@ -174,7 +512,13 @@ export function usePlaygroundState() {
     updateConfig,
     updateParameterEnabled,
     updateMessages,
+    commitActiveSessionMessages,
     clearMessages,
+    createSession,
+    selectSession,
+    renameSession,
+    deleteSession,
+    renameActiveSessionFromMessage,
     resetConfig,
   }
 }

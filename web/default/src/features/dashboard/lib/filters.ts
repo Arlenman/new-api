@@ -154,16 +154,22 @@ export function buildDefaultDashboardFilters(
 
 export function buildQueryParams(
   timeRange: { start_timestamp: number; end_timestamp: number },
-  filters?: { time_granularity?: TimeGranularity; username?: string }
+  filters?: {
+    time_granularity?: TimeGranularity
+    username?: string
+    token_tag?: string
+  }
 ): {
   start_timestamp: number
   end_timestamp: number
   default_time: string
   username?: string
+  token_tag?: string
 } {
   return {
     ...timeRange,
     default_time: getSavedGranularity(filters?.time_granularity),
     ...(filters?.username && { username: filters.username }),
+    ...(filters?.token_tag && { token_tag: filters.token_tag }),
   }
 }

@@ -16,12 +16,26 @@ export default defineConfig(({ envMode }) => {
     'http://localhost:3000'
 
   const isProd = envMode === 'production'
+  const proxyTimeoutMs = 10 * 60 * 1000
   const devProxy = Object.fromEntries(
     (['/api', '/mj', '/pg'] as const).map((key) => [
       key,
-      { target: serverUrl, changeOrigin: true },
+      {
+        target: serverUrl,
+        changeOrigin: true,
+        timeout: proxyTimeoutMs,
+        proxyTimeout: proxyTimeoutMs,
+      },
     ])
-  ) as Record<string, { target: string; changeOrigin: boolean }>
+  ) as Record<
+    string,
+    {
+      target: string
+      changeOrigin: boolean
+      timeout: number
+      proxyTimeout: number
+    }
+  >
 
   return {
     plugins: [pluginReact(), pluginTailwindcss({ optimize: false })],

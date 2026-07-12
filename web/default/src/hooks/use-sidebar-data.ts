@@ -30,6 +30,7 @@ import {
   Radio,
   ServerCog,
   Settings,
+  Tags,
   Ticket,
   User,
   Users,
@@ -40,7 +41,6 @@ import { getEnabledCustomNavMenusForPlacement } from '@/lib/nav-modules'
 import { ROLE } from '@/lib/roles'
 import { useStatus } from '@/hooks/use-status'
 import { type SidebarData } from '@/components/layout/types'
-import { ROLE } from '@/lib/roles'
 
 /**
  * Root navigation groups for the application sidebar.
@@ -91,6 +91,11 @@ export function useSidebarData(): SidebarData {
           title: t('API Keys'),
           url: '/keys',
           icon: Key,
+        },
+        {
+          title: t('Key Tag Analytics'),
+          url: '/token-tags',
+          icon: Tags,
         },
         {
           title: t('Usage Logs'),

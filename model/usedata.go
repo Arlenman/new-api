@@ -38,6 +38,19 @@ type QuotaDataLogParams struct {
 	NodeName  string
 }
 
+type TokenTagQuotaData struct {
+	TagID      int    `json:"tag_id" gorm:"column:tag_id"`
+	TagName    string `json:"tag_name" gorm:"column:tag_name"`
+	UserID     int    `json:"user_id,omitempty" gorm:"column:user_id"`
+	Username   string `json:"username,omitempty" gorm:"column:username"`
+	TokenID    int    `json:"token_id" gorm:"column:token_id"`
+	TokenName  string `json:"token_name" gorm:"column:token_name"`
+	TokenUsed  int    `json:"token_used" gorm:"column:token_used"`
+	Count      int    `json:"count" gorm:"column:count"`
+	Quota      int    `json:"quota" gorm:"column:quota"`
+	LastUsedAt int64  `json:"last_used_at" gorm:"-"`
+}
+
 func UpdateQuotaData() {
 	for {
 		if common.DataExportEnabled {
@@ -138,46 +151,170 @@ func increaseQuotaData(quotaData *QuotaData) {
 	}
 }
 
-func GetQuotaDataByUsername(username string, startTime int64, endTime int64) (quotaData []*QuotaData, err error) {
+func applyQuotaTokenTagFilter(tx *gorm.DB, userID int, tokenTag string) (*gorm.DB, error) {
+	if tokenTag == "" {
+		return tx, nil
+	}
+	tokenIDs, err := GetTokenIDsByTagName(userID, tokenTag)
+	if err != nil {
+		return nil, err
+	}
+	if len(tokenIDs) == 0 {
+		return tx.Where("1 = 0"), nil
+	}
+	return tx.Where("token_id IN ?", tokenIDs), nil
+}
+
+func GetQuotaDataByUsername(username string, startTime int64, endTime int64, tokenTag string) (quotaData []*QuotaData, err error) {
 	var quotaDatas []*QuotaData
 	// 从quota_data表中查询数据
-	err = DB.Table("quota_data").
+	query := DB.Table("quota_data").
 		Select("user_id, username, model_name, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
-		Where("username = ? and created_at >= ? and created_at <= ?", username, startTime, endTime).
-		Group("user_id, username, model_name, created_at").
-		Find(&quotaDatas).Error
+		Where("username = ? and created_at >= ? and created_at <= ?", username, startTime, endTime)
+	if query, err = applyHiddenUserFilter(query, "user_id", true); err != nil {
+		return nil, err
+	}
+	if query, err = applyQuotaTokenTagFilter(query, 0, tokenTag); err != nil {
+		return nil, err
+	}
+	err = query.Group("user_id, username, model_name, created_at").Find(&quotaDatas).Error
 	return quotaDatas, err
 }
 
-func GetQuotaDataByUserId(userId int, startTime int64, endTime int64) (quotaData []*QuotaData, err error) {
+func GetQuotaDataByUserId(userId int, startTime int64, endTime int64, tokenTag string) (quotaData []*QuotaData, err error) {
 	var quotaDatas []*QuotaData
 	// 从quota_data表中查询数据
-	err = DB.Table("quota_data").
+	query := DB.Table("quota_data").
 		Select("user_id, username, model_name, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
-		Where("user_id = ? and created_at >= ? and created_at <= ?", userId, startTime, endTime).
-		Group("user_id, username, model_name, created_at").
-		Find(&quotaDatas).Error
+		Where("user_id = ? and created_at >= ? and created_at <= ?", userId, startTime, endTime)
+	if query, err = applyQuotaTokenTagFilter(query, userId, tokenTag); err != nil {
+		return nil, err
+	}
+	err = query.Group("user_id, username, model_name, created_at").Find(&quotaDatas).Error
 	return quotaDatas, err
 }
 
 func GetQuotaDataGroupByUser(startTime int64, endTime int64) (quotaData []*QuotaData, err error) {
 	var quotaDatas []*QuotaData
-	err = DB.Table("quota_data").
+	query := DB.Table("quota_data").
 		Select("username, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
-		Where("created_at >= ? and created_at <= ?", startTime, endTime).
-		Group("username, created_at").
-		Find(&quotaDatas).Error
+		Where("created_at >= ? and created_at <= ?", startTime, endTime)
+	if query, err = applyHiddenUserFilter(query, "user_id", true); err != nil {
+		return nil, err
+	}
+	err = query.Group("username, created_at").Find(&quotaDatas).Error
 	return quotaDatas, err
 }
 
-func GetAllQuotaDates(startTime int64, endTime int64, username string) (quotaData []*QuotaData, err error) {
+func GetAllQuotaDates(startTime int64, endTime int64, username string, tokenTag string) (quotaData []*QuotaData, err error) {
 	if username != "" {
-		return GetQuotaDataByUsername(username, startTime, endTime)
+		return GetQuotaDataByUsername(username, startTime, endTime, tokenTag)
 	}
 	var quotaDatas []*QuotaData
 	// 从quota_data表中查询数据
 	// only select model_name, sum(count) as count, sum(quota) as quota, model_name, created_at from quota_data group by model_name, created_at;
 	//err = DB.Table("quota_data").Where("created_at >= ? and created_at <= ?", startTime, endTime).Find(&quotaDatas).Error
-	err = DB.Table("quota_data").Select("model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used, created_at").Where("created_at >= ? and created_at <= ?", startTime, endTime).Group("model_name, created_at").Find(&quotaDatas).Error
+	query := DB.Table("quota_data").Select("model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used, created_at").Where("created_at >= ? and created_at <= ?", startTime, endTime)
+	if query, err = applyHiddenUserFilter(query, "user_id", true); err != nil {
+		return nil, err
+	}
+	if query, err = applyQuotaTokenTagFilter(query, 0, tokenTag); err != nil {
+		return nil, err
+	}
+	err = query.Group("model_name, created_at").Find(&quotaDatas).Error
 	return quotaDatas, err
+}
+
+func GetTokenTagQuotaData(startTime int64, endTime int64, username string, userID int, role int, tokenTag string) ([]*TokenTagQuotaData, error) {
+	rows := make([]*TokenTagQuotaData, 0)
+	logDB := LOG_DB
+	if logDB == nil {
+		logDB = DB
+	}
+	selectFields := "coalesce(token_tags.id, 0) as tag_id, coalesce(token_tags.name, '') as tag_name, logs.user_id, logs.username, logs.token_id, coalesce(nullif(tokens.name, ''), max(logs.token_name)) as token_name, count(logs.id) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used"
+	groupFields := "token_tags.id, token_tags.name, logs.user_id, logs.username, logs.token_id, tokens.name"
+	query := logDB.Table("logs").
+		Joins("left join token_tag_bindings on token_tag_bindings.token_id = logs.token_id").
+		Joins("left join token_tags on token_tags.id = token_tag_bindings.tag_id and token_tags.user_id = logs.user_id").
+		Joins("left join tokens on tokens.id = logs.token_id").
+		Where("logs.type = ?", LogTypeConsume).
+		Where("logs.created_at >= ? and logs.created_at <= ?", startTime, endTime).
+		Where("logs.token_id > 0")
+
+	if role < common.RoleAdminUser {
+		selectFields = "coalesce(token_tags.id, 0) as tag_id, coalesce(token_tags.name, '') as tag_name, logs.token_id, coalesce(nullif(tokens.name, ''), max(logs.token_name)) as token_name, count(logs.id) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used"
+		groupFields = "token_tags.id, token_tags.name, logs.token_id, tokens.name"
+		query = query.Where("logs.user_id = ?", userID)
+	} else {
+		var err error
+		if query, err = applyHiddenUserFilter(query, "logs.user_id", true); err != nil {
+			return rows, err
+		}
+		if username != "" {
+			query = query.Where("logs.username = ?", username)
+		}
+	}
+	if tokenTag != "" {
+		_, nameKeys, err := normalizeTokenTagNames([]string{tokenTag})
+		if err != nil {
+			return nil, err
+		}
+		if len(nameKeys) == 0 {
+			return rows, nil
+		}
+		query = query.Where("token_tags.name_key = ?", nameKeys[0])
+	}
+
+	err := query.Select(selectFields).
+		Group(groupFields).
+		Order("quota DESC").
+		Find(&rows).Error
+	if err != nil {
+		return rows, err
+	}
+	return rows, fillTokenTagLastUsedAt(rows, startTime, endTime)
+}
+
+func fillTokenTagLastUsedAt(rows []*TokenTagQuotaData, startTime int64, endTime int64) error {
+	if len(rows) == 0 || LOG_DB == nil {
+		return nil
+	}
+	tokenSet := make(map[int]struct{}, len(rows))
+	tokenIDs := make([]int, 0, len(rows))
+	for _, row := range rows {
+		if row.TokenID == 0 {
+			continue
+		}
+		if _, ok := tokenSet[row.TokenID]; ok {
+			continue
+		}
+		tokenSet[row.TokenID] = struct{}{}
+		tokenIDs = append(tokenIDs, row.TokenID)
+	}
+	if len(tokenIDs) == 0 {
+		return nil
+	}
+
+	var lastUsedRows []struct {
+		TokenID    int   `gorm:"column:token_id"`
+		LastUsedAt int64 `gorm:"column:last_used_at"`
+	}
+	if err := LOG_DB.Table("logs").
+		Select("token_id, max(created_at) as last_used_at").
+		Where("type = ?", LogTypeConsume).
+		Where("created_at >= ? and created_at <= ?", startTime, endTime).
+		Where("token_id IN ?", tokenIDs).
+		Group("token_id").
+		Scan(&lastUsedRows).Error; err != nil {
+		return err
+	}
+
+	lastUsedByToken := make(map[int]int64, len(lastUsedRows))
+	for _, row := range lastUsedRows {
+		lastUsedByToken[row.TokenID] = row.LastUsedAt
+	}
+	for _, row := range rows {
+		row.LastUsedAt = lastUsedByToken[row.TokenID]
+	}
+	return nil
 }

@@ -234,7 +234,55 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 		}
 	}
 
+	forcePlaygroundImageStream(c, imageRequest)
+
 	return imageRequest, nil
+}
+
+func forcePlaygroundImageStream(c *gin.Context, imageRequest *dto.ImageRequest) {
+	if imageRequest == nil || !shouldForcePlaygroundImageStream(c, imageRequest.Model) {
+		return
+	}
+	stream := true
+	imageRequest.Stream = &stream
+}
+
+func shouldForcePlaygroundImageStream(c *gin.Context, model string) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	path := c.Request.URL.Path
+	if !strings.HasPrefix(path, "/pg/images/generations") && !strings.HasPrefix(path, "/pg/images/edits") {
+		return false
+	}
+	return isPlaygroundImageStreamModel(model)
+}
+
+func isPlaygroundImageStreamModel(model string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	if normalized == "" {
+		return false
+	}
+	normalized = strings.NewReplacer("_", "-", " ", "-").Replace(normalized)
+	if strings.Contains(normalized, "gpt-image") || strings.Contains(normalized, "gptimage") {
+		return true
+	}
+	for _, marker := range []string{
+		"生图",
+		"绘图",
+		"画图",
+		"图片生成",
+		"生成图片",
+		"图像生成",
+		"生成图像",
+		"文生图",
+		"图生图",
+	} {
+		if strings.Contains(model, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func GetAndValidateClaudeRequest(c *gin.Context) (textRequest *dto.ClaudeRequest, err error) {

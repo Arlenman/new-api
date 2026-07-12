@@ -42,6 +42,8 @@ const (
 	ContextKeyAutoGroupIndex      ContextKey = "auto_group_index"
 	ContextKeyAutoGroupRetryIndex ContextKey = "auto_group_retry_index"
 
+	ContextKeyPlaygroundImageCandidateChannelCount ContextKey = "playground_image_candidate_channel_count"
+
 	/* user related keys */
 	ContextKeyUserId      ContextKey = "id"
 	ContextKeyUserSetting ContextKey = "user_setting"

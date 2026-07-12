@@ -16,25 +16,42 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { SendIcon, SquareIcon } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { ImageIcon, SendIcon, SquareIcon } from 'lucide-react'
+import { useEffect, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { PromptInputButton } from '@/components/ai-elements/prompt-input'
+import {
+  PromptInputButton,
+  usePromptInputAttachments,
+} from '@/components/ai-elements/prompt-input'
 import { ModelGroupSelector } from '@/components/model-group-selector'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 
-import { getInputControlState } from '../../lib'
+import {
+  getImageSizeOptions,
+  getInputControlState,
+  isImageGenerationModel,
+} from '../../lib'
 import type { GroupOption, ModelOption } from '../../types'
 
 type PlaygroundInputControlsProps = {
   disabled?: boolean
   groups: GroupOption[]
   groupValue: string
+  imageSizeValue: string
   isGenerating?: boolean
   isModelLoading?: boolean
   models: ModelOption[]
   modelValue: string
   onGroupChange: (value: string) => void
+  onImageSizeChange: (value: string) => void
   onModelChange: (value: string) => void
   onStop?: () => void
   text: string
@@ -45,21 +62,30 @@ export function PlaygroundInputControls({
   disabled,
   groups,
   groupValue,
+  imageSizeValue,
   isGenerating,
   isModelLoading = false,
   models,
   modelValue,
   onGroupChange,
+  onImageSizeChange,
   onModelChange,
   onStop,
   text,
   tools,
 }: PlaygroundInputControlsProps) {
   const { t } = useTranslation()
+  const attachments = usePromptInputAttachments()
+  const isImageModel = isImageGenerationModel(modelValue)
+  const imageSizeOptions = getImageSizeOptions(modelValue)
+  const hasSelectedImageSize = imageSizeOptions.some(
+    (option) => option.value === imageSizeValue
+  )
   const { canSubmit, isSelectorDisabled, shouldShowStop } =
     getInputControlState({
       disabled,
       groups,
+      hasAttachments: attachments.files.length > 0,
       hasStopHandler: Boolean(onStop),
       isGenerating,
       isModelLoading,
@@ -67,16 +93,62 @@ export function PlaygroundInputControls({
       text,
     })
 
+  useEffect(() => {
+    if (isImageModel && !hasSelectedImageSize) {
+      onImageSizeChange('auto')
+    }
+  }, [hasSelectedImageSize, isImageModel, onImageSizeChange])
+
   const renderSelector = () => (
-    <ModelGroupSelector
-      selectedModel={modelValue}
-      models={models}
-      onModelChange={onModelChange}
-      selectedGroup={groupValue}
-      groups={groups}
-      onGroupChange={onGroupChange}
-      disabled={isSelectorDisabled}
-    />
+    <div className='flex min-w-0 items-center gap-2'>
+      <ModelGroupSelector
+        selectedModel={modelValue}
+        models={models}
+        onModelChange={onModelChange}
+        selectedGroup={groupValue}
+        groups={groups}
+        onGroupChange={onGroupChange}
+        disabled={isSelectorDisabled}
+      />
+      {isImageModel && (
+        <Select
+          items={imageSizeOptions}
+          onValueChange={(value) => {
+            if (value) {
+              onImageSizeChange(value)
+            }
+          }}
+          value={imageSizeValue}
+        >
+          <SelectTrigger
+            className='bg-background/80 hover:bg-accent/70 h-8 max-w-[8.5rem] gap-2 rounded-md px-2.5 text-xs shadow-none'
+            disabled={isSelectorDisabled}
+            size='sm'
+            title={t('Image size')}
+          >
+            <ImageIcon className='text-muted-foreground size-4 shrink-0' />
+            <SelectValue>
+              {t(
+                imageSizeOptions.find((option) => option.value === imageSizeValue)
+                  ?.label ?? 'Auto'
+              )}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent align='end' alignItemWithTrigger={false}>
+            <SelectGroup>
+              {imageSizeOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  <span>{t(option.label)}</span>
+                  <span className='text-muted-foreground text-xs'>
+                    {option.value}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+      )}
+    </div>
   )
 
   const renderSubmitButton = () =>

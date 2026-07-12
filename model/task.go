@@ -251,6 +251,10 @@ func TaskGetAllTasks(startIdx int, num int, queryParams SyncTaskQueryParams) []*
 
 	// 初始化查询构建器
 	query := DB
+	query, err = applyHiddenUserFilter(query, "user_id", true)
+	if err != nil {
+		return nil
+	}
 
 	// 添加过滤条件
 	if queryParams.ChannelID != "" {
@@ -466,6 +470,10 @@ type TaskQuotaUsage struct {
 func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
 	var total int64
 	query := DB.Model(&Task{})
+	query, err := applyHiddenUserFilter(query, "user_id", true)
+	if err != nil {
+		return 0
+	}
 	if queryParams.ChannelID != "" {
 		query = query.Where("channel_id = ?", queryParams.ChannelID)
 	}

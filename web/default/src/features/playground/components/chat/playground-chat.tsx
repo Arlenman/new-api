@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -34,6 +34,10 @@ import {
   getPreviousUserMessage,
   isErrorMessage,
 } from '../../lib'
+import {
+  isImageOnlyMarkdownContent,
+} from '../../lib/image/playground-image-utils'
+import { normalizeImageGenerationRetryableMessage } from '../../lib/message/image-generation-error-utils'
 import type {
   Message as MessageType,
   PlaygroundMessageLayoutMode,
@@ -87,7 +91,11 @@ export function PlaygroundChat({
     0,
     messages.length - MAX_RENDERED_HISTORY_MESSAGES
   )
-  const visibleMessages = messages.slice(visibleMessageOffset)
+  const normalizedMessages = useMemo(
+    () => messages.map(normalizeImageGenerationRetryableMessage),
+    [messages]
+  )
+  const visibleMessages = normalizedMessages.slice(visibleMessageOffset)
 
   function handleToggleMessageSource(message: MessageType): void {
     setSourceMessageKeys((currentKeys) => {
@@ -105,31 +113,35 @@ export function PlaygroundChat({
 
   useEffect(() => {
     if (!editingKey) return
-    const content = getEditingMessageContent(messages, editingKey)
+    const content = getEditingMessageContent(normalizedMessages, editingKey)
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setEditText(content)
 
     setOriginalText(content)
-  }, [editingKey, messages])
+  }, [editingKey, normalizedMessages])
 
   let chatContent = visibleMessages.map((message, visibleMessageIndex) => {
     const messageIndex = visibleMessageOffset + visibleMessageIndex
     const { alwaysShowActions, content, isEditing } = getChatMessageRenderState(
-      messages,
+      normalizedMessages,
       message,
       messageIndex,
       editingKey
     )
     const isError = isErrorMessage(message)
     const previousUserMessage = isError
-      ? getPreviousUserMessage(messages, messageIndex)
+      ? getPreviousUserMessage(normalizedMessages, messageIndex)
       : null
     const alignment = getMessageAlignment(message, messageLayoutMode)
     const isSourceVisible = sourceMessageKeys.has(message.key)
+    const isImageOnlyMessageContent = isImageOnlyMarkdownContent(content)
+    const useCompactImageActions =
+      isImageOnlyMessageContent && !isSourceVisible
+    const messageSpacingClass = isImageOnlyMessageContent ? 'py-1.5' : 'py-2.5'
 
     return (
       <Message
-        className='group flex-row-reverse py-2.5'
+        className={`group flex-row-reverse ${messageSpacingClass}`}
         from={message.from}
         key={message.key}
       >
@@ -157,8 +169,11 @@ export function PlaygroundChat({
                   onDelete={onDeleteMessage}
                   isSourceVisible={isSourceVisible}
                   isGenerating={isGenerating}
-                  alwaysVisible={alwaysShowActions}
-                  className='mt-1.5'
+                  alwaysVisible={
+                    alwaysShowActions && !useCompactImageActions
+                  }
+                  compactFloating={useCompactImageActions}
+                  className={useCompactImageActions ? 'mt-0' : 'mt-1.5'}
                 />
               }
               isSourceVisible={isSourceVisible}
@@ -213,9 +228,11 @@ export function PlaygroundChat({
 
   return (
     <Conversation>
-      {/* Remove outer padding; apply padding to inner centered container to align with input */}
+      {/* Remove outer padding; apply padding to the readable column shared with the input. */}
       <ConversationContent className='p-0'>
-        <div className='mx-auto w-full max-w-4xl px-4 py-4'>{chatContent}</div>
+        <div className='mx-auto w-full max-w-[88rem] px-4 py-4 md:px-6 lg:px-8 xl:px-10'>
+          {chatContent}
+        </div>
       </ConversationContent>
       <ConversationScrollButton />
     </Conversation>

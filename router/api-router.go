@@ -174,6 +174,7 @@ func SetApiRouter(router *gin.Engine) {
 			subscriptionAdminRoute.GET("/users/:id/subscriptions", controller.AdminListUserSubscriptions)
 			subscriptionAdminRoute.POST("/users/:id/subscriptions", controller.AdminCreateUserSubscription)
 			subscriptionAdminRoute.POST("/user_subscriptions/:id/invalidate", controller.AdminInvalidateUserSubscription)
+			subscriptionAdminRoute.PUT("/user_subscriptions/:id", controller.AdminUpdateUserSubscription)
 			subscriptionAdminRoute.DELETE("/user_subscriptions/:id", controller.AdminDeleteUserSubscription)
 		}
 
@@ -233,6 +234,7 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			tokenRoute.GET("/", controller.GetAllTokens)
 			tokenRoute.GET("/search", middleware.SearchRateLimit(), controller.SearchTokens)
+			tokenRoute.GET("/tags", controller.GetTokenTags)
 			tokenRoute.GET("/:id", controller.GetToken)
 			tokenRoute.POST("/:id/key", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKey)
 			tokenRoute.POST("/", controller.AddToken)
@@ -295,6 +297,21 @@ func SetApiRouter(router *gin.Engine) {
 		dataRoute.GET("/self", middleware.UserAuth(), controller.GetUserQuotaDates)
 		dataRoute.GET("/flow", middleware.AdminAuth(), controller.GetAllFlowQuotaDates)
 		dataRoute.GET("/flow/self", middleware.UserAuth(), controller.GetUserFlowQuotaDates)
+		dataRoute.GET("/token-tags/options", middleware.UserAuth(), controller.GetTokenTagOptions)
+		dataRoute.GET("/token-tags", middleware.AdminAuth(), controller.GetAllTokenTagQuotaDates)
+		dataRoute.GET("/token-tags/self", middleware.UserAuth(), controller.GetUserTokenTagQuotaDates)
+
+		playgroundRoute := apiRouter.Group("/playground")
+		playgroundRoute.Use(middleware.UserAuth())
+		{
+			playgroundRoute.GET("/sessions", controller.GetPlaygroundSessions)
+			playgroundRoute.POST("/sessions", controller.CreatePlaygroundSessionAPI)
+			playgroundRoute.POST("/sessions/import", controller.ImportPlaygroundSessionsAPI)
+			playgroundRoute.PUT("/sessions/:id", controller.UpdatePlaygroundSessionAPI)
+			playgroundRoute.DELETE("/sessions/:id", controller.DeletePlaygroundSessionAPI)
+			playgroundRoute.PUT("/sessions/:id/messages", controller.SavePlaygroundSessionMessagesAPI)
+			playgroundRoute.GET("/files/:id/content", controller.GetPlaygroundFileContent)
+		}
 
 		logRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
 		{

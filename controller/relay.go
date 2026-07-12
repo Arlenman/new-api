@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -197,6 +198,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = channelErr
 			break
 		}
+		if shouldStopPlaygroundImageGatewayTimeoutRetry(c, channel.Id, relayInfo.LastError, retryParam.GetRetry()) {
+			newAPIError = relayInfo.LastError
+			break
+		}
 
 		addUsedChannel(c, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
@@ -232,7 +237,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
-		if shouldRetryByAutomaticDisableStatusCode(newAPIError) && maxRetryTimes < 3 {
+		if shouldIncreaseRelayRetryBudget(c, newAPIError) && maxRetryTimes < 3 {
 			maxRetryTimes = 3
 		}
 
@@ -259,6 +264,8 @@ var upgrader = websocket.Upgrader{
 		return true // 允许跨域
 	},
 }
+
+const playgroundImageGatewayTimeoutSameChannelRetryLimit = 1
 
 func addUsedChannel(c *gin.Context, channelId int) {
 	useChannel := c.GetStringSlice("use_channel")
@@ -373,17 +380,75 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if code < 100 || code > 599 {
 		return true
 	}
+	if isPlaygroundImageGatewayTimeout(c, code) {
+		if isSinglePlaygroundImageCandidateChannel(c) {
+			return false
+		}
+		return true
+	}
 	if operation_setting.IsAlwaysSkipRetryCode(openaiErr.GetErrorCode()) {
 		return false
 	}
 	return operation_setting.ShouldRetryByStatusCode(code) || operation_setting.ShouldDisableByStatusCode(code)
 }
 
+func shouldIncreaseRelayRetryBudget(c *gin.Context, openaiErr *types.NewAPIError) bool {
+	if openaiErr == nil {
+		return false
+	}
+	if isPlaygroundImageGatewayTimeout(c, openaiErr.StatusCode) {
+		return true
+	}
+	return shouldRetryByAutomaticDisableStatusCode(openaiErr)
+}
+
+func shouldAutoDisableChannel(c *gin.Context, err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	if isPlaygroundImageGatewayTimeout(c, err.StatusCode) {
+		return false
+	}
+	return service.ShouldDisableChannel(err)
+}
+
+func isPlaygroundImageGatewayTimeout(c *gin.Context, code int) bool {
+	if code != http.StatusGatewayTimeout && code != 524 {
+		return false
+	}
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	path := c.Request.URL.Path
+	return strings.HasPrefix(path, "/pg/images/generations") || strings.HasPrefix(path, "/pg/images/edits")
+}
+
+func isSinglePlaygroundImageCandidateChannel(c *gin.Context) bool {
+	usedChannels := c.GetStringSlice("use_channel")
+	if len(usedChannels) != 1 {
+		return false
+	}
+	return common.GetContextKeyInt(c, constant.ContextKeyPlaygroundImageCandidateChannelCount) == 1
+}
+
+func shouldStopPlaygroundImageGatewayTimeoutRetry(c *gin.Context, channelID int, lastErr *types.NewAPIError, retry int) bool {
+	if retry <= 0 || lastErr == nil || !isPlaygroundImageGatewayTimeout(c, lastErr.StatusCode) {
+		return false
+	}
+	usedCount := 0
+	for _, usedChannel := range c.GetStringSlice("use_channel") {
+		if usedChannel == strconv.Itoa(channelID) {
+			usedCount++
+		}
+	}
+	return usedCount > playgroundImageGatewayTimeoutSameChannelRetryLimit
+}
+
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
-	if service.ShouldDisableChannel(err) && channelError.AutoBan {
+	if shouldAutoDisableChannel(c, err) && channelError.AutoBan {
 		gopool.Go(func() {
 			service.DisableChannel(channelError, err.ErrorWithStatusCode())
 		})

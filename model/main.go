@@ -271,6 +271,8 @@ func migrateDB() error {
 	err := DB.AutoMigrate(
 		&Channel{},
 		&Token{},
+		&TokenTag{},
+		&TokenTagBinding{},
 		&User{},
 		&PasskeyCredential{},
 		&Option{},
@@ -299,6 +301,9 @@ func migrateDB() error {
 		&SystemTaskLock{},
 		&CasbinRule{},
 		&AuthzRole{},
+		&PlaygroundSession{},
+		&PlaygroundMessage{},
+		&PlaygroundFile{},
 	)
 	if err != nil {
 		return err
@@ -325,6 +330,8 @@ func migrateDBFast() error {
 	}{
 		{&Channel{}, "Channel"},
 		{&Token{}, "Token"},
+		{&TokenTag{}, "TokenTag"},
+		{&TokenTagBinding{}, "TokenTagBinding"},
 		{&User{}, "User"},
 		{&PasskeyCredential{}, "PasskeyCredential"},
 		{&Option{}, "Option"},
@@ -351,6 +358,9 @@ func migrateDBFast() error {
 		{&SystemInstance{}, "SystemInstance"},
 		{&SystemTask{}, "SystemTask"},
 		{&SystemTaskLock{}, "SystemTaskLock"},
+		{&PlaygroundSession{}, "PlaygroundSession"},
+		{&PlaygroundMessage{}, "PlaygroundMessage"},
+		{&PlaygroundFile{}, "PlaygroundFile"},
 	}
 	// 动态计算migration数量，确保errChan缓冲区足够大
 	errChan := make(chan error, len(migrations))

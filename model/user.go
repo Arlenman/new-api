@@ -28,6 +28,7 @@ type User struct {
 	DisplayName      string                     `json:"display_name" gorm:"index" validate:"max=20"`
 	Role             int                        `json:"role" gorm:"type:int;default:1"`   // admin, common
 	Status           int                        `json:"status" gorm:"type:int;default:1"` // enabled, disabled
+	Hidden           bool                       `json:"hidden" gorm:"default:false;index"`
 	Email            string                     `json:"email" gorm:"index" validate:"max=50"`
 	GitHubId         string                     `json:"github_id" gorm:"column:github_id;index"`
 	DiscordId        string                     `json:"discord_id" gorm:"column:discord_id;index"`
@@ -130,6 +131,7 @@ func generateDefaultSidebarConfigForRole(userRole int) string {
 		"enabled":    true,
 		"detail":     true,
 		"token":      true,
+		"tokenTags":  true,
 		"log":        true,
 		"midjourney": true,
 		"task":       true,
@@ -206,7 +208,7 @@ func GetMaxUserId() int {
 	return user.Id
 }
 
-func GetAllUsers(pageInfo *common.PageInfo) (users []*User, total int64, err error) {
+func GetAllUsers(pageInfo *common.PageInfo, showHidden bool) (users []*User, total int64, err error) {
 	// Start transaction
 	tx := DB.Begin()
 	if tx.Error != nil {
@@ -218,15 +220,20 @@ func GetAllUsers(pageInfo *common.PageInfo) (users []*User, total int64, err err
 		}
 	}()
 
+	query := tx.Unscoped().Model(&User{})
+	if !showHidden {
+		query = query.Where("hidden = ?", false)
+	}
+
 	// Get total count within transaction
-	err = tx.Unscoped().Model(&User{}).Count(&total).Error
+	err = query.Count(&total).Error
 	if err != nil {
 		tx.Rollback()
 		return nil, 0, err
 	}
 
 	// Get paginated users within same transaction
-	err = tx.Unscoped().Order("id desc").Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).Omit("password", "access_token").Find(&users).Error
+	err = query.Order("id desc").Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).Omit("password", "access_token").Find(&users).Error
 	if err != nil {
 		tx.Rollback()
 		return nil, 0, err
@@ -240,7 +247,7 @@ func GetAllUsers(pageInfo *common.PageInfo) (users []*User, total int64, err err
 	return users, total, nil
 }
 
-func SearchUsers(keyword string, group string, role *int, status *int, startIdx int, num int) ([]*User, int64, error) {
+func SearchUsers(keyword string, group string, role *int, status *int, startIdx int, num int, showHidden bool) ([]*User, int64, error) {
 	var users []*User
 	var total int64
 	var err error
@@ -272,6 +279,9 @@ func SearchUsers(keyword string, group string, role *int, status *int, startIdx 
 	}
 
 	query = query.Where("("+likeCondition+")", likeArgs...)
+	if !showHidden {
+		query = query.Where("hidden = ?", false)
+	}
 	if group != "" {
 		query = query.Where(commonGroupCol+" = ?", group)
 	}
@@ -570,6 +580,7 @@ func (user *User) EditWithTx(tx *gorm.DB, updatePassword bool) error {
 		"display_name": newUser.DisplayName,
 		"group":        newUser.Group,
 		"remark":       newUser.Remark,
+		"hidden":       newUser.Hidden,
 	}
 	if updatePassword {
 		updates["password"] = newUser.Password

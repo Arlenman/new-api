@@ -20,8 +20,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
-import { sendChatCompletion } from '../api'
-import { ERROR_MESSAGES } from '../constants'
+import { sendChatCompletion, sendImageEdit, sendImageGeneration } from '../api'
+import { DEFAULT_IMAGE_SIZE, ERROR_MESSAGES } from '../constants'
 import {
   applyStreamingChunk,
   buildChatCompletionPayload,
@@ -33,8 +33,16 @@ import {
   hasChatCompletionChoice,
   isAssistantMessageFinal,
   isAssistantMessagePending,
+  getSafeMessageErrorContent,
 } from '../lib'
-import type { Message, PlaygroundConfig, ParameterEnabled } from '../types'
+import { imageGenerationTaskManager } from '../lib/image/image-generation-task-manager-singleton'
+import type {
+  Message,
+  PlaygroundConfig,
+  ParameterEnabled,
+  PlaygroundImageFile,
+  PlaygroundSession,
+} from '../types'
 import { useStreamRequest } from './use-stream-request'
 
 interface UseChatHandlerOptions {
@@ -49,6 +57,16 @@ const STREAM_UPDATE_FLUSH_MS = 50
 type PendingStreamChunks = {
   content: string
   reasoning: string
+}
+
+type SendImageOptions = {
+  sessionId: string
+  assistantMessageKey: string
+  prompt: string
+  files?: PlaygroundImageFile[]
+  imageSize?: string
+  sessions: PlaygroundSession[]
+  sessionMessages: Message[]
 }
 
 function mergePendingStreamChunk(
@@ -73,6 +91,9 @@ export function useChatHandler({
   const { t } = useTranslation()
   const { sendStreamRequest, stopStream, isStreaming } = useStreamRequest()
   const [isRequesting, setIsRequesting] = useState(false)
+  const [activeImageTaskCount, setActiveImageTaskCount] = useState(() =>
+    imageGenerationTaskManager.getActiveTaskCount()
+  )
   const abortControllerRef = useRef<AbortController | null>(null)
   const requestIdRef = useRef(0)
   const pendingStreamChunksRef = useRef<PendingStreamChunks>({
@@ -138,6 +159,14 @@ export function useChatHandler({
     []
   )
 
+  useEffect(
+    () =>
+      imageGenerationTaskManager.subscribe((snapshot) => {
+        setActiveImageTaskCount(snapshot.activeTaskIds.length)
+      }),
+    []
+  )
+
   const getDisplayError = useCallback(
     (error: string) => {
       if (KNOWN_ERROR_MESSAGES.has(error)) {
@@ -187,12 +216,13 @@ export function useChatHandler({
       flushStreamUpdates()
       setIsRequesting(false)
       const displayError = getDisplayError(error)
-      toast.error(displayError)
+      const safeDisplayError = getSafeMessageErrorContent(displayError)
+      toast.info(t(safeDisplayError))
       const errorTitle = t(ERROR_MESSAGES.API_REQUEST_ERROR)
       onMessageUpdate((prev) =>
         updateAssistantMessageWithError(
           prev,
-          displayError,
+          safeDisplayError,
           errorCode,
           errorTitle
         )
@@ -279,6 +309,27 @@ export function useChatHandler({
     [config, parameterEnabled, onMessageUpdate, handleStreamError]
   )
 
+  const sendImage = useCallback(
+    (options: SendImageOptions) => {
+      imageGenerationTaskManager.start({
+        sessionId: options.sessionId,
+        assistantMessageKey: options.assistantMessageKey,
+        prompt: options.prompt,
+        model: config.model,
+        group: config.group,
+        size: options.imageSize || config.imageSize || DEFAULT_IMAGE_SIZE,
+        files: options.files ?? [],
+        sessions: options.sessions,
+        sessionMessages: options.sessionMessages,
+        requestImage: ({ payload, files, signal }) =>
+          files.length > 0
+            ? sendImageEdit(payload, files, signal)
+            : sendImageGeneration(payload, signal),
+      })
+    },
+    [config.group, config.imageSize, config.model]
+  )
+
   // Send chat request (stream or non-stream based on config)
   const sendChat = useCallback(
     (messages: Message[]) => {
@@ -297,10 +348,11 @@ export function useChatHandler({
     flushStreamUpdates()
     abortControllerRef.current?.abort()
     abortControllerRef.current = null
+    imageGenerationTaskManager.cancelAll()
     setIsRequesting(false)
     onMessageUpdate((prev) =>
       updateLastAssistantMessage(prev, (message) =>
-        isAssistantMessagePending(message)
+        isAssistantMessagePending(message) && message.mode !== 'image'
           ? completeAssistantMessage(message)
           : message
       )
@@ -309,7 +361,8 @@ export function useChatHandler({
 
   return {
     sendChat,
+    sendImage,
     stopGeneration,
-    isGenerating: isStreaming || isRequesting,
+    isGenerating: isStreaming || isRequesting || activeImageTaskCount > 0,
   }
 }

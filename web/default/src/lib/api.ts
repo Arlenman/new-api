@@ -20,6 +20,7 @@ import axios, { type AxiosRequestConfig } from 'axios'
 import { t } from 'i18next'
 import { toast } from 'sonner'
 
+import { readStoredUserId } from '@/lib/auth-user-id'
 import { useAuthStore } from '@/stores/auth-store'
 
 declare module 'axios' {
@@ -126,20 +127,6 @@ api.interceptors.response.use(
 // ============================================================================
 
 /**
- * Get user ID from localStorage
- */
-function getUserId(): string | null {
-  try {
-    if (typeof window !== 'undefined') {
-      return window.localStorage.getItem('uid')
-    }
-  } catch {
-    /* empty */
-  }
-  return null
-}
-
-/**
  * Get common request headers (for both axios and SSE requests)
  */
 export function getCommonHeaders(): Record<string, string> {
@@ -147,7 +134,7 @@ export function getCommonHeaders(): Record<string, string> {
     'Content-Type': 'application/json',
   }
 
-  const uid = getUserId()
+  const uid = readStoredUserId()
   if (uid) {
     headers['New-Api-User'] = uid
   }
@@ -161,7 +148,7 @@ export function getCommonHeaders(): Record<string, string> {
 
 // Attach user ID header for all requests
 api.interceptors.request.use((config) => {
-  const uid = getUserId()
+  const uid = readStoredUserId()
   if (uid) {
     // Custom header for user identification
     ;(config.headers as Record<string, string>)['New-Api-User'] = uid

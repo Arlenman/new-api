@@ -44,6 +44,6 @@ export function getMessageActionsVisibilityClass(
   alwaysVisible: boolean
 ): string {
   return alwaysVisible
-    ? 'opacity-100'
-    : 'opacity-0 group-hover:opacity-100 max-md:opacity-100'
+    ? 'pointer-events-auto opacity-100'
+    : 'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 max-md:pointer-events-auto max-md:opacity-100'
 }

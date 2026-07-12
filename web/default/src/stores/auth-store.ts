@@ -18,6 +18,10 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { create } from 'zustand'
 
+import {
+  clearStoredAuthIdentity,
+  writeStoredUserId,
+} from '@/lib/auth-user-id'
 import type { AdminCapabilities } from '@/lib/admin-permissions'
 
 export type UserPermissions = {
@@ -87,8 +91,9 @@ export const useAuthStore = create<AuthState>()((set) => {
           if (typeof window !== 'undefined') {
             if (user) {
               window.localStorage.setItem('user', JSON.stringify(user))
+              writeStoredUserId(user.id)
             } else {
-              window.localStorage.removeItem('user')
+              clearStoredAuthIdentity()
             }
           }
           return { ...state, auth: { ...state.auth, user } }
@@ -96,7 +101,7 @@ export const useAuthStore = create<AuthState>()((set) => {
       reset: () =>
         set((state) => {
           if (typeof window !== 'undefined') {
-            window.localStorage.removeItem('user')
+            clearStoredAuthIdentity()
           }
           return {
             ...state,

@@ -23,12 +23,14 @@ import (
 func TestConvertImageEditRequestMultipart(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	newMultipartContext := func(t *testing.T, prompt string) *gin.Context {
+	newMultipartContext := func(t *testing.T, prompt string, includeStream bool) *gin.Context {
 		var body bytes.Buffer
 		writer := multipart.NewWriter(&body)
 		require.NoError(t, writer.WriteField("model", "gpt-image-1"))
 		require.NoError(t, writer.WriteField("prompt", prompt))
-		require.NoError(t, writer.WriteField("stream", "true"))
+		if includeStream {
+			require.NoError(t, writer.WriteField("stream", "true"))
+		}
 		require.NoError(t, writer.WriteField("partial_images", "3"))
 		part, err := writer.CreateFormFile("image", "input.png")
 		require.NoError(t, err)
@@ -77,7 +79,7 @@ func TestConvertImageEditRequestMultipart(t *testing.T) {
 
 	t.Run("with pre-parsed form", func(t *testing.T) {
 		prompt := "edit this image"
-		c := newMultipartContext(t, prompt)
+		c := newMultipartContext(t, prompt, true)
 		require.NoError(t, c.Request.ParseMultipartForm(32<<20))
 
 		convertAndReplay(t, c, prompt)
@@ -85,13 +87,20 @@ func TestConvertImageEditRequestMultipart(t *testing.T) {
 
 	t.Run("re-parses reusable body when form is missing", func(t *testing.T) {
 		prompt := "edit without pre-parsed form"
-		c := newMultipartContext(t, prompt)
+		c := newMultipartContext(t, prompt, true)
 
 		storage, err := common.GetBodyStorage(c)
 		require.NoError(t, err)
 		c.Request.Body = io.NopCloser(storage)
 		c.Request.MultipartForm = nil
 		c.Request.PostForm = nil
+
+		convertAndReplay(t, c, prompt)
+	})
+
+	t.Run("adds stream field from parsed request when original form omitted it", func(t *testing.T) {
+		prompt := "edit with forced stream"
+		c := newMultipartContext(t, prompt, false)
 
 		convertAndReplay(t, c, prompt)
 	})

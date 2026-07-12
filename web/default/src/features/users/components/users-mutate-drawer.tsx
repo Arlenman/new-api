@@ -346,6 +346,33 @@ export function UsersMutateDrawer({
                     </FormItem>
                   )}
                 />
+
+                {isUpdate && (
+                  <FormField
+                    control={form.control}
+                    name='hidden'
+                    render={({ field }) => (
+                      <FormItem className='flex flex-row items-start gap-3 rounded-md border p-3'>
+                        <FormControl>
+                          <Checkbox
+                            checked={field.value === true}
+                            onCheckedChange={(checked) =>
+                              field.onChange(checked === true)
+                            }
+                          />
+                        </FormControl>
+                        <div className='space-y-1 leading-none'>
+                          <FormLabel>{t('Hide user')}</FormLabel>
+                          <FormDescription>
+                            {t(
+                              'Hidden users are excluded from admin lists, logs, and analytics.'
+                            )}
+                          </FormDescription>
+                        </div>
+                      </FormItem>
+                    )}
+                  />
+                )}
               </SideDrawerSection>
 
               {/* Group & Quota Settings (Update only) */}

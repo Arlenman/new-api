@@ -32,10 +32,11 @@ type tokenPageResponse struct {
 }
 
 type tokenResponseItem struct {
-	ID     int    `json:"id"`
-	Name   string `json:"name"`
-	Key    string `json:"key"`
-	Status int    `json:"status"`
+	ID     int      `json:"id"`
+	Name   string   `json:"name"`
+	Key    string   `json:"key"`
+	Status int      `json:"status"`
+	Tags   []string `json:"tags"`
 }
 
 type tokenKeyResponse struct {
@@ -99,7 +100,7 @@ func openTokenControllerTestDB(t *testing.T) *gorm.DB {
 func migrateTokenControllerTestDB(t *testing.T, db *gorm.DB) {
 	t.Helper()
 
-	if err := db.AutoMigrate(&model.Token{}); err != nil {
+	if err := db.AutoMigrate(&model.Token{}, &model.TokenTag{}, &model.TokenTagBinding{}); err != nil {
 		t.Fatalf("failed to migrate token table: %v", err)
 	}
 }
@@ -414,6 +415,116 @@ func TestGetAllTokensMasksKeyInResponse(t *testing.T) {
 	}
 	if strings.Contains(recorder.Body.String(), token.Key) {
 		t.Fatalf("list response leaked raw token key: %s", recorder.Body.String())
+	}
+}
+
+func TestTokenResponsesIncludeTags(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 1, "tagged-token", "tagged1234token5678")
+	if err := model.ReplaceTokenTags(1, token.Id, []string{"Client A", "Batch 1"}); err != nil {
+		t.Fatalf("failed to seed token tags: %v", err)
+	}
+
+	listCtx, listRecorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/?p=1&size=10", nil, 1)
+	GetAllTokens(listCtx)
+
+	listResponse := decodeAPIResponse(t, listRecorder)
+	if !listResponse.Success {
+		t.Fatalf("expected list success response, got message: %s", listResponse.Message)
+	}
+	var page tokenPageResponse
+	if err := common.Unmarshal(listResponse.Data, &page); err != nil {
+		t.Fatalf("failed to decode token page response: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("expected exactly one token, got %d", len(page.Items))
+	}
+	if fmt.Sprint(page.Items[0].Tags) != fmt.Sprint([]string{"Batch 1", "Client A"}) {
+		t.Fatalf("expected list tags, got %#v", page.Items[0].Tags)
+	}
+
+	detailCtx, detailRecorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/"+strconv.Itoa(token.Id), nil, 1)
+	detailCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+	GetToken(detailCtx)
+
+	detailResponse := decodeAPIResponse(t, detailRecorder)
+	if !detailResponse.Success {
+		t.Fatalf("expected detail success response, got message: %s", detailResponse.Message)
+	}
+	var detail tokenResponseItem
+	if err := common.Unmarshal(detailResponse.Data, &detail); err != nil {
+		t.Fatalf("failed to decode token detail response: %v", err)
+	}
+	if fmt.Sprint(detail.Tags) != fmt.Sprint([]string{"Batch 1", "Client A"}) {
+		t.Fatalf("expected detail tags, got %#v", detail.Tags)
+	}
+}
+
+func TestAddAndUpdateTokenPersistsTags(t *testing.T) {
+	setupTokenControllerTestDB(t)
+
+	addBody := map[string]any{
+		"name":                 "tagged-create",
+		"expired_time":         -1,
+		"remain_quota":         100,
+		"unlimited_quota":      true,
+		"model_limits_enabled": false,
+		"model_limits":         "",
+		"group":                "default",
+		"cross_group_retry":    false,
+		"tags":                 []string{"Client A", "Batch 1"},
+	}
+	addCtx, addRecorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", addBody, 1)
+	AddToken(addCtx)
+	addResponse := decodeAPIResponse(t, addRecorder)
+	if !addResponse.Success {
+		t.Fatalf("expected add success response, got message: %s", addResponse.Message)
+	}
+
+	var created model.Token
+	if err := model.DB.First(&created, "name = ?", "tagged-create").Error; err != nil {
+		t.Fatalf("failed to load created token: %v", err)
+	}
+	createdTags, err := model.GetTokenTagNames(1, created.Id)
+	if err != nil {
+		t.Fatalf("failed to load created token tags: %v", err)
+	}
+	if fmt.Sprint(createdTags) != fmt.Sprint([]string{"Batch 1", "Client A"}) {
+		t.Fatalf("expected created tags, got %#v", createdTags)
+	}
+
+	updateBody := map[string]any{
+		"id":                   created.Id,
+		"name":                 "tagged-update",
+		"expired_time":         -1,
+		"remain_quota":         100,
+		"unlimited_quota":      true,
+		"model_limits_enabled": false,
+		"model_limits":         "",
+		"group":                "default",
+		"cross_group_retry":    false,
+		"tags":                 []string{"Client B"},
+	}
+	updateCtx, updateRecorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", updateBody, 1)
+	UpdateToken(updateCtx)
+	updateResponse := decodeAPIResponse(t, updateRecorder)
+	if !updateResponse.Success {
+		t.Fatalf("expected update success response, got message: %s", updateResponse.Message)
+	}
+	var detail tokenResponseItem
+	if err := common.Unmarshal(updateResponse.Data, &detail); err != nil {
+		t.Fatalf("failed to decode update response: %v", err)
+	}
+	if fmt.Sprint(detail.Tags) != fmt.Sprint([]string{"Client B"}) {
+		t.Fatalf("expected updated response tags, got %#v", detail.Tags)
+	}
+
+	updatedTags, err := model.GetTokenTagNames(1, created.Id)
+	if err != nil {
+		t.Fatalf("failed to load updated token tags: %v", err)
+	}
+	if fmt.Sprint(updatedTags) != fmt.Sprint([]string{"Client B"}) {
+		t.Fatalf("expected updated tags, got %#v", updatedTags)
 	}
 }
 

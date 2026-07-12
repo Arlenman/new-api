@@ -234,3 +234,43 @@ export function IpRestrictionsCell({ apiKey }: { apiKey: ApiKey }) {
     </Tooltip>
   )
 }
+
+export function ApiKeyTagsCell({ apiKey }: { apiKey: ApiKey }) {
+  const { t } = useTranslation()
+  const tags = apiKey.tags || []
+
+  if (tags.length === 0) {
+    return (
+      <StatusBadge
+        label={t('No tags')}
+        variant='neutral'
+        copyable={false}
+        className='-ml-1.5'
+      />
+    )
+  }
+
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<BadgeCell className='gap-1.5' />}>
+        {tags.slice(0, 2).map((tag) => (
+          <StatusBadge key={tag} label={tag} variant='info' copyable={false} />
+        ))}
+        {tags.length > 2 && (
+          <StatusBadge
+            label={t('+{{count}}', { count: tags.length - 2 })}
+            variant='neutral'
+            copyable={false}
+          />
+        )}
+      </TooltipTrigger>
+      <TooltipContent side='top' className='max-w-xs'>
+        <div className='space-y-0.5 text-xs'>
+          {tags.map((tag) => (
+            <div key={tag}>{tag}</div>
+          ))}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  )
+}

@@ -20,6 +20,8 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { sanitizeImageSrc, type ImageNode } from 'stream-markdown-parser'
 
+import { ImagePreviewDialog } from './image-preview-dialog'
+
 type ResponseImageProps = {
   node: ImageNode
 }
@@ -27,7 +29,9 @@ type ResponseImageProps = {
 export function ResponseImage(props: ResponseImageProps) {
   const { t } = useTranslation()
   const [hasError, setHasError] = useState(false)
+  const [previewOpen, setPreviewOpen] = useState(false)
   const src = sanitizeImageSrc(props.node.src)
+  const previewAlt = props.node.alt || t('Generated image')
 
   if (!src || hasError) {
     return (
@@ -38,13 +42,28 @@ export function ResponseImage(props: ResponseImageProps) {
   }
 
   return (
-    <img
-      alt={props.node.alt}
-      className='border-border/70 my-4 block h-auto max-h-96 max-w-full rounded-lg border object-contain'
-      loading='lazy'
-      onError={() => setHasError(true)}
-      src={src}
-      title={props.node.title ?? undefined}
-    />
+    <>
+      <button
+        aria-label={t('Open image preview')}
+        className='border-border/70 bg-muted/10 my-2 inline-flex max-h-[min(30svh,260px)] max-w-[min(100%,15rem)] cursor-zoom-in self-start overflow-hidden rounded-lg border text-left focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none'
+        onClick={() => setPreviewOpen(true)}
+        type='button'
+      >
+        <img
+          alt={props.node.alt}
+          className='block h-auto max-h-[min(30svh,260px)] w-auto max-w-full object-contain transition-opacity hover:opacity-95'
+          loading='lazy'
+          onError={() => setHasError(true)}
+          src={src}
+          title={props.node.title ?? undefined}
+        />
+      </button>
+      <ImagePreviewDialog
+        alt={previewAlt}
+        open={previewOpen}
+        onOpenChange={setPreviewOpen}
+        src={src}
+      />
+    </>
   )
 }

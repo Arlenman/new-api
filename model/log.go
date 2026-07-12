@@ -465,7 +465,21 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	}
 }
 
-func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
+func applyTokenTagFilter(tx *gorm.DB, tokenIDColumn string, userID int, tokenTag string) (*gorm.DB, error) {
+	if strings.TrimSpace(tokenTag) == "" {
+		return tx, nil
+	}
+	tokenIDs, err := GetTokenIDsByTagName(userID, tokenTag)
+	if err != nil {
+		return nil, err
+	}
+	if len(tokenIDs) == 0 {
+		return tx.Where("1 = 0"), nil
+	}
+	return tx.Where(tokenIDColumn+" IN ?", tokenIDs), nil
+}
+
+func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string, tokenTag string) (logs []*Log, total int64, err error) {
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB
@@ -499,6 +513,12 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	}
 	if group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
+	}
+	if tx, err = applyTokenTagFilter(tx, "logs.token_id", 0, tokenTag); err != nil {
+		return nil, 0, err
+	}
+	if tx, err = applyHiddenUserFilter(tx, "logs.user_id", true); err != nil {
+		return nil, 0, err
 	}
 	err = tx.Model(&Log{}).Count(&total).Error
 	if err != nil {
@@ -561,7 +581,7 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 
 const logSearchCountLimit = 10000
 
-func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
+func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int, group string, requestId string, upstreamRequestId string, tokenTag string) (logs []*Log, total int64, err error) {
 	var tx *gorm.DB
 	if logType == LogTypeUnknown {
 		tx = LOG_DB.Where("logs.user_id = ?", userId)
@@ -590,6 +610,9 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	if group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
+	if tx, err = applyTokenTagFilter(tx, "logs.token_id", userId, tokenTag); err != nil {
+		return nil, 0, err
+	}
 	err = tx.Model(&Log{}).Limit(logSearchCountLimit).Count(&total).Error
 	if err != nil {
 		common.SysError("failed to count user logs: " + err.Error())
@@ -615,7 +638,7 @@ type Stat struct {
 	Tpm   int `json:"tpm"`
 }
 
-func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
+func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, tokenTag string, excludeHidden bool) (stat Stat, err error) {
 	tx := LOG_DB.Table("logs").Select("COALESCE(sum(quota), 0) quota")
 
 	// 为rpm和tpm创建单独的查询
@@ -650,6 +673,18 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	if group != "" {
 		tx = tx.Where(logGroupCol+" = ?", group)
 		rpmTpmQuery = rpmTpmQuery.Where(logGroupCol+" = ?", group)
+	}
+	if tx, err = applyTokenTagFilter(tx, "token_id", 0, tokenTag); err != nil {
+		return stat, err
+	}
+	if rpmTpmQuery, err = applyTokenTagFilter(rpmTpmQuery, "token_id", 0, tokenTag); err != nil {
+		return stat, err
+	}
+	if tx, err = applyHiddenUserFilter(tx, "user_id", excludeHidden); err != nil {
+		return stat, err
+	}
+	if rpmTpmQuery, err = applyHiddenUserFilter(rpmTpmQuery, "user_id", excludeHidden); err != nil {
+		return stat, err
 	}
 
 	tx = tx.Where("type = ?", LogTypeConsume)

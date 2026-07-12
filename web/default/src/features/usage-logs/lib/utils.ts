@@ -202,6 +202,9 @@ export function buildApiParams(config: {
     ...(searchParams.type ? { type: processType(searchParams.type) } : {}),
     ...(searchParams.model ? { model_name: String(searchParams.model) } : {}),
     ...(searchParams.token ? { token_name: String(searchParams.token) } : {}),
+    ...(searchParams.tokenTag
+      ? { token_tag: String(searchParams.tokenTag) }
+      : {}),
     ...(searchParams.group ? { group: String(searchParams.group) } : {}),
     ...(isAdmin && searchParams.channel
       ? { channel: Number(searchParams.channel) || 0 }
@@ -232,6 +235,9 @@ export function buildApiParams(config: {
           break
         case 'token_name':
           params.token_name = String(value)
+          break
+        case 'token_tag':
+          params.token_tag = String(value)
           break
         case 'group':
           params.group = String(value)

@@ -47,10 +47,19 @@ import {
   isErrorMessage,
   type MessageAlignment,
 } from '../../lib'
+import {
+  extractMarkdownImageReferences,
+  isImageOnlyMarkdownContent,
+  stripMarkdownImageReferences,
+} from '../../lib/image/playground-image-utils'
+import { normalizeImageGenerationRetryableMessage } from '../../lib/message/image-generation-error-utils'
 import { getMessageContentStyles } from '../../lib/message/message-styles'
+import { getMessageContent } from '../../lib/message/message-utils'
 import type { Message } from '../../types'
+import { ImageGenerationProgress } from './image-generation-progress'
 import { MessageError } from './message-error'
 import { MessageMetadata } from './message-metadata'
+import { PlaygroundFileImage } from './playground-file-image'
 
 type PlaygroundMessageContentProps = {
   actions: ReactNode
@@ -70,6 +79,11 @@ export function PlaygroundMessageContent({
   versionContent,
 }: PlaygroundMessageContentProps) {
   const { t } = useTranslation()
+  const normalizedMessage = normalizeImageGenerationRetryableMessage(message)
+  const normalizedVersionContent =
+    normalizedMessage === message
+      ? versionContent
+      : getMessageContent(normalizedMessage)
   const {
     displayContent,
     hasReasoning,
@@ -78,17 +92,45 @@ export function PlaygroundMessageContent({
     showLoader,
     showMessageContent,
     sources,
-  } = getMessageContentState(message, versionContent)
-  const isError = isErrorMessage(message)
+  } = getMessageContentState(normalizedMessage, normalizedVersionContent)
+  const isError = isErrorMessage(normalizedMessage)
+  const isImageLoading =
+    normalizedMessage.mode === 'image' &&
+    (normalizedMessage.status === MESSAGE_STATUS.LOADING ||
+      normalizedMessage.status === MESSAGE_STATUS.STREAMING)
   const isMessageFinal =
-    message.status !== MESSAGE_STATUS.LOADING &&
-    message.status !== MESSAGE_STATUS.STREAMING
+    normalizedMessage.status !== MESSAGE_STATUS.LOADING &&
+    normalizedMessage.status !== MESSAGE_STATUS.STREAMING
+  const playgroundFileImages = extractMarkdownImageReferences(displayContent)
+  const responseDisplayContent =
+    playgroundFileImages.length > 0
+      ? stripMarkdownImageReferences(displayContent)
+      : displayContent
+  const isImageOnlyMessage = isImageOnlyMarkdownContent(displayContent)
+  const messageContent = (
+    <MessageContent
+      variant='flat'
+      className={cn(
+        getMessageContentStyles(),
+        isImageOnlyMessage &&
+          'gap-0 group-[.is-assistant]:!w-fit group-[.is-assistant]:!max-w-[15rem]'
+      )}
+    >
+      {playgroundFileImages.map((image) => (
+        <PlaygroundFileImage image={image} key={`${image.url}-${image.alt}`} />
+      ))}
+      {responseDisplayContent && (
+        <Response final={isMessageFinal}>{responseDisplayContent}</Response>
+      )}
+    </MessageContent>
+  )
 
   return (
     <div
       className={cn(
         'flex w-full min-w-0 flex-col',
-        getMessageAlignmentClass(alignment)
+        getMessageAlignmentClass(alignment),
+        isImageOnlyMessage && 'relative'
       )}
     >
       {hasSources && (
@@ -109,15 +151,17 @@ export function PlaygroundMessageContent({
       {hasReasoning && (
         <Reasoning
           defaultOpen
-          duration={message.reasoning?.duration}
-          isStreaming={message.isReasoningStreaming}
+          duration={normalizedMessage.reasoning?.duration}
+          isStreaming={normalizedMessage.isReasoningStreaming}
         >
           <ReasoningTrigger />
           <ReasoningContent>{reasoningContent}</ReasoningContent>
         </Reasoning>
       )}
 
-      {showLoader && (
+      {isImageLoading && <ImageGenerationProgress message={normalizedMessage} />}
+
+      {showLoader && !isImageLoading && (
         <div className='flex items-center gap-2 py-2'>
           <Loader />
           <Shimmer className='text-sm' duration={1}>
@@ -128,8 +172,8 @@ export function PlaygroundMessageContent({
 
       {isError && (
         <>
-          <MessageError message={message} className='mb-2' />
-          <MessageMetadata alignment={alignment} message={message} />
+          <MessageError message={normalizedMessage} className='mb-2' />
+          <MessageMetadata alignment={alignment} message={normalizedMessage} />
           {errorActions}
         </>
       )}
@@ -138,7 +182,7 @@ export function PlaygroundMessageContent({
         <>
           {isSourceVisible ? (
             <CodeBlock
-              code={versionContent}
+              code={normalizedVersionContent}
               className='my-0 group-[.is-assistant]:w-full group-[.is-assistant]:max-w-[78ch]'
               collapsedLines={24}
               defaultCollapsed={false}
@@ -151,15 +195,23 @@ export function PlaygroundMessageContent({
               <CodeBlockCopyButton />
             </CodeBlock>
           ) : (
-            <MessageContent
-              variant='flat'
-              className={cn(getMessageContentStyles())}
-            >
-              <Response final={isMessageFinal}>{displayContent}</Response>
-            </MessageContent>
+            <>
+              {isImageOnlyMessage ? (
+                <div className='relative w-fit max-w-full'>
+                  {messageContent}
+                  {actions}
+                </div>
+              ) : (
+                messageContent
+              )}
+            </>
           )}
-          <MessageMetadata alignment={alignment} message={message} />
-          {actions}
+          <MessageMetadata
+            alignment={alignment}
+            compact={isImageOnlyMessage}
+            message={normalizedMessage}
+          />
+          {(!isImageOnlyMessage || isSourceVisible) && actions}
         </>
       )}
     </div>

@@ -69,3 +69,18 @@ func TestGetAndValidOpenAIImageRequestMultipartStream(t *testing.T) {
 		require.Contains(t, err.Error(), "invalid stream value")
 	})
 }
+
+func TestGetAndValidOpenAIImageRequestForcesPlaygroundGPTImageStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := bytes.NewBufferString(`{"model":"gpt-image-2","prompt":"draw a cat"}`)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/pg/images/generations", body)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	req, err := GetAndValidOpenAIImageRequest(c, relayconstant.RelayModeImagesGenerations)
+	require.NoError(t, err)
+	require.NotNil(t, req.Stream)
+	require.True(t, *req.Stream)
+	require.True(t, req.IsStream(c))
+}
