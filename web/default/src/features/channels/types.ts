@@ -328,6 +328,7 @@ export interface TagOperationParams {
   new_tag?: string
   priority?: number
   weight?: number
+  auto_ban?: number
   model_mapping?: string
   models?: string
   groups?: string

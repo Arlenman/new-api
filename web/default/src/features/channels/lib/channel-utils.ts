@@ -607,6 +607,7 @@ export function getAttentionReason(channel: Channel): string | null {
  */
 export type TagRow = Channel & {
   children: Channel[]
+  enabledCount: number
 }
 
 /**
@@ -650,6 +651,7 @@ export function aggregateChannelsByTag(
         balance_updated_time: 0,
         models: '',
         children: [],
+        enabledCount: 0,
       } as TagRow
       tagMap.set(tag, tagRow)
       result.push(tagRow)
@@ -702,6 +704,7 @@ export function aggregateChannelsByTag(
     // Aggregate status (enabled if any child is enabled)
     if (channel.status === 1) {
       tagRow.status = 1
+      tagRow.enabledCount += 1
     } else if (tagRow.status === undefined) {
       tagRow.status = channel.status
     }

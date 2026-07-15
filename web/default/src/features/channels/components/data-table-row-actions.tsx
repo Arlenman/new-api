@@ -33,9 +33,12 @@ import {
   Trash2,
   RefreshCw,
   Loader2,
+  ShieldCheck,
+  ShieldOff,
 } from 'lucide-react'
 import { useContext, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Button } from '@/components/ui/button'
@@ -59,6 +62,7 @@ import {
 } from '@/lib/admin-permissions'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { updateChannel } from '../api'
 import { MODEL_FETCHABLE_TYPES } from '../constants'
 import {
   channelsQueryKeys,
@@ -87,9 +91,16 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
   const [isTogglingStatus, setIsTogglingStatus] = useState(false)
+  const [isTogglingAutoBan, setIsTogglingAutoBan] = useState(false)
 
   const isEnabled = isChannelEnabled(channel)
+  const isAutoBanEnabled = channel.auto_ban !== 0
   const isMultiKey = isMultiKeyChannel(channel)
+  const canEditChannel = hasPermission(
+    currentUser,
+    ADMIN_PERMISSION_RESOURCES.CHANNEL,
+    ADMIN_PERMISSION_ACTIONS.WRITE
+  )
   const canEditSensitive = hasPermission(
     currentUser,
     ADMIN_PERMISSION_RESOURCES.CHANNEL,
@@ -155,11 +166,45 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
     }
   }
 
+  const handleToggleAutoBan = async (
+    e: React.MouseEvent<HTMLButtonElement>
+  ) => {
+    e.stopPropagation()
+    if (!canEditChannel) return
+
+    setIsTogglingAutoBan(true)
+    try {
+      const response = await updateChannel(channel.id, {
+        auto_ban: isAutoBanEnabled ? 0 : 1,
+      })
+      if (!response.success) {
+        toast.error(response.message || t('Failed to update channel'))
+        return
+      }
+
+      await queryClient.invalidateQueries({
+        queryKey: channelsQueryKeys.lists(),
+      })
+      toast.success(t('Channel updated successfully'))
+    } catch {
+      toast.error(t('Failed to update channel'))
+    } finally {
+      setIsTogglingAutoBan(false)
+    }
+  }
+
   let statusIcon = <Power className='size-4' />
   if (isTogglingStatus) {
     statusIcon = <Loader2 className='size-4 animate-spin' />
   } else if (isEnabled) {
     statusIcon = <PowerOff className='size-4' />
+  }
+
+  let autoBanIcon = <ShieldOff className='size-4' />
+  if (isTogglingAutoBan) {
+    autoBanIcon = <Loader2 className='size-4 animate-spin' />
+  } else if (isAutoBanEnabled) {
+    autoBanIcon = <ShieldCheck className='size-4' />
   }
 
   return (
@@ -248,6 +293,36 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
         </TooltipTrigger>
         <TooltipContent>
           {isEnabled ? t('Disable') : t('Enable')}
+        </TooltipContent>
+      </Tooltip>
+
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              variant='ghost'
+              size='icon-sm'
+              onClick={handleToggleAutoBan}
+              disabled={isTogglingAutoBan || !canEditChannel}
+              aria-label={`${t('Auto Ban')}: ${t(
+                isAutoBanEnabled ? 'Enabled' : 'Disabled'
+              )}`}
+              className={
+                isAutoBanEnabled
+                  ? 'text-primary hover:text-primary'
+                  : 'text-muted-foreground'
+              }
+            />
+          }
+        >
+          {autoBanIcon}
+        </TooltipTrigger>
+        <TooltipContent>
+          {canEditChannel
+            ? `${t('Auto Ban')}: ${t(
+                isAutoBanEnabled ? 'Enabled' : 'Disabled'
+              )}`
+            : t('No permission to perform this action')}
         </TooltipContent>
       </Tooltip>
 

@@ -202,3 +202,32 @@ func TestChannelFieldsAreClassified(t *testing.T) {
 			"channel field %q is not classified; add it to channelSensitiveFields, channelNonSensitiveFields, channelOperationalFields, or channelReadOnlyFields in channel_authz.go", name)
 	}
 }
+
+func TestEditTagChannelsRejectsInvalidAutoBan(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(
+		http.MethodPut,
+		"/api/channel/tag",
+		bytes.NewBufferString(`{"tag":"shared-tag","auto_ban":2}`),
+	)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	EditTagChannels(ctx)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.False(t, response.Success)
+	assert.Equal(t, "自动禁用参数错误", response.Message)
+}
+
+func TestValidateChannelRejectsInvalidAutoBan(t *testing.T) {
+	invalidAutoBan := 2
+	err := validateChannel(&model.Channel{AutoBan: &invalidAutoBan}, false)
+	require.EqualError(t, err, "自动禁用参数错误")
+}

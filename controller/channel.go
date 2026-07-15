@@ -465,6 +465,10 @@ func validateTwoFactorAuth(twoFA *model.TwoFA, code string) bool {
 
 // validateChannel 通用的渠道校验函数
 func validateChannel(channel *model.Channel, isAdd bool) error {
+	if channel.AutoBan != nil && *channel.AutoBan != 0 && *channel.AutoBan != 1 {
+		return fmt.Errorf("自动禁用参数错误")
+	}
+
 	// 校验 channel settings
 	if err := channel.ValidateSettings(); err != nil {
 		return fmt.Errorf("渠道额外设置[channel setting] 格式错误：%s", err.Error())
@@ -746,6 +750,7 @@ type ChannelTag struct {
 	NewTag         *string `json:"new_tag"`
 	Priority       *int64  `json:"priority"`
 	Weight         *uint   `json:"weight"`
+	AutoBan        *int    `json:"auto_ban"`
 	ModelMapping   *string `json:"model_mapping"`
 	Models         *string `json:"models"`
 	Groups         *string `json:"groups"`
@@ -822,6 +827,13 @@ func EditTagChannels(c *gin.Context) {
 		})
 		return
 	}
+	if channelTag.AutoBan != nil && *channelTag.AutoBan != 0 && *channelTag.AutoBan != 1 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "自动禁用参数错误",
+		})
+		return
+	}
 	if (channelTag.ParamOverride != nil || channelTag.HeaderOverride != nil) &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite) {
 		common.ApiErrorI18n(c, i18n.MsgAuthInsufficientPrivilege)
@@ -849,15 +861,19 @@ func EditTagChannels(c *gin.Context) {
 		}
 		channelTag.HeaderOverride = common.GetPointer[string](trimmed)
 	}
-	err = model.EditChannelByTag(channelTag.Tag, channelTag.NewTag, channelTag.ModelMapping, channelTag.Models, channelTag.Groups, channelTag.Priority, channelTag.Weight, channelTag.ParamOverride, channelTag.HeaderOverride)
+	err = model.EditChannelByTag(channelTag.Tag, channelTag.NewTag, channelTag.ModelMapping, channelTag.Models, channelTag.Groups, channelTag.Priority, channelTag.Weight, channelTag.ParamOverride, channelTag.HeaderOverride, channelTag.AutoBan)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	model.InitChannelCache()
-	recordManageAudit(c, "channel.tag_edit", map[string]interface{}{
+	auditParams := map[string]interface{}{
 		"tag": channelTag.Tag,
-	})
+	}
+	if channelTag.AutoBan != nil {
+		auditParams["auto_ban"] = *channelTag.AutoBan
+	}
+	recordManageAudit(c, "channel.tag_edit", auditParams)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -1060,6 +1076,9 @@ func UpdateChannel(c *gin.Context) {
 	}
 	if channel.Group != originChannel.Group {
 		changedFields = append(changedFields, "group")
+	}
+	if _, ok := requestData["auto_ban"]; ok && channel.GetAutoBan() != originChannel.GetAutoBan() {
+		changedFields = append(changedFields, "auto_ban")
 	}
 	if channel.Type != originChannel.Type {
 		changedFields = append(changedFields, "type")

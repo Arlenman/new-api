@@ -38,6 +38,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
+import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 
 import {
@@ -46,7 +47,7 @@ import {
   getAllModels,
   getGroups,
 } from '../../api'
-import { channelsQueryKeys } from '../../lib'
+import { channelsQueryKeys, isTagAggregateRow } from '../../lib'
 import type { TagOperationParams } from '../../types'
 import { useChannels } from '../channels-provider'
 
@@ -57,7 +58,7 @@ type EditTagDialogProps = {
 
 export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
   const { t } = useTranslation()
-  const { currentTag } = useChannels()
+  const { currentRow, currentTag } = useChannels()
   const queryClient = useQueryClient()
 
   // Form state
@@ -66,6 +67,8 @@ export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
   const [customModel, setCustomModel] = useState('')
   const [modelMapping, setModelMapping] = useState('')
   const [selectedGroups, setSelectedGroups] = useState<string[]>([])
+  const [autoBan, setAutoBan] = useState(false)
+  const [autoBanChanged, setAutoBanChanged] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   // Fetch tag models
@@ -110,6 +113,18 @@ export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
       }
     }
   }, [open, currentTag, tagModelsData])
+
+  useEffect(() => {
+    if (!open || !currentTag) return
+
+    const tagChannels =
+      currentRow && isTagAggregateRow(currentRow) ? currentRow.children : []
+    setAutoBan(
+      tagChannels.length > 0 &&
+        tagChannels.every((channel) => channel.auto_ban !== 0)
+    )
+    setAutoBanChanged(false)
+  }, [open, currentRow, currentTag])
 
   const handleAddCustomModel = () => {
     if (!customModel.trim()) return
@@ -163,7 +178,8 @@ export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
       newTag !== currentTag ||
       modelMapping.trim() ||
       selectedModels.length > 0 ||
-      selectedGroups.length > 0
+      selectedGroups.length > 0 ||
+      autoBanChanged
 
     if (!hasChanges) {
       toast.warning(t('No changes to save'))
@@ -172,7 +188,9 @@ export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
 
     setIsSubmitting(true)
     try {
-      const params: Record<string, string | null> = { tag: currentTag }
+      const params: Record<string, string | number | null> = {
+        tag: currentTag,
+      }
 
       if (newTag && newTag !== currentTag) {
         params.new_tag = newTag || null
@@ -190,13 +208,17 @@ export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
         params.groups = selectedGroups.join(',')
       }
 
+      if (autoBanChanged) {
+        params.auto_ban = autoBan ? 1 : 0
+      }
+
       const response = await editTagChannels(
         params as unknown as TagOperationParams
       )
 
       if (response.success) {
         toast.success(t('Tag updated successfully'))
-        queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+        await queryClient.invalidateQueries({ queryKey: channelsQueryKeys.all })
         onOpenChange(false)
       } else {
         toast.error(response.message || t('Failed to update tag'))
@@ -264,6 +286,26 @@ export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
 
           <Separator />
 
+          {/* Auto Ban */}
+          <div className='flex items-center justify-between'>
+            <div className='space-y-0.5'>
+              <Label htmlFor='tag-auto-ban'>{t('Auto Ban')}</Label>
+              <p className='text-muted-foreground text-sm'>
+                {t('Automatically disable channel on repeated failures')}
+              </p>
+            </div>
+            <Switch
+              id='tag-auto-ban'
+              checked={autoBan}
+              onCheckedChange={(checked) => {
+                setAutoBan(checked)
+                setAutoBanChanged(true)
+              }}
+            />
+          </div>
+
+          <Separator />
+
           {/* Models */}
           <div className='space-y-2'>
             <Label>
@@ -304,12 +346,10 @@ export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
 
                 <div className='flex gap-2'>
                   <Select<string>
-                    items={[
-                      ...availableModels.map((model) => ({
-                        value: model,
-                        label: model,
-                      })),
-                    ]}
+                    items={availableModels.map((model) => ({
+                      value: model,
+                      label: model,
+                    }))}
                     onValueChange={(value) => {
                       if (value === null) return
                       if (!selectedModels.includes(value)) {
