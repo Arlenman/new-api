@@ -62,6 +62,7 @@ export function Playground() {
 
   const {
     editingMessageKey,
+    canRegenerateMessage,
     handleSendMessage,
     handleRegenerateMessage,
     handleEditMessage,
@@ -79,6 +80,8 @@ export function Playground() {
     onFirstMessage: renameActiveSessionFromMessage,
     onInvalidImageModel: () =>
       toast.error(t('Switch to an image model to generate images')),
+    onPendingImageGeneration: () =>
+      toast.warning(t('Please wait for the current generation to complete')),
   })
 
   const handleClearMessages = () => {
@@ -112,6 +115,7 @@ export function Playground() {
           <PlaygroundChat
             messages={messages}
             isLoadingMessages={isLoadingMessages}
+            canRegenerateMessage={canRegenerateMessage}
             onRegenerateMessage={handleRegenerateMessage}
             onEditMessage={handleEditMessage}
             onDeleteMessage={handleDeleteMessage}

@@ -48,6 +48,10 @@ import {
   type MessageStateUpdater,
 } from '../lib'
 import { imageGenerationTaskManager } from '../lib/image/image-generation-task-manager-singleton'
+import {
+  getImageGenerationTimeoutAt,
+  normalizeImageGenerationRetryableMessage,
+} from '../lib/message/image-generation-error-utils'
 import type {
   Message,
   PlaygroundConfig,
@@ -230,13 +234,8 @@ export function usePlaygroundState() {
       saveSessions(initial.sessions)
       saveActiveSessionId(activeSession.id)
       setIsLoadingMessages(false)
-      if (
-        shouldCreateInitialRemoteSession &&
-        serverSyncEnabledRef.current
-      ) {
-        void createPlaygroundSessionRemote(activeSession).catch(
-          () => undefined
-        )
+      if (shouldCreateInitialRemoteSession && serverSyncEnabledRef.current) {
+        void createPlaygroundSessionRemote(activeSession).catch(() => undefined)
       }
     }, 0)
 
@@ -329,6 +328,48 @@ export function usePlaygroundState() {
     },
     [persistMessages]
   )
+
+  useEffect(() => {
+    if (!hasLoadedMessagesRef.current || messages.length === 0) {
+      return
+    }
+
+    const now = Date.now()
+    const normalizedMessages = messages.map((message) =>
+      normalizeImageGenerationRetryableMessage(message, now)
+    )
+    if (
+      normalizedMessages.some((message, index) => message !== messages[index])
+    ) {
+      updateMessages(normalizedMessages)
+      return
+    }
+
+    let nextTimeoutAt: number | null = null
+    messages.forEach((message) => {
+      const timeoutAt = getImageGenerationTimeoutAt(message)
+      if (timeoutAt == null || timeoutAt <= now) {
+        return
+      }
+      if (nextTimeoutAt == null || timeoutAt < nextTimeoutAt) {
+        nextTimeoutAt = timeoutAt
+      }
+    })
+
+    if (nextTimeoutAt == null) {
+      return
+    }
+
+    const timeout = window.setTimeout(() => {
+      updateMessages((currentMessages) =>
+        currentMessages.map((message) =>
+          normalizeImageGenerationRetryableMessage(message, Date.now())
+        )
+      )
+    }, nextTimeoutAt - now)
+
+    return () => window.clearTimeout(timeout)
+  }, [messages, updateMessages])
 
   const commitActiveSessionMessages = useCallback(
     (messagesToSave: Message[], titleContent?: string) => {
@@ -436,7 +477,10 @@ export function usePlaygroundState() {
 
   const deleteSession = useCallback(
     (sessionId: string) => {
-      const result = deletePlaygroundSession(latestSessionsRef.current, sessionId)
+      const result = deletePlaygroundSession(
+        latestSessionsRef.current,
+        sessionId
+      )
       const activeSession = result.sessions.find(
         (session) => session.id === result.activeSessionId
       )
@@ -456,34 +500,37 @@ export function usePlaygroundState() {
     [persistSessions]
   )
 
-  const renameActiveSessionFromMessage = useCallback((content: string) => {
-    const currentSessionId = latestActiveSessionIdRef.current
-    if (!currentSessionId) {
-      return
-    }
-
-    setSessions((prevSessions) => {
-      const currentSession = prevSessions.find(
-        (session) => session.id === currentSessionId
-      )
-      if (
-        !currentSession ||
-        currentSession.title !== DEFAULT_PLAYGROUND_SESSION_TITLE ||
-        currentSession.messages.length > 0
-      ) {
-        return prevSessions
+  const renameActiveSessionFromMessage = useCallback(
+    (content: string) => {
+      const currentSessionId = latestActiveSessionIdRef.current
+      if (!currentSessionId) {
+        return
       }
 
-      const updatedSessions = renamePlaygroundSession(
-        prevSessions,
-        currentSessionId,
-        getSessionTitleFromMessage(content)
-      )
-      latestSessionsRef.current = updatedSessions
-      persistSessions(updatedSessions)
-      return updatedSessions
-    })
-  }, [persistSessions])
+      setSessions((prevSessions) => {
+        const currentSession = prevSessions.find(
+          (session) => session.id === currentSessionId
+        )
+        if (
+          !currentSession ||
+          currentSession.title !== DEFAULT_PLAYGROUND_SESSION_TITLE ||
+          currentSession.messages.length > 0
+        ) {
+          return prevSessions
+        }
+
+        const updatedSessions = renamePlaygroundSession(
+          prevSessions,
+          currentSessionId,
+          getSessionTitleFromMessage(content)
+        )
+        latestSessionsRef.current = updatedSessions
+        persistSessions(updatedSessions)
+        return updatedSessions
+      })
+    },
+    [persistSessions]
+  )
 
   // Reset config to defaults
   const resetConfig = useCallback(() => {

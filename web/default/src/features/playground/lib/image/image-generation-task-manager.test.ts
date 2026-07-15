@@ -184,7 +184,10 @@ describe('image generation task manager', () => {
       finalMessage?.versions[0].content ?? '',
       /Request error occurred|status code 524|HTTP 524/
     )
-    assert.doesNotMatch(finalMessage?.versions[0].content ?? '', /Network Error/)
+    assert.doesNotMatch(
+      finalMessage?.versions[0].content ?? '',
+      /Network Error/
+    )
     assert.equal(finalMessage?.imageGeneration?.error, undefined)
   })
 
@@ -263,7 +266,10 @@ describe('image generation task manager', () => {
       finalMessage?.versions[0].content ?? '',
       /\/api\/playground\/files\/pgf_server\/content/
     )
-    assert.doesNotMatch(finalMessage?.versions[0].content ?? '', /Network Error/)
+    assert.doesNotMatch(
+      finalMessage?.versions[0].content ?? '',
+      /Network Error/
+    )
   })
 
   test('polls persisted session after async image task is accepted', async () => {
@@ -438,6 +444,57 @@ describe('image generation task manager', () => {
     assert.match(
       finalMessage?.versions[0].content ?? '',
       /\/api\/playground\/files\/pgf_long\/content/
+    )
+  })
+
+  test('marks an image request as failed when the total task time expires', async () => {
+    const session: PlaygroundSession = {
+      id: 'session-1',
+      title: 'Image session',
+      createdAt: 1000,
+      updatedAt: 1000,
+      messages: [
+        {
+          key: 'assistant-1',
+          from: MESSAGE_ROLES.ASSISTANT,
+          mode: 'image',
+          status: MESSAGE_STATUS.LOADING,
+          versions: [{ id: 'assistant-version', content: '' }],
+        },
+      ],
+    }
+    const savedSessions: PlaygroundSession[][] = []
+    let requestSignal: AbortSignal | null = null
+    const manager = createImageGenerationTaskManager({
+      id: () => 'task-1',
+      now: () => 2000,
+      getSessions: () => [session],
+      saveSessions: (nextSessions) => {
+        savedSessions.push(nextSessions)
+      },
+      taskTimeoutMs: 0,
+      requestImage: ({ signal }) => {
+        requestSignal = signal
+        return new Promise(() => undefined)
+      },
+    })
+
+    await manager.start({
+      sessionId: 'session-1',
+      assistantMessageKey: 'assistant-1',
+      prompt: 'cute cat',
+      model: 'gpt-image-1',
+      group: 'default',
+      sessionMessages: session.messages,
+    }).done
+
+    const finalMessage = savedSessions.at(-1)?.[0].messages[0]
+    assert.equal((requestSignal as AbortSignal | null)?.aborted, true)
+    assert.equal(finalMessage?.status, MESSAGE_STATUS.COMPLETE)
+    assert.equal(finalMessage?.imageGeneration?.status, 'retryable')
+    assert.match(
+      finalMessage?.versions[0].content ?? '',
+      /Image generation timed out\. You can retry\./
     )
   })
 

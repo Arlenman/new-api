@@ -4,6 +4,8 @@ import { describe, test } from 'node:test'
 import { MESSAGE_ROLES, MESSAGE_STATUS } from '../../constants.ts'
 import type { Message } from '../../types.ts'
 import {
+  getImageGenerationTimeoutAt,
+  isPendingImageGenerationMessage,
   isRecoverableImageGenerationErrorMessage,
   normalizeImageGenerationMetadata,
   normalizeImageGenerationRetryableMessage,
@@ -21,7 +23,8 @@ describe('image generation error utilities', () => {
       versions: [
         {
           id: 'version-1',
-          content: 'Request error occurred: Request failed with status code 524',
+          content:
+            'Request error occurred: Request failed with status code 524',
         },
       ],
     }
@@ -59,7 +62,8 @@ describe('image generation error utilities', () => {
       versions: [
         {
           id: 'version-1',
-          content: 'Request error occurred: Request failed with status code 524',
+          content:
+            'Request error occurred: Request failed with status code 524',
         },
       ],
     } as Message
@@ -127,5 +131,65 @@ describe('image generation error utilities', () => {
 
     assert.equal(isRecoverableImageGenerationErrorMessage(message), false)
     assert.equal(normalizeImageGenerationRetryableMessage(message), message)
+  })
+
+  test('keeps image generation pending before the ten minute deadline', () => {
+    const startedAt = 1_000
+    const message: Message = {
+      key: 'assistant-image',
+      from: MESSAGE_ROLES.ASSISTANT,
+      mode: 'image',
+      status: MESSAGE_STATUS.LOADING,
+      startedAt,
+      versions: [{ id: 'version-1', content: '' }],
+      imageGeneration: {
+        taskId: 'task-1',
+        prompt: 'cute cat',
+        size: 'auto',
+        status: 'pending',
+        startedAt,
+      },
+    }
+
+    const normalized = normalizeImageGenerationRetryableMessage(
+      message,
+      startedAt + 10 * 60 * 1000 - 1
+    )
+
+    assert.equal(normalized, message)
+    assert.equal(isPendingImageGenerationMessage(normalized), true)
+    assert.equal(
+      getImageGenerationTimeoutAt(normalized),
+      startedAt + 10 * 60 * 1000
+    )
+  })
+
+  test('marks image generation as failed after ten minutes', () => {
+    const startedAt = 1_000
+    const message: Message = {
+      key: 'assistant-image',
+      from: MESSAGE_ROLES.ASSISTANT,
+      mode: 'image',
+      status: MESSAGE_STATUS.LOADING,
+      startedAt,
+      versions: [{ id: 'version-1', content: '' }],
+      imageGeneration: {
+        taskId: 'task-1',
+        prompt: 'cute cat',
+        size: 'auto',
+        status: 'pending',
+        startedAt,
+      },
+    }
+
+    const normalized = normalizeImageGenerationRetryableMessage(
+      message,
+      startedAt + 10 * 60 * 1000
+    )
+
+    assert.equal(normalized.status, MESSAGE_STATUS.COMPLETE)
+    assert.equal(normalized.imageGeneration?.status, 'retryable')
+    assert.equal(isPendingImageGenerationMessage(normalized), false)
+    assert.match(normalized.versions[0].content, /Image generation timed out/)
   })
 })

@@ -49,6 +49,7 @@ export const DEFAULT_GROUP = 'default' as const
 
 export const DEFAULT_IMAGE_SIZE = 'auto' as const
 export const PLAYGROUND_IMAGE_STREAM_PARTIAL_IMAGES = 1 as const
+export const IMAGE_GENERATION_TIMEOUT_MS = 10 * 60 * 1000
 
 // Default configuration
 export const DEFAULT_CONFIG: PlaygroundConfig = {
@@ -88,6 +89,7 @@ export const STORAGE_KEYS = {
 export const ERROR_MESSAGES = {
   API_REQUEST_ERROR: 'Request error occurred',
   IMAGE_GENERATION_RETRYABLE: 'Image generation did not finish. You can retry.',
+  IMAGE_GENERATION_TIMEOUT: 'Image generation timed out. You can retry.',
   NETWORK_ERROR: 'Network connection failed or server not responding',
   PARSE_ERROR: 'Error parsing response data',
   STREAM_START_ERROR: 'Error establishing connection',

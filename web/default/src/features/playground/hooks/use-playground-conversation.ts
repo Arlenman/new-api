@@ -22,7 +22,9 @@ import {
   appendUserMessagePair,
   appendUserImageMessagePair,
   applyMessageEdit,
+  canRegenerateMessage as canRegenerateConversationMessage,
   createRegenerateMessageAction,
+  hasPendingImageGenerationForMessage,
   isImageGenerationModel,
   removeMessageByKey,
   shouldBlockImageActionForModel,
@@ -66,6 +68,7 @@ type UsePlaygroundConversationOptions = {
   imageSize: string
   onFirstMessage?: (content: string) => void
   onInvalidImageModel?: () => void
+  onPendingImageGeneration?: () => void
 }
 
 function getLastAssistantMessageKey(messages: Message[]): string | null {
@@ -83,6 +86,7 @@ export function usePlaygroundConversation({
   imageSize,
   onFirstMessage,
   onInvalidImageModel,
+  onPendingImageGeneration,
 }: UsePlaygroundConversationOptions) {
   const [editingMessageKey, setEditingMessageKey] = useState<string | null>(
     null
@@ -147,13 +151,24 @@ export function usePlaygroundConversation({
       })
       if (!action) return
 
+      if (
+        action.mode === 'image' &&
+        shouldBlockImageActionForModel(action.mode, model)
+      ) {
+        onInvalidImageModel?.()
+        return
+      }
+
+      if (
+        action.mode === 'image' &&
+        hasPendingImageGenerationForMessage(messages, message.key)
+      ) {
+        onPendingImageGeneration?.()
+        return
+      }
+
       updateMessages(action.messages)
       if (action.mode === 'image') {
-        if (shouldBlockImageActionForModel(action.mode, model)) {
-          onInvalidImageModel?.()
-          return
-        }
-
         const assistantMessageKey = getLastAssistantMessageKey(action.messages)
         const commitResult = commitActiveSessionMessages(action.messages)
         if (!assistantMessageKey || !commitResult) {
@@ -182,7 +197,16 @@ export function usePlaygroundConversation({
       commitActiveSessionMessages,
       imageSize,
       onInvalidImageModel,
+      onPendingImageGeneration,
     ]
+  )
+
+  const canRegenerateMessage = useCallback(
+    (message: Message) =>
+      canRegenerateConversationMessage(messages, message.key, {
+        forceImage: isImageGenerationModel(model),
+      }),
+    [messages, model]
   )
 
   const handleEditMessage = useCallback((message: Message) => {
@@ -266,6 +290,7 @@ export function usePlaygroundConversation({
 
   return {
     editingMessageKey,
+    canRegenerateMessage,
     handleSendMessage,
     handleRegenerateMessage,
     handleEditMessage,

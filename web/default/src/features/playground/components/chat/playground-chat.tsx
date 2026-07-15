@@ -34,9 +34,7 @@ import {
   getPreviousUserMessage,
   isErrorMessage,
 } from '../../lib'
-import {
-  isImageOnlyMarkdownContent,
-} from '../../lib/image/playground-image-utils'
+import { isImageOnlyMarkdownContent } from '../../lib/image/playground-image-utils'
 import { normalizeImageGenerationRetryableMessage } from '../../lib/message/image-generation-error-utils'
 import type {
   Message as MessageType,
@@ -52,6 +50,7 @@ const MAX_RENDERED_HISTORY_MESSAGES = 24
 
 interface PlaygroundChatProps {
   messages: MessageType[]
+  canRegenerateMessage?: (message: MessageType) => boolean
   onCopyMessage?: (message: MessageType) => void
   onRegenerateMessage?: (message: MessageType) => void
   onEditMessage?: (message: MessageType) => void
@@ -68,6 +67,7 @@ interface PlaygroundChatProps {
 
 export function PlaygroundChat({
   messages,
+  canRegenerateMessage,
   onCopyMessage,
   onRegenerateMessage,
   onEditMessage,
@@ -135,9 +135,9 @@ export function PlaygroundChat({
     const alignment = getMessageAlignment(message, messageLayoutMode)
     const isSourceVisible = sourceMessageKeys.has(message.key)
     const isImageOnlyMessageContent = isImageOnlyMarkdownContent(content)
-    const useCompactImageActions =
-      isImageOnlyMessageContent && !isSourceVisible
+    const useCompactImageActions = isImageOnlyMessageContent && !isSourceVisible
     const messageSpacingClass = isImageOnlyMessageContent ? 'py-1.5' : 'py-2.5'
+    const canRegenerate = canRegenerateMessage?.(message) ?? true
 
     return (
       <Message
@@ -163,15 +163,13 @@ export function PlaygroundChat({
                 <MessageActions
                   message={message}
                   onCopy={onCopyMessage}
-                  onRegenerate={onRegenerateMessage}
+                  onRegenerate={canRegenerate ? onRegenerateMessage : undefined}
                   onToggleSource={handleToggleMessageSource}
                   onEdit={onEditMessage}
                   onDelete={onDeleteMessage}
                   isSourceVisible={isSourceVisible}
                   isGenerating={isGenerating}
-                  alwaysVisible={
-                    alwaysShowActions && !useCompactImageActions
-                  }
+                  alwaysVisible={alwaysShowActions && !useCompactImageActions}
                   compactFloating={useCompactImageActions}
                   className={useCompactImageActions ? 'mt-0' : 'mt-1.5'}
                 />
@@ -183,7 +181,7 @@ export function PlaygroundChat({
                   <MessageErrorActions
                     disabled={isGenerating}
                     onRetry={
-                      onRegenerateMessage
+                      onRegenerateMessage && canRegenerate
                         ? () => onRegenerateMessage(message)
                         : undefined
                     }

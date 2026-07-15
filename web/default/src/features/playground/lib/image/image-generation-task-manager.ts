@@ -16,9 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { t } from 'i18next'
+
 import {
   DEFAULT_IMAGE_SIZE,
   ERROR_MESSAGES,
+  IMAGE_GENERATION_TIMEOUT_MS,
   MESSAGE_STATUS,
   PLAYGROUND_IMAGE_STREAM_PARTIAL_IMAGES,
 } from '../../constants.ts'
@@ -60,6 +63,7 @@ type ImageGenerationTaskManagerOptions = {
   ) => Promise<Message | null | undefined>
   recoveryPollIntervalMs?: number
   recoveryTimeoutMs?: number
+  taskTimeoutMs?: number
 }
 
 export type StartImageGenerationTaskOptions = {
@@ -91,16 +95,17 @@ type ActiveImageGenerationTask = {
   assistantMessageKey: string
 }
 
-const DEFAULT_IMAGE_RECOVERY_TIMEOUT_MS = 10 * 60 * 1000
+const DEFAULT_IMAGE_RECOVERY_TIMEOUT_MS = IMAGE_GENERATION_TIMEOUT_MS
+
+class ImageGenerationTaskTimeoutError extends Error {}
+class ImageGenerationTaskAbortError extends Error {}
 
 function fallbackId(): string {
   return crypto.randomUUID()
 }
 
 function isAbortError(error: unknown): boolean {
-  return (
-    error instanceof DOMException && error.name === 'AbortError'
-  )
+  return error instanceof DOMException && error.name === 'AbortError'
 }
 
 function isLikelyRecoverableImageRequestError(error: unknown): boolean {
@@ -137,7 +142,9 @@ function isCompletedImageMessage(message: Message | null | undefined): boolean {
   )
 }
 
-function isTerminalImageMessage(message: Message | null | undefined): message is Message {
+function isTerminalImageMessage(
+  message: Message | null | undefined
+): message is Message {
   if (isCompletedImageMessage(message)) {
     return true
   }
@@ -155,7 +162,10 @@ function isTerminalImageMessage(message: Message | null | undefined): message is
 function isAcceptedImageGenerationResponse(
   response: ImageGenerationResponse
 ): boolean {
-  return response.status === 'pending' && getImageGenerationUrls(response).length === 0
+  return (
+    response.status === 'pending' &&
+    getImageGenerationUrls(response).length === 0
+  )
 }
 
 function getSnapshot(
@@ -205,6 +215,7 @@ export function createImageGenerationTaskManager(
   const recoveryPollIntervalMs = options.recoveryPollIntervalMs ?? 2000
   const recoveryTimeoutMs =
     options.recoveryTimeoutMs ?? DEFAULT_IMAGE_RECOVERY_TIMEOUT_MS
+  const taskTimeoutMs = options.taskTimeoutMs ?? IMAGE_GENERATION_TIMEOUT_MS
   const listeners = new Set<ImageGenerationTaskListener>()
   const activeTasks = new Map<string, ActiveImageGenerationTask>()
   let lastSessions: PlaygroundSession[] | null = null
@@ -214,7 +225,9 @@ export function createImageGenerationTaskManager(
     listeners.forEach((listener) => listener(snapshot))
   }
 
-  function readSessions(fallbackSessions?: PlaygroundSession[]): PlaygroundSession[] {
+  function readSessions(
+    fallbackSessions?: PlaygroundSession[]
+  ): PlaygroundSession[] {
     return lastSessions ?? fallbackSessions ?? getSessions() ?? []
   }
 
@@ -263,32 +276,30 @@ export function createImageGenerationTaskManager(
       updater
     )
 
-    return writeSessionMessages(
-      task.sessionId,
-      messages,
-      sessions,
-      now()
-    )
+    return writeSessionMessages(task.sessionId, messages, sessions, now())
   }
 
   function markTaskError(
     taskId: string,
     _error: unknown,
-    status: 'error' | 'cancelled',
+    status: 'error' | 'cancelled' | 'timeout',
     fallbackSessions?: PlaygroundSession[]
   ): void {
     const completedAt = now()
-    const imageStatus =
-      status === 'cancelled' ? 'cancelled' : 'retryable'
+    const imageStatus = status === 'cancelled' ? 'cancelled' : 'retryable'
+    let errorMessage: string = ERROR_MESSAGES.IMAGE_GENERATION_RETRYABLE
+    if (status === 'cancelled') {
+      errorMessage = ERROR_MESSAGES.INTERRUPTED
+    } else if (status === 'timeout') {
+      errorMessage = ERROR_MESSAGES.IMAGE_GENERATION_TIMEOUT
+    }
 
     updateTargetMessage(taskId, fallbackSessions, (message) =>
       completeImageAssistantTiming(
         {
           ...updateCurrentVersionContent(
             message,
-            status === 'cancelled'
-              ? ERROR_MESSAGES.INTERRUPTED
-              : ERROR_MESSAGES.IMAGE_GENERATION_RETRYABLE
+            t(errorMessage) || errorMessage
           ),
           mode: 'image',
           status: MESSAGE_STATUS.COMPLETE,
@@ -422,13 +433,34 @@ export function createImageGenerationTaskManager(
         : {}),
     }
 
+    let timedOut = false
+    let timeout: ReturnType<typeof globalThis.setTimeout> | null = null
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeout = globalThis.setTimeout(() => {
+        timedOut = true
+        abortController.abort()
+        reject(new ImageGenerationTaskTimeoutError())
+      }, taskTimeoutMs)
+    })
+    let abortHandler: (() => void) | null = null
+    const abortPromise = new Promise<never>((_, reject) => {
+      abortHandler = () => reject(new ImageGenerationTaskAbortError())
+      abortController.signal.addEventListener('abort', abortHandler, {
+        once: true,
+      })
+    })
+
     const done = (async () => {
       try {
-        const response = await requestImage({
-          payload,
-          files,
-          signal: abortController.signal,
-        })
+        const response = await Promise.race([
+          requestImage({
+            payload,
+            files,
+            signal: abortController.signal,
+          }),
+          timeoutPromise,
+          abortPromise,
+        ])
 
         if (abortController.signal.aborted) {
           return
@@ -455,7 +487,16 @@ export function createImageGenerationTaskManager(
 
         markTaskComplete(taskId, response)
       } catch (error) {
-        if (abortController.signal.aborted || isAbortError(error)) {
+        if (timedOut || error instanceof ImageGenerationTaskTimeoutError) {
+          markTaskError(taskId, error, 'timeout')
+          return
+        }
+
+        if (
+          abortController.signal.aborted ||
+          error instanceof ImageGenerationTaskAbortError ||
+          isAbortError(error)
+        ) {
           markTaskError(taskId, error, 'cancelled')
           return
         }
@@ -474,6 +515,12 @@ export function createImageGenerationTaskManager(
 
         markTaskError(taskId, error, 'error')
       } finally {
+        if (timeout !== null) {
+          globalThis.clearTimeout(timeout)
+        }
+        if (abortHandler) {
+          abortController.signal.removeEventListener('abort', abortHandler)
+        }
         activeTasks.delete(taskId)
         notify()
       }

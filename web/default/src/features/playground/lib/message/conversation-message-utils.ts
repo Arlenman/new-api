@@ -19,6 +19,10 @@ For commercial licensing, please contact support@quantumnous.com
 import { MESSAGE_ROLES } from '../../constants.ts'
 import type { Message, PlaygroundImageFile } from '../../types.ts'
 import {
+  getImageGenerationTimeoutAt,
+  isPendingImageGenerationMessage,
+} from './image-generation-error-utils.ts'
+import {
   createLoadingAssistantMessage,
   createUserMessage,
   getMessageContent,
@@ -127,6 +131,78 @@ export function createRegeneratedMessages(
   ]
 }
 
+export function canRegenerateMessage(
+  messages: Message[],
+  messageKey: string,
+  options: ImageActionOptions = {}
+): boolean {
+  const messageIndex = messages.findIndex(
+    (message) => message.key === messageKey
+  )
+
+  if (messageIndex === -1) {
+    return false
+  }
+
+  const targetMessage = messages[messageIndex]
+  const promptMessageIndex =
+    targetMessage.from === MESSAGE_ROLES.USER
+      ? messageIndex
+      : getPreviousUserMessageIndex(messages, messageIndex)
+  const promptMessage =
+    promptMessageIndex === -1 ? null : messages[promptMessageIndex]
+  const shouldUseImage =
+    options.forceImage ||
+    targetMessage.mode === 'image' ||
+    promptMessage?.mode === 'image'
+
+  if (!shouldUseImage || !promptMessage) {
+    return true
+  }
+
+  return !messages
+    .slice(promptMessageIndex + 1)
+    .some((message) => message.from === MESSAGE_ROLES.USER)
+}
+
+export function hasPendingImageGenerationForMessage(
+  messages: Message[],
+  messageKey: string,
+  now = Date.now()
+): boolean {
+  const messageIndex = messages.findIndex(
+    (message) => message.key === messageKey
+  )
+  if (messageIndex === -1) {
+    return false
+  }
+
+  const promptMessageIndex =
+    messages[messageIndex].from === MESSAGE_ROLES.USER
+      ? messageIndex
+      : getPreviousUserMessageIndex(messages, messageIndex)
+  if (promptMessageIndex === -1) {
+    return false
+  }
+
+  for (let index = promptMessageIndex + 1; index < messages.length; index++) {
+    const message = messages[index]
+    if (message.from === MESSAGE_ROLES.USER) {
+      break
+    }
+    if (!isPendingImageGenerationMessage(message)) {
+      continue
+    }
+
+    const timeoutAt = getImageGenerationTimeoutAt(message)
+    if (timeoutAt == null || now < timeoutAt) {
+      return true
+    }
+  }
+
+  return false
+}
+
 export function createRegenerateMessageAction(
   messages: Message[],
   messageKey: string,
@@ -137,11 +213,6 @@ export function createRegenerateMessageAction(
   )
 
   if (messageIndex === -1) {
-    return null
-  }
-
-  const regeneratedMessages = createRegeneratedMessages(messages, messageKey)
-  if (!regeneratedMessages) {
     return null
   }
 
@@ -156,22 +227,35 @@ export function createRegenerateMessageAction(
     promptMessage?.mode === 'image'
 
   if (!shouldUseImage) {
+    const regeneratedMessages = createRegeneratedMessages(messages, messageKey)
+    if (!regeneratedMessages) {
+      return null
+    }
+
     return { messages: regeneratedMessages, mode: 'chat' }
   }
 
   if (!promptMessage) {
+    const regeneratedMessages = createRegeneratedMessages(messages, messageKey)
+    if (!regeneratedMessages) {
+      return null
+    }
+
     return { messages: regeneratedMessages, mode: 'chat' }
   }
 
+  if (!canRegenerateMessage(messages, messageKey, options)) {
+    return null
+  }
+
   return {
-    messages: regeneratedMessages.map((message, index) =>
-      index === regeneratedMessages.length - 1
-        ? {
-            ...message,
-            mode: 'image',
-          }
-        : message
-    ),
+    messages: [
+      ...messages,
+      {
+        ...createLoadingAssistantMessage(),
+        mode: 'image',
+      },
+    ],
     mode: 'image',
     prompt: getMessageContent(promptMessage),
   }
@@ -188,13 +272,21 @@ export function getPreviousUserMessage(
   messages: Message[],
   beforeIndex: number
 ): Message | null {
+  const messageIndex = getPreviousUserMessageIndex(messages, beforeIndex)
+  return messageIndex === -1 ? null : messages[messageIndex]
+}
+
+function getPreviousUserMessageIndex(
+  messages: Message[],
+  beforeIndex: number
+): number {
   for (let index = beforeIndex - 1; index >= 0; index--) {
     if (messages[index].from === MESSAGE_ROLES.USER) {
-      return messages[index]
+      return index
     }
   }
 
-  return null
+  return -1
 }
 
 export function applyMessageEdit(

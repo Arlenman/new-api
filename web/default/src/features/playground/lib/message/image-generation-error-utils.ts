@@ -16,18 +16,21 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { t } from 'i18next'
+
 import {
   DEFAULT_IMAGE_SIZE,
   ERROR_MESSAGES,
+  IMAGE_GENERATION_TIMEOUT_MS,
   MESSAGE_ROLES,
   MESSAGE_STATUS,
 } from '../../constants.ts'
 import type { Message } from '../../types.ts'
+import { completeAssistantTiming } from './message-timing-utils.ts'
 import {
   getMessageContent,
   updateCurrentVersionContent,
 } from './message-utils.ts'
-import { completeAssistantTiming } from './message-timing-utils.ts'
 
 const RECOVERABLE_IMAGE_ERROR_PATTERNS = [
   /Request error occurred/i,
@@ -57,6 +60,35 @@ function hasRecoverableImageErrorContent(content: string): boolean {
 
 function isAssistantOrUnknownMessage(message: Message): boolean {
   return message.from === MESSAGE_ROLES.ASSISTANT || !message.from
+}
+
+export function isPendingImageGenerationMessage(message: Message): boolean {
+  if (!isAssistantOrUnknownMessage(message)) {
+    return false
+  }
+
+  const hasImageState =
+    message.mode === 'image' || message.imageGeneration != null
+  if (!hasImageState) {
+    return false
+  }
+
+  return (
+    message.imageGeneration?.status === 'pending' ||
+    message.status === MESSAGE_STATUS.LOADING ||
+    message.status === MESSAGE_STATUS.STREAMING
+  )
+}
+
+export function getImageGenerationTimeoutAt(message: Message): number | null {
+  if (!isPendingImageGenerationMessage(message)) {
+    return null
+  }
+
+  const startedAt =
+    message.imageGeneration?.startedAt ?? message.startedAt ?? message.createdAt
+
+  return startedAt == null ? null : startedAt + IMAGE_GENERATION_TIMEOUT_MS
 }
 
 export function normalizeImageGenerationMetadata(message: Message): Message {
@@ -113,26 +145,35 @@ export function isRecoverableImageGenerationErrorMessage(
 }
 
 export function normalizeImageGenerationRetryableMessage(
-  message: Message
+  message: Message,
+  now = Date.now()
 ): Message {
   const normalizedMetadataMessage = normalizeImageGenerationMetadata(message)
+  const timeoutAt = getImageGenerationTimeoutAt(normalizedMetadataMessage)
+  const hasTimedOut = timeoutAt != null && now >= timeoutAt
 
-  if (!isRecoverableImageGenerationErrorMessage(normalizedMetadataMessage)) {
+  if (
+    !hasTimedOut &&
+    !isRecoverableImageGenerationErrorMessage(normalizedMetadataMessage)
+  ) {
     return normalizedMetadataMessage
   }
 
-  const completedAt =
-    normalizedMetadataMessage.completedAt ??
-    normalizedMetadataMessage.startedAt ??
-    normalizedMetadataMessage.createdAt ??
-    Date.now()
+  const completedAt = hasTimedOut
+    ? timeoutAt
+    : (normalizedMetadataMessage.completedAt ??
+      normalizedMetadataMessage.startedAt ??
+      normalizedMetadataMessage.createdAt ??
+      now)
+
+  const contentKey = hasTimedOut
+    ? ERROR_MESSAGES.IMAGE_GENERATION_TIMEOUT
+    : ERROR_MESSAGES.IMAGE_GENERATION_RETRYABLE
+  const content = t(contentKey) || contentKey
 
   return completeAssistantTiming(
     {
-      ...updateCurrentVersionContent(
-        normalizedMetadataMessage,
-        ERROR_MESSAGES.IMAGE_GENERATION_RETRYABLE
-      ),
+      ...updateCurrentVersionContent(normalizedMetadataMessage, content),
       from: MESSAGE_ROLES.ASSISTANT,
       mode: 'image',
       status: MESSAGE_STATUS.COMPLETE,
@@ -142,7 +183,8 @@ export function normalizeImageGenerationRetryableMessage(
           normalizedMetadataMessage.imageGeneration?.taskId ??
           `retryable-${normalizedMetadataMessage.key}`,
         prompt: normalizedMetadataMessage.imageGeneration?.prompt ?? '',
-        size: normalizedMetadataMessage.imageGeneration?.size ?? DEFAULT_IMAGE_SIZE,
+        size:
+          normalizedMetadataMessage.imageGeneration?.size ?? DEFAULT_IMAGE_SIZE,
         startedAt:
           normalizedMetadataMessage.imageGeneration?.startedAt ??
           normalizedMetadataMessage.startedAt ??
