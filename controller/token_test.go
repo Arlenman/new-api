@@ -16,6 +16,8 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -37,6 +39,12 @@ type tokenResponseItem struct {
 	Key    string   `json:"key"`
 	Status int      `json:"status"`
 	Tags   []string `json:"tags"`
+	IPs    []struct {
+		IP          string `json:"ip"`
+		CountryCode string `json:"country_code"`
+		Region      string `json:"region"`
+		City        string `json:"city"`
+	} `json:"ips"`
 }
 
 type tokenKeyResponse struct {
@@ -100,7 +108,7 @@ func openTokenControllerTestDB(t *testing.T) *gorm.DB {
 func migrateTokenControllerTestDB(t *testing.T, db *gorm.DB) {
 	t.Helper()
 
-	if err := db.AutoMigrate(&model.Token{}, &model.TokenTag{}, &model.TokenTagBinding{}); err != nil {
+	if err := db.AutoMigrate(&model.Token{}, &model.TokenIP{}, &model.TokenTag{}, &model.TokenTagBinding{}); err != nil {
 		t.Fatalf("failed to migrate token table: %v", err)
 	}
 }
@@ -648,4 +656,111 @@ func TestGetTokenKeyRequiresOwnershipAndReturnsFullKey(t *testing.T) {
 	if strings.Contains(unauthorizedRecorder.Body.String(), token.Key) {
 		t.Fatalf("unauthorized key response leaked raw token key: %s", unauthorizedRecorder.Body.String())
 	}
+}
+
+func TestTokenListOnlyExposesRecordedIPsToRoot(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 41, "root-visible-ip", "root-visible-ip-key")
+	require.NoError(t, model.RecordTokenIP(token.Id, "203.0.113.9"))
+	require.NoError(t, model.UpdateTokenIPLocation(token.Id, "203.0.113.9", "US", "California", "Los Angeles"))
+
+	ctx, recorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/", nil, 41)
+	ctx.Set("role", common.RoleRootUser)
+	GetAllTokens(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success)
+	var page tokenPageResponse
+	require.NoError(t, common.Unmarshal(response.Data, &page))
+	require.Len(t, page.Items, 1)
+	require.Len(t, page.Items[0].IPs, 1)
+	assert.Equal(t, "203.0.113.9", page.Items[0].IPs[0].IP)
+	assert.Equal(t, "US", page.Items[0].IPs[0].CountryCode)
+	assert.Equal(t, "California", page.Items[0].IPs[0].Region)
+	assert.Equal(t, "Los Angeles", page.Items[0].IPs[0].City)
+
+	for _, role := range []int{common.RoleAdminUser, common.RoleCommonUser} {
+		ctx, recorder = newAuthenticatedContext(t, http.MethodGet, "/api/token/", nil, 41)
+		ctx.Set("role", role)
+		GetAllTokens(ctx)
+
+		response = decodeAPIResponse(t, recorder)
+		require.True(t, response.Success)
+		var pageWithoutIPs tokenPageResponse
+		require.NoError(t, common.Unmarshal(response.Data, &pageWithoutIPs))
+		require.Len(t, pageWithoutIPs.Items, 1)
+		assert.Empty(t, pageWithoutIPs.Items[0].IPs)
+		assert.NotContains(t, recorder.Body.String(), `"ips"`)
+	}
+}
+
+func TestRecordTokenIPDeduplicatesNormalizedAddresses(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 42, "dedupe-ip", "dedupe-ip-key")
+
+	require.NoError(t, model.RecordTokenIP(token.Id, "2001:0db8:0:0:0:0:0:1"))
+	require.NoError(t, model.RecordTokenIP(token.Id, "2001:db8::1"))
+
+	var records []model.TokenIP
+	require.NoError(t, db.Where("token_id = ?", token.Id).Find(&records).Error)
+	require.Len(t, records, 1)
+	assert.Equal(t, "2001:db8::1", records[0].IP)
+}
+
+func TestDeletingTokenDeletesRecordedIPs(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 43, "delete-ip", "delete-ip-key")
+	require.NoError(t, model.RecordTokenIP(token.Id, "198.51.100.7"))
+
+	require.NoError(t, model.DeleteTokenById(token.Id, token.UserId))
+
+	var count int64
+	require.NoError(t, db.Model(&model.TokenIP{}).Where("token_id = ?", token.Id).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
+func TestGetTokenIPLocationsAllowsRootToLoadIPsAcrossUsers(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	ownedToken := seedToken(t, db, 51, "owned-ip", "owned-ip-key")
+	otherToken := seedToken(t, db, 52, "other-ip", "other-ip-key")
+	require.NoError(t, model.RecordTokenIP(ownedToken.Id, "192.168.1.20"))
+	require.NoError(t, model.RecordTokenIP(otherToken.Id, "10.0.0.8"))
+
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/ip-locations", tokenIPLocationRequest{
+		Items: []tokenIPLocationRequestItem{
+			{TokenId: ownedToken.Id, IP: "192.168.1.20"},
+			{TokenId: otherToken.Id, IP: "10.0.0.8"},
+		},
+	}, 51)
+	ctx.Set("role", common.RoleRootUser)
+	GetTokenIPLocations(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success)
+	var results []tokenIPLocationResult
+	require.NoError(t, common.Unmarshal(response.Data, &results))
+	require.Len(t, results, 2)
+	assert.True(t, results[0].Success)
+	assert.True(t, results[0].Private)
+	assert.True(t, results[1].Success)
+	assert.True(t, results[1].Private)
+
+	var otherIP model.TokenIP
+	require.NoError(t, db.Where("token_id = ? AND ip = ?", otherToken.Id, "10.0.0.8").First(&otherIP).Error)
+	assert.Empty(t, otherIP.CountryCode)
+	assert.Empty(t, otherIP.Region)
+	assert.Empty(t, otherIP.City)
+}
+
+func TestGetTokenIPLocationsRejectsNonRoot(t *testing.T) {
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/ip-locations", tokenIPLocationRequest{
+		Items: []tokenIPLocationRequestItem{{TokenId: 1, IP: "8.8.8.8"}},
+	}, 61)
+	ctx.Set("role", common.RoleAdminUser)
+
+	GetTokenIPLocations(ctx)
+
+	assert.Equal(t, http.StatusForbidden, recorder.Code)
+	response := decodeAPIResponse(t, recorder)
+	assert.False(t, response.Success)
 }

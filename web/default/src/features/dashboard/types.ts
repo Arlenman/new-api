@@ -48,6 +48,14 @@ export interface FlowQuotaDataItem {
   quota?: number
 }
 
+export interface TokenIPData {
+  ip: string
+  country_code?: string
+  region?: string
+  city?: string
+  private?: boolean
+}
+
 export interface TokenTagQuotaDataItem {
   tag_id: number
   tag_name: string
@@ -60,6 +68,7 @@ export interface TokenTagQuotaDataItem {
   count?: number
   quota?: number
   last_used_at?: number
+  ips?: TokenIPData[]
 }
 
 export interface TokenTagQuotaSummary {

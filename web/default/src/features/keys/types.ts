@@ -22,6 +22,16 @@ import { z } from 'zod'
 // API Key Schema & Types
 // ============================================================================
 
+export const apiKeyIPSchema = z.object({
+  ip: z.string(),
+  country_code: z.string().optional(),
+  region: z.string().optional(),
+  city: z.string().optional(),
+  private: z.boolean().optional(),
+})
+
+export type ApiKeyIP = z.infer<typeof apiKeyIPSchema>
+
 export const apiKeySchema = z.object({
   id: z.number(),
   name: z.string(),
@@ -46,6 +56,7 @@ export const apiKeySchema = z.object({
   model_limits: z.string().nullish().default(''),
   allow_ips: z.string().nullish().default(''),
   tags: z.array(z.string()).optional().default([]),
+  ips: z.array(apiKeyIPSchema).optional(),
 })
 
 export type ApiKey = z.infer<typeof apiKeySchema>
@@ -114,3 +125,17 @@ export type ApiKeysDialogType =
   | 'delete'
   | 'batch-delete'
   | 'cc-switch'
+
+export interface FetchApiKeyIPLocationsItem {
+  token_id: number
+  ip: string
+}
+
+export interface ApiKeyIPLocationResult extends FetchApiKeyIPLocationsItem {
+  country_code?: string
+  region?: string
+  city?: string
+  private?: boolean
+  success: boolean
+  message?: string
+}

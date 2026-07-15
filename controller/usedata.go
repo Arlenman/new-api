@@ -87,7 +87,8 @@ func GetAllTokenTagQuotaDates(c *gin.Context) {
 	username := c.Query("username")
 	includeUntagged, _ := strconv.ParseBool(c.Query("include_untagged"))
 	excludeUntagged, _ := strconv.ParseBool(c.Query("exclude_untagged"))
-	dates, summary, err := model.GetTokenTagQuotaAnalytics(startTimestamp, endTimestamp, username, 0, c.GetInt("role"), model.TokenTagQuotaFilters{
+	role := c.GetInt("role")
+	dates, summary, err := model.GetTokenTagQuotaAnalytics(startTimestamp, endTimestamp, username, 0, role, model.TokenTagQuotaFilters{
 		IncludedTags:    c.QueryArray("token_tag"),
 		ExcludedTags:    c.QueryArray("exclude_token_tag"),
 		IncludeUntagged: includeUntagged,
@@ -96,6 +97,28 @@ func GetAllTokenTagQuotaDates(c *gin.Context) {
 	if err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	if role == common.RoleRootUser {
+		tokenIds := make([]int, 0, len(dates))
+		seenTokenIds := make(map[int]struct{}, len(dates))
+		for _, row := range dates {
+			if row.TokenID <= 0 {
+				continue
+			}
+			if _, exists := seenTokenIds[row.TokenID]; exists {
+				continue
+			}
+			seenTokenIds[row.TokenID] = struct{}{}
+			tokenIds = append(tokenIds, row.TokenID)
+		}
+		tokenIPs, loadErr := model.GetTokenIPsByTokenIDs(tokenIds)
+		if loadErr != nil {
+			common.ApiError(c, loadErr)
+			return
+		}
+		for _, row := range dates {
+			row.IPs = model.BuildTokenIPViews(tokenIPs[row.TokenID])
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

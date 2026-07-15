@@ -44,6 +44,7 @@ import {
   ModelLimitsCell,
   IpRestrictionsCell,
   ApiKeyTagsCell,
+  RecordedIPsCell,
 } from './api-keys-cells'
 import { DataTableRowActions } from './data-table-row-actions'
 
@@ -73,13 +74,18 @@ function useGroupRatios(): Record<string, number> {
   return data ?? {}
 }
 
-export function useApiKeysColumns(now: number): ColumnDef<ApiKey>[] {
+export function useApiKeysColumns(
+  now: number,
+  isRoot: boolean,
+  onFetchIPLocation: (tokenId: number, ip: string) => void,
+  loadingIP?: string
+): ColumnDef<ApiKey>[] {
   const { t, i18n } = useTranslation()
   const groupRatios = useGroupRatios()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const justNowLabel = t('Just now')
   const staleAccessThreshold = dayjs(now).subtract(3, 'month').valueOf()
-  return [
+  const columns: ColumnDef<ApiKey>[] = [
     {
       id: 'select',
       header: ({ table }) => (
@@ -242,6 +248,26 @@ export function useApiKeysColumns(now: number): ColumnDef<ApiKey>[] {
       size: 160,
       meta: { mobileHidden: true },
     },
+    ...(isRoot
+      ? [
+          {
+            id: 'recorded_ips',
+            accessorKey: 'ips',
+            header: t('Recorded IPs'),
+            cell: ({ row }) => (
+              <RecordedIPsCell
+                tokenId={row.original.id}
+                ips={row.original.ips}
+                onFetchLocation={onFetchIPLocation}
+                loadingIP={loadingIP}
+              />
+            ),
+            enableSorting: false,
+            size: 230,
+            meta: { mobileHidden: true },
+          } satisfies ColumnDef<ApiKey>,
+        ]
+      : []),
     {
       id: 'tags',
       accessorKey: 'tags',
@@ -343,4 +369,5 @@ export function useApiKeysColumns(now: number): ColumnDef<ApiKey>[] {
       meta: { pinned: 'right' as const },
     },
   ]
+  return columns
 }

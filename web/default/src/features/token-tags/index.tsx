@@ -16,18 +16,20 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
   BarChart3,
   List,
+  Loader2,
   RotateCcw,
   Search,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import { SectionPageLayout } from '@/components/layout'
 import { Button } from '@/components/ui/button'
@@ -57,10 +59,14 @@ import type {
   TokenTagQuotaDataItem,
   TokenTagQuotaSummary,
 } from '@/features/dashboard/types'
+import { fetchApiKeyIPLocations } from '@/features/keys/api'
+import { RecordedIPsCell } from '@/features/keys/components/api-keys-cells'
 import { CompactDateTimeRangePicker } from '@/features/usage-logs/components/compact-date-time-range-picker'
 import { useIsAdmin } from '@/hooks/use-admin'
 import { getChartColor } from '@/lib/colors'
 import { formatNumber, formatQuota } from '@/lib/format'
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { RankingChart } from './components/ranking-chart'
 import {
@@ -86,6 +92,8 @@ import {
 } from './lib'
 
 type ViewMode = 'table' | 'chart'
+
+const TOKEN_IP_LOCATION_BATCH_SIZE = 50
 
 const EMPTY_SUMMARY: TokenTagQuotaSummary = {
   quota: 0,
@@ -154,6 +162,9 @@ function SortableHead({
 export function TokenTagsDashboard() {
   const { t } = useTranslation()
   const isAdmin = useIsAdmin()
+  const role = useAuthStore((state) => state.auth.user?.role)
+  const isRoot = role === ROLE.SUPER_ADMIN
+  const queryClient = useQueryClient()
   const defaultRange = useMemo(() => getTodayRange(), [])
   const [startTime, setStartTime] = useState(defaultRange.start)
   const [endTime, setEndTime] = useState(defaultRange.end)
@@ -180,6 +191,7 @@ export function TokenTagsDashboard() {
     key: 'quota',
     direction: 'desc',
   })
+  const [loadingIP, setLoadingIP] = useState<string>()
 
   const query = useQuery({
     queryKey: [
@@ -190,6 +202,7 @@ export function TokenTagsDashboard() {
       appliedFilters.includedTags,
       appliedFilters.excludedTags,
       isAdmin,
+      isRoot,
     ],
     queryFn: () =>
       getTokenTagQuotaDates(
@@ -259,6 +272,68 @@ export function TokenTagsDashboard() {
     () => sortTokenTagRows(keyRows, keySort),
     [keyRows, keySort]
   )
+  const pendingIPLocations = useMemo(() => {
+    if (!isRoot) return []
+    const items = new Map<string, { token_id: number; ip: string }>()
+    for (const row of keyRows) {
+      for (const item of row.ips || []) {
+        if (item.private || item.country_code || item.region || item.city) {
+          continue
+        }
+        const key = `${row.token_id}:${item.ip}`
+        items.set(key, { token_id: row.token_id, ip: item.ip })
+      }
+    }
+    return [...items.values()]
+  }, [isRoot, keyRows])
+
+  const fetchIPLocations = async (
+    items: Array<{ token_id: number; ip: string }>,
+    loadingKey: string
+  ) => {
+    setLoadingIP(loadingKey)
+    try {
+      let failureMessage = ''
+      for (
+        let start = 0;
+        start < items.length;
+        start += TOKEN_IP_LOCATION_BATCH_SIZE
+      ) {
+        const result = await fetchApiKeyIPLocations(
+          items.slice(start, start + TOKEN_IP_LOCATION_BATCH_SIZE)
+        )
+        if (!result.success) {
+          failureMessage = result.message || t('Failed to fetch IP location')
+          break
+        }
+        const failure = (result.data || []).find((item) => !item.success)
+        if (!failureMessage && failure) {
+          failureMessage = failure.message || t('Failed to fetch IP location')
+        }
+      }
+      if (failureMessage) {
+        toast.error(failureMessage)
+      } else {
+        toast.success(t('Location fetched'))
+      }
+    } catch {
+      toast.error(t('Failed to fetch IP location'))
+    } finally {
+      await queryClient.invalidateQueries({
+        queryKey: ['token-tag-quota-data'],
+      })
+      setLoadingIP(undefined)
+    }
+  }
+
+  const handleFetchIPLocation = (tokenId: number, ip: string) => {
+    void fetchIPLocations([{ token_id: tokenId, ip }], `${tokenId}:${ip}`)
+  }
+
+  const handleFetchAllIPLocations = () => {
+    if (pendingIPLocations.length === 0) return
+    void fetchIPLocations(pendingIPLocations, 'batch')
+  }
 
   const chartOptions = useMemo(
     () => ({
@@ -290,6 +365,9 @@ export function TokenTagsDashboard() {
     queryErrorMessage = query.data.message || t('Failed to load data')
   }
   const isInitialLoading = query.isLoading && rows.length === 0
+  let keyTableColumnCount = 7
+  if (isAdmin) keyTableColumnCount += 1
+  if (isRoot) keyTableColumnCount += 1
 
   const handleApply = () => {
     setAppliedFilters({
@@ -422,36 +500,59 @@ export function TokenTagsDashboard() {
                 {t('Bar Chart')}
               </Button>
             </div>
-            {viewMode === 'chart' && (
-              <div className='flex items-center gap-2'>
-                <span className='text-muted-foreground text-sm'>
-                  {t('Ranking Metric')}
-                </span>
-                <Select
-                  value={metric}
-                  onValueChange={(value) =>
-                    setMetric(value as TokenTagRankingMetric)
-                  }
-                >
-                  <SelectTrigger className='w-40'>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent alignItemWithTrigger={false}>
-                    <SelectGroup>
-                      <SelectItem value='quota'>
-                        {t('Cost Consumption')}
-                      </SelectItem>
-                      <SelectItem value='token_used'>
-                        {t('Token Count')}
-                      </SelectItem>
-                      <SelectItem value='count'>
-                        {t('Request Count')}
-                      </SelectItem>
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
+            <div className='flex flex-wrap items-center gap-2'>
+              {isRoot && pendingIPLocations.length > 0 && (
+                <>
+                  <span className='text-muted-foreground text-xs'>
+                    {t('{{count}} IP(s) waiting for location', {
+                      count: pendingIPLocations.length,
+                    })}
+                  </span>
+                  <Button
+                    type='button'
+                    variant='ghost'
+                    size='sm'
+                    disabled={loadingIP === 'batch'}
+                    onClick={handleFetchAllIPLocations}
+                  >
+                    {loadingIP === 'batch' && (
+                      <Loader2 className='animate-spin' />
+                    )}
+                    {t('Fetch locations')}
+                  </Button>
+                </>
+              )}
+              {viewMode === 'chart' && (
+                <div className='flex items-center gap-2'>
+                  <span className='text-muted-foreground text-sm'>
+                    {t('Ranking Metric')}
+                  </span>
+                  <Select
+                    value={metric}
+                    onValueChange={(value) =>
+                      setMetric(value as TokenTagRankingMetric)
+                    }
+                  >
+                    <SelectTrigger className='w-40'>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent alignItemWithTrigger={false}>
+                      <SelectGroup>
+                        <SelectItem value='quota'>
+                          {t('Cost Consumption')}
+                        </SelectItem>
+                        <SelectItem value='token_used'>
+                          {t('Token Count')}
+                        </SelectItem>
+                        <SelectItem value='count'>
+                          {t('Request Count')}
+                        </SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
           </div>
 
           <Card>
@@ -580,6 +681,7 @@ export function TokenTagsDashboard() {
                       {isAdmin && <TableHead>{t('User')}</TableHead>}
                       <TableHead>{t('Key Tag')}</TableHead>
                       <TableHead>{t('API Key')}</TableHead>
+                      {isRoot && <TableHead>{t('IP')}</TableHead>}
                       <SortableHead
                         label={t('Cost')}
                         sortKey='quota'
@@ -638,6 +740,16 @@ export function TokenTagsDashboard() {
                         <TableCell>
                           {row.token_name || `#${row.token_id}`}
                         </TableCell>
+                        {isRoot && (
+                          <TableCell>
+                            <RecordedIPsCell
+                              tokenId={row.token_id}
+                              ips={row.ips}
+                              onFetchLocation={handleFetchIPLocation}
+                              loadingIP={loadingIP}
+                            />
+                          </TableCell>
+                        )}
                         <TableCell className='text-right'>
                           {formatQuota(row.quota || 0)}
                         </TableCell>
@@ -655,7 +767,7 @@ export function TokenTagsDashboard() {
                     {!isInitialLoading && sortedKeyRows.length === 0 && (
                       <TableRow>
                         <TableCell
-                          colSpan={isAdmin ? 8 : 7}
+                          colSpan={keyTableColumnCount}
                           className='text-muted-foreground h-24 text-center'
                         >
                           {t('No data')}

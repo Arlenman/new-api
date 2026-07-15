@@ -33,7 +33,7 @@ type tokenTagOptionsResponse struct {
 func setupFlowControllerTestDB(t *testing.T) {
 	t.Helper()
 	db := setupModelListControllerTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.Token{}, &model.TokenTag{}, &model.TokenTagBinding{}, &model.QuotaData{}, &model.Log{}))
+	require.NoError(t, db.AutoMigrate(&model.Token{}, &model.TokenIP{}, &model.TokenTag{}, &model.TokenTagBinding{}, &model.QuotaData{}, &model.Log{}))
 	require.NoError(t, model.DB.Create(&model.User{Id: 1, Username: "alice", Password: "password123", AffCode: "alice-aff"}).Error)
 	require.NoError(t, model.DB.Create(&model.User{Id: 2, Username: "bob", Password: "password123", AffCode: "bob-aff"}).Error)
 	require.NoError(t, model.DB.Create(&model.Channel{Id: 1, Name: "east"}).Error)
@@ -365,4 +365,43 @@ func TestGetAllTokenTagQuotaDatesParsesUntaggedFilters(t *testing.T) {
 	require.Equal(t, 11, excludePayload.Data[0].TokenID)
 	require.Equal(t, "Client A", excludePayload.Data[0].TagName)
 	require.Equal(t, model.TokenTagQuotaSummary{Quota: 100, TokenUsed: 40, Count: 1}, excludePayload.Summary)
+}
+
+func TestGetAllTokenTagQuotaDatesOnlyExposesRecordedIPsToRoot(t *testing.T) {
+	setupFlowControllerTestDB(t)
+	require.NoError(t, model.ReplaceTokenTags(1, 11, []string{"Client A"}))
+	require.NoError(t, model.RecordTokenIP(11, "203.0.113.9"))
+	require.NoError(t, model.UpdateTokenIPLocation(11, "203.0.113.9", "US", "California", "Los Angeles"))
+
+	rootRecorder := httptest.NewRecorder()
+	rootCtx, _ := gin.CreateTestContext(rootRecorder)
+	rootCtx.Set("role", common.RoleRootUser)
+	rootCtx.Request = httptest.NewRequest(http.MethodGet, "/api/data/token-tags?start_timestamp=1000&end_timestamp=2000&username=alice", nil)
+
+	GetAllTokenTagQuotaDates(rootCtx)
+
+	require.Equal(t, http.StatusOK, rootRecorder.Code)
+	var rootPayload tokenTagQuotaResponse
+	require.NoError(t, common.Unmarshal(rootRecorder.Body.Bytes(), &rootPayload))
+	require.True(t, rootPayload.Success, rootPayload.Message)
+	require.Len(t, rootPayload.Data, 1)
+	require.Len(t, rootPayload.Data[0].IPs, 1)
+	require.Equal(t, "203.0.113.9", rootPayload.Data[0].IPs[0].IP)
+	require.Equal(t, "US", rootPayload.Data[0].IPs[0].CountryCode)
+	require.Contains(t, rootRecorder.Body.String(), `"ips"`)
+
+	adminRecorder := httptest.NewRecorder()
+	adminCtx, _ := gin.CreateTestContext(adminRecorder)
+	adminCtx.Set("role", common.RoleAdminUser)
+	adminCtx.Request = httptest.NewRequest(http.MethodGet, "/api/data/token-tags?start_timestamp=1000&end_timestamp=2000&username=alice", nil)
+
+	GetAllTokenTagQuotaDates(adminCtx)
+
+	require.Equal(t, http.StatusOK, adminRecorder.Code)
+	var adminPayload tokenTagQuotaResponse
+	require.NoError(t, common.Unmarshal(adminRecorder.Body.Bytes(), &adminPayload))
+	require.True(t, adminPayload.Success, adminPayload.Message)
+	require.Len(t, adminPayload.Data, 1)
+	require.Empty(t, adminPayload.Data[0].IPs)
+	require.NotContains(t, adminRecorder.Body.String(), `"ips"`)
 }

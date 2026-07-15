@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Check, Copy, Loader2 } from 'lucide-react'
+import { Check, Copy, Loader2, RefreshCw } from 'lucide-react'
 import { useState, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -35,7 +35,7 @@ import {
 } from '@/components/ui/tooltip'
 import { copyToClipboard } from '@/lib/copy-to-clipboard'
 
-import type { ApiKey } from '../types'
+import type { ApiKey, ApiKeyIP } from '../types'
 import { useApiKeys } from './api-keys-provider'
 
 export function ApiKeyCell({ apiKey }: { apiKey: ApiKey }) {
@@ -176,6 +176,96 @@ export function ModelLimitsCell({ apiKey }: { apiKey: ApiKey }) {
         </div>
       </TooltipContent>
     </Tooltip>
+  )
+}
+
+function RecordedIPLocation({
+  tokenId,
+  item,
+  onFetchLocation,
+  isLoading,
+}: {
+  tokenId: number
+  item: ApiKeyIP
+  onFetchLocation: (tokenId: number, ip: string) => void
+  isLoading: boolean
+}) {
+  const { t } = useTranslation()
+  const location = [item.country_code, item.region, item.city]
+    .filter(Boolean)
+    .join(' · ')
+
+  if (location) {
+    return (
+      <div className='flex min-w-0 items-center gap-1'>
+        <div className='text-muted-foreground truncate text-xs'>{location}</div>
+        <Button
+          variant='ghost'
+          size='icon-xs'
+          className='size-4 shrink-0'
+          aria-label={t('Fetch location')}
+          title={t('Fetch location')}
+          disabled={isLoading}
+          onClick={() => onFetchLocation(tokenId, item.ip)}
+        >
+          <RefreshCw className={isLoading ? 'animate-spin' : undefined} />
+        </Button>
+      </div>
+    )
+  }
+  if (item.private) {
+    return (
+      <div className='text-muted-foreground text-xs'>
+        {t('Private network')}
+      </div>
+    )
+  }
+  return (
+    <Button
+      variant='link'
+      size='xs'
+      className='h-auto p-0 text-xs'
+      disabled={isLoading}
+      onClick={() => onFetchLocation(tokenId, item.ip)}
+    >
+      {isLoading && <Loader2 className='animate-spin' />}
+      {t('Fetch location')}
+    </Button>
+  )
+}
+
+export function RecordedIPsCell({
+  tokenId,
+  ips = [],
+  onFetchLocation,
+  loadingIP,
+}: {
+  tokenId: number
+  ips?: ApiKeyIP[]
+  onFetchLocation: (tokenId: number, ip: string) => void
+  loadingIP?: string
+}) {
+  if (ips.length === 0) {
+    return <span className='text-muted-foreground'>-</span>
+  }
+
+  return (
+    <div className='max-h-[152px] min-w-[190px] space-y-2 overflow-y-auto py-1'>
+      {ips.map((item) => {
+        const isLoading = loadingIP === `${tokenId}:${item.ip}`
+        return (
+          <div key={item.ip} className='min-w-0'>
+            <div className='truncate font-mono text-sm'>{item.ip}</div>
+            <RecordedIPLocation
+              tokenId={tokenId}
+              item={item}
+              onFetchLocation={onFetchLocation}
+              isLoading={isLoading}
+            />
+          </div>
+        )
+      })}
+    </div>
   )
 }
 

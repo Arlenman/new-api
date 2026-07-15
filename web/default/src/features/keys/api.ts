@@ -26,6 +26,8 @@ import type {
   SearchApiKeysParams,
   ApiKeyFormData,
   ApiKeyTag,
+  FetchApiKeyIPLocationsItem,
+  ApiKeyIPLocationResult,
 } from './types'
 
 // ============================================================================
@@ -120,5 +122,12 @@ export async function fetchTokenKeysBatch(ids: number[]): Promise<{
 
 export async function getApiKeyTags(): Promise<ApiResponse<ApiKeyTag[]>> {
   const res = await api.get('/api/token/tags')
+  return res.data
+}
+
+export async function fetchApiKeyIPLocations(
+  items: FetchApiKeyIPLocationsItem[]
+): Promise<ApiResponse<ApiKeyIPLocationResult[]>> {
+  const res = await api.post('/api/token/ip-locations', { items })
   return res.data
 }

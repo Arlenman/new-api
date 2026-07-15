@@ -368,7 +368,12 @@ func (token *Token) Delete() (err error) {
 			})
 		}
 	}()
-	err = DB.Delete(token).Error
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		if err := deleteTokenIPsTx(tx, []int{token.Id}); err != nil {
+			return err
+		}
+		return tx.Delete(token).Error
+	})
 	return err
 }
 
@@ -496,6 +501,14 @@ func BatchDeleteTokens(ids []int, userId int) (int, error) {
 		return 0, err
 	}
 
+	tokenIds := make([]int, 0, len(tokens))
+	for _, token := range tokens {
+		tokenIds = append(tokenIds, token.Id)
+	}
+	if err := deleteTokenIPsTx(tx, tokenIds); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
 	if err := tx.Where("user_id = ? AND id IN (?)", userId, ids).Delete(&Token{}).Error; err != nil {
 		tx.Rollback()
 		return 0, err

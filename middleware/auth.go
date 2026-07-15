@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -238,6 +239,14 @@ func TokenOrUserAuth() func(c *gin.Context) {
 // 只验证令牌 key 是否存在，不检查令牌状态、过期时间和额度。
 // 即使令牌已过期、已耗尽或已禁用，也允许访问。
 // 仍然检查用户是否被封禁。
+func recordTokenRequestIP(tokenId int, clientIP string) {
+	gopool.Go(func() {
+		if err := model.RecordTokenIP(tokenId, clientIP); err != nil {
+			common.SysLog(fmt.Sprintf("failed to record token IP for token %d: %v", tokenId, err))
+		}
+	})
+}
+
 func TokenAuthReadOnly() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		key := c.Request.Header.Get("Authorization")
@@ -257,6 +266,9 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 		key = parts[0]
 
 		token, err := model.GetTokenByKey(key, false)
+		if token != nil {
+			recordTokenRequestIP(token.Id, c.ClientIP())
+		}
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				c.JSON(http.StatusUnauthorized, gin.H{
@@ -369,6 +381,7 @@ func TokenAuth() func(c *gin.Context) {
 		}
 		token, err := model.ValidateUserToken(key)
 		if token != nil {
+			recordTokenRequestIP(token.Id, c.ClientIP())
 			id := c.GetInt("id")
 			if id == 0 {
 				c.Set("id", token.UserId)

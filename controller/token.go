@@ -9,9 +9,11 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/sync/errgroup"
 )
 
 type tokenRequest struct {
@@ -21,10 +23,37 @@ type tokenRequest struct {
 
 type tokenResponse struct {
 	model.Token
-	Tags []string `json:"tags"`
+	Tags []string            `json:"tags"`
+	IPs  []model.TokenIPView `json:"ips,omitempty"`
 }
 
-func buildMaskedTokenResponse(token *model.Token) (*tokenResponse, error) {
+type tokenIPLocationRequestItem struct {
+	TokenId int    `json:"token_id"`
+	IP      string `json:"ip"`
+}
+
+type tokenIPLocationRequest struct {
+	Items []tokenIPLocationRequestItem `json:"items"`
+}
+
+type tokenIPLocationResult struct {
+	TokenId     int    `json:"token_id"`
+	IP          string `json:"ip"`
+	CountryCode string `json:"country_code,omitempty"`
+	Region      string `json:"region,omitempty"`
+	City        string `json:"city,omitempty"`
+	Private     bool   `json:"private,omitempty"`
+	Success     bool   `json:"success"`
+	Message     string `json:"message,omitempty"`
+}
+
+const maxTokenIPLocationItems = 50
+
+func canViewTokenIPs(c *gin.Context) bool {
+	return c.GetInt("role") == common.RoleRootUser
+}
+
+func buildMaskedTokenResponse(token *model.Token, tokenIPs []model.TokenIP) (*tokenResponse, error) {
 	if token == nil {
 		return nil, nil
 	}
@@ -37,13 +66,27 @@ func buildMaskedTokenResponse(token *model.Token) (*tokenResponse, error) {
 	return &tokenResponse{
 		Token: maskedToken,
 		Tags:  tags,
+		IPs:   model.BuildTokenIPViews(tokenIPs),
 	}, nil
 }
 
-func buildMaskedTokenResponses(tokens []*model.Token) ([]*tokenResponse, error) {
+func buildMaskedTokenResponses(tokens []*model.Token, includeIPs bool) ([]*tokenResponse, error) {
+	tokenIPs := make(map[int][]model.TokenIP)
+	if includeIPs {
+		tokenIds := make([]int, 0, len(tokens))
+		for _, token := range tokens {
+			tokenIds = append(tokenIds, token.Id)
+		}
+		var err error
+		tokenIPs, err = model.GetTokenIPsByTokenIDs(tokenIds)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	maskedTokens := make([]*tokenResponse, 0, len(tokens))
 	for _, token := range tokens {
-		maskedToken, err := buildMaskedTokenResponse(token)
+		maskedToken, err := buildMaskedTokenResponse(token, tokenIPs[token.Id])
 		if err != nil {
 			return nil, err
 		}
@@ -61,7 +104,7 @@ func GetAllTokens(c *gin.Context) {
 		return
 	}
 	total, _ := model.CountUserTokens(userId)
-	maskedTokens, err := buildMaskedTokenResponses(tokens)
+	maskedTokens, err := buildMaskedTokenResponses(tokens, canViewTokenIPs(c))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -83,7 +126,7 @@ func SearchTokens(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	maskedTokens, err := buildMaskedTokenResponses(tokens)
+	maskedTokens, err := buildMaskedTokenResponses(tokens, canViewTokenIPs(c))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -105,12 +148,111 @@ func GetToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	maskedToken, err := buildMaskedTokenResponse(token)
+	var tokenIPs []model.TokenIP
+	if canViewTokenIPs(c) {
+		tokenIPMap, loadErr := model.GetTokenIPsByTokenIDs([]int{token.Id})
+		if loadErr != nil {
+			common.ApiError(c, loadErr)
+			return
+		}
+		tokenIPs = tokenIPMap[token.Id]
+	}
+	maskedToken, err := buildMaskedTokenResponse(token, tokenIPs)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	common.ApiSuccess(c, maskedToken)
+}
+
+func GetTokenIPLocations(c *gin.Context) {
+	if !canViewTokenIPs(c) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"message": "仅根用户可查询密钥 IP 地区",
+		})
+		return
+	}
+
+	var req tokenIPLocationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if len(req.Items) == 0 || len(req.Items) > maxTokenIPLocationItems {
+		common.ApiErrorMsg(c, fmt.Sprintf("每次需要查询 1 到 %d 个密钥 IP", maxTokenIPLocationItems))
+		return
+	}
+
+	type tokenIPKey struct {
+		tokenId int
+		ip      string
+	}
+	keys := make([]tokenIPKey, 0, len(req.Items))
+	tokenIds := make([]int, 0, len(req.Items))
+	ips := make([]string, 0, len(req.Items))
+	seen := make(map[tokenIPKey]struct{}, len(req.Items))
+	for _, item := range req.Items {
+		ip, err := model.NormalizeIPAddress(item.IP)
+		if err != nil || item.TokenId <= 0 {
+			common.ApiErrorMsg(c, "密钥 IP 参数无效")
+			return
+		}
+		key := tokenIPKey{tokenId: item.TokenId, ip: ip}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+		tokenIds = append(tokenIds, item.TokenId)
+		ips = append(ips, ip)
+	}
+
+	records, err := model.GetTokenIPsByTokenIDsAndIPs(tokenIds, ips)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	owned := make(map[tokenIPKey]model.TokenIP, len(records))
+	for _, record := range records {
+		owned[tokenIPKey{tokenId: record.TokenId, ip: record.IP}] = record
+	}
+
+	results := make([]tokenIPLocationResult, len(keys))
+	group, groupCtx := errgroup.WithContext(c.Request.Context())
+	group.SetLimit(5)
+	for index, key := range keys {
+		index, key := index, key
+		results[index] = tokenIPLocationResult{TokenId: key.tokenId, IP: key.ip}
+		if _, exists := owned[key]; !exists {
+			results[index].Message = "密钥 IP 不存在"
+			continue
+		}
+
+		group.Go(func() error {
+			location, lookupErr := service.LookupIPLocation(groupCtx, key.ip)
+			if lookupErr != nil {
+				results[index].Message = lookupErr.Error()
+				return nil
+			}
+			results[index].CountryCode = location.CountryCode
+			results[index].Region = location.Region
+			results[index].City = location.City
+			results[index].Private = location.Private
+			if location.Private {
+				results[index].Success = true
+				return nil
+			}
+			if updateErr := model.UpdateTokenIPLocation(key.tokenId, key.ip, location.CountryCode, location.Region, location.City); updateErr != nil {
+				results[index].Message = updateErr.Error()
+				return nil
+			}
+			results[index].Success = true
+			return nil
+		})
+	}
+	_ = group.Wait()
+	common.ApiSuccess(c, results)
 }
 
 func GetTokenKey(c *gin.Context) {
@@ -347,7 +489,16 @@ func UpdateToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	maskedToken, err := buildMaskedTokenResponse(cleanToken)
+	var tokenIPs []model.TokenIP
+	if canViewTokenIPs(c) {
+		tokenIPMap, loadErr := model.GetTokenIPsByTokenIDs([]int{cleanToken.Id})
+		if loadErr != nil {
+			common.ApiError(c, loadErr)
+			return
+		}
+		tokenIPs = tokenIPMap[cleanToken.Id]
+	}
+	maskedToken, err := buildMaskedTokenResponse(cleanToken, tokenIPs)
 	if err != nil {
 		common.ApiError(c, err)
 		return

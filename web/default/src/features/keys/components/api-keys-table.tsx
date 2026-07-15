@@ -16,11 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import type { Table as TanstackTable } from '@tanstack/react-table'
-import { Database } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { Database, Loader2 } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -32,6 +32,7 @@ import {
   useDataTable,
 } from '@/components/data-table'
 import { StatusBadge } from '@/components/status-badge'
+import { Button } from '@/components/ui/button'
 import {
   Empty,
   EmptyDescription,
@@ -43,9 +44,11 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
 import { formatQuota } from '@/lib/format'
+import { ROLE } from '@/lib/roles'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
-import { getApiKeys, searchApiKeys } from '../api'
+import { fetchApiKeyIPLocations, getApiKeys, searchApiKeys } from '../api'
 import {
   API_KEY_STATUS,
   API_KEY_STATUS_OPTIONS,
@@ -61,6 +64,7 @@ import { DataTableRowActions } from './data-table-row-actions'
 
 const route = getRouteApi('/_authenticated/keys/')
 const API_KEYS_COLUMN_VISIBILITY_STORAGE_KEY = 'api-keys:column-visibility'
+const TOKEN_IP_LOCATION_BATCH_SIZE = 50
 const API_KEYS_MOBILE_SKELETON_IDS = Array.from(
   { length: 5 },
   (_, index) => `api-key-mobile-skeleton-${index + 1}`
@@ -189,8 +193,11 @@ function ApiKeysMobileList({
 export function ApiKeysTable() {
   const { t } = useTranslation()
   const { refreshTrigger } = useApiKeys()
+  const role = useAuthStore((state) => state.auth.user?.role)
+  const isRoot = role === ROLE.SUPER_ADMIN
+  const queryClient = useQueryClient()
   const [now, setNow] = useState(() => Date.now())
-  const columns = useApiKeysColumns(now)
+  const [loadingIP, setLoadingIP] = useState<string>()
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -199,6 +206,61 @@ export function ApiKeysTable() {
 
     return () => window.clearInterval(intervalId)
   }, [])
+
+  const fetchIPLocations = useCallback(
+    async (
+      items: Array<{ token_id: number; ip: string }>,
+      loadingKey: string
+    ) => {
+      setLoadingIP(loadingKey)
+      try {
+        let failureMessage = ''
+        for (
+          let start = 0;
+          start < items.length;
+          start += TOKEN_IP_LOCATION_BATCH_SIZE
+        ) {
+          const result = await fetchApiKeyIPLocations(
+            items.slice(start, start + TOKEN_IP_LOCATION_BATCH_SIZE)
+          )
+          if (!result.success) {
+            failureMessage = result.message || t('Failed to fetch IP location')
+            break
+          }
+          const failure = (result.data || []).find((item) => !item.success)
+          if (!failureMessage && failure) {
+            failureMessage = failure.message || t('Failed to fetch IP location')
+          }
+        }
+
+        if (failureMessage) {
+          toast.error(failureMessage)
+        } else {
+          toast.success(t('Location fetched'))
+        }
+      } catch {
+        toast.error(t('Failed to fetch IP location'))
+      } finally {
+        await queryClient.invalidateQueries({ queryKey: ['keys'] })
+        setLoadingIP(undefined)
+      }
+    },
+    [queryClient, t]
+  )
+
+  const handleFetchIPLocation = useCallback(
+    (tokenId: number, ip: string) => {
+      void fetchIPLocations([{ token_id: tokenId, ip }], `${tokenId}:${ip}`)
+    },
+    [fetchIPLocations]
+  )
+
+  const columns = useApiKeysColumns(
+    now,
+    isRoot,
+    handleFetchIPLocation,
+    loadingIP
+  )
 
   const {
     globalFilter,
@@ -275,6 +337,21 @@ export function ApiKeysTable() {
   })
 
   const apiKeys = data?.items || []
+  const pendingIPLocations = isRoot
+    ? apiKeys.flatMap((apiKey) =>
+        (apiKey.ips || [])
+          .filter(
+            (item) =>
+              !item.private && !item.country_code && !item.region && !item.city
+          )
+          .map((item) => ({ token_id: apiKey.id, ip: item.ip }))
+      )
+    : []
+
+  const handleFetchAllIPLocations = () => {
+    if (pendingIPLocations.length === 0) return
+    void fetchIPLocations(pendingIPLocations, 'batch')
+  }
 
   const { table } = useDataTable({
     data: apiKeys,
@@ -324,6 +401,25 @@ export function ApiKeysTable() {
             singleSelect: true,
           },
         ],
+        preActions:
+          isRoot && pendingIPLocations.length > 0 ? (
+            <div className='flex items-center gap-2'>
+              <span className='text-muted-foreground hidden text-xs sm:inline'>
+                {t('{{count}} IP(s) waiting for location', {
+                  count: pendingIPLocations.length,
+                })}
+              </span>
+              <Button
+                variant='ghost'
+                size='sm'
+                disabled={loadingIP === 'batch'}
+                onClick={handleFetchAllIPLocations}
+              >
+                {loadingIP === 'batch' && <Loader2 className='animate-spin' />}
+                {t('Fetch locations')}
+              </Button>
+            </div>
+          ) : undefined,
       }}
       mobile={<ApiKeysMobileList table={table} isLoading={isLoading} />}
       getRowClassName={(row) =>

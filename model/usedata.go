@@ -39,17 +39,18 @@ type QuotaDataLogParams struct {
 }
 
 type TokenTagQuotaData struct {
-	TagID      int    `json:"tag_id" gorm:"column:tag_id"`
-	TagName    string `json:"tag_name" gorm:"column:tag_name"`
-	UserID     int    `json:"user_id,omitempty" gorm:"column:user_id"`
-	Username   string `json:"username,omitempty" gorm:"column:username"`
-	TokenID    int    `json:"token_id" gorm:"column:token_id"`
-	TokenName  string `json:"token_name" gorm:"column:token_name"`
-	ModelName  string `json:"model_name" gorm:"column:model_name"`
-	TokenUsed  int    `json:"token_used" gorm:"column:token_used"`
-	Count      int    `json:"count" gorm:"column:count"`
-	Quota      int    `json:"quota" gorm:"column:quota"`
-	LastUsedAt int64  `json:"last_used_at" gorm:"column:last_used_at"`
+	TagID      int           `json:"tag_id" gorm:"column:tag_id"`
+	TagName    string        `json:"tag_name" gorm:"column:tag_name"`
+	UserID     int           `json:"user_id,omitempty" gorm:"column:user_id"`
+	Username   string        `json:"username,omitempty" gorm:"column:username"`
+	TokenID    int           `json:"token_id" gorm:"column:token_id"`
+	TokenName  string        `json:"token_name" gorm:"column:token_name"`
+	ModelName  string        `json:"model_name" gorm:"column:model_name"`
+	TokenUsed  int           `json:"token_used" gorm:"column:token_used"`
+	Count      int           `json:"count" gorm:"column:count"`
+	Quota      int           `json:"quota" gorm:"column:quota"`
+	LastUsedAt int64         `json:"last_used_at" gorm:"column:last_used_at"`
+	IPs        []TokenIPView `json:"ips,omitempty" gorm:"-"`
 }
 
 type TokenTagQuotaFilters struct {
