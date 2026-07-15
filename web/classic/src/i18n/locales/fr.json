@@ -3684,6 +3684,19 @@
     "默认折叠侧边栏": "Réduire la barre latérale par défaut",
     "默认测试模型": "Modèle de test par défaut",
     "默认用户消息": "Bonjour",
-    "默认补全倍率": "Taux de complétion par défaut"
+    "默认补全倍率": "Taux de complétion par défaut",
+    "敏感请求": "Requête sensible",
+    "本地规则": "Règle locale",
+    "上游审核": "Contrôle en amont",
+    "触发来源": "Source du déclenchement",
+    "命中的敏感词": "Mots sensibles détectés",
+    "上游状态码": "Code d’état en amont",
+    "上游错误码": "Code d’erreur en amont",
+    "上游错误信息": "Message d’erreur en amont",
+    "原始字节数": "Octets d’origine",
+    "是否截断": "Tronqué",
+    "请求 Prompt": "Prompt de la requête",
+    "记录敏感请求内容": "Journaliser le contenu des requêtes sensibles",
+    "开启后，本地或上游安全审核拦截的请求文本会以明文写入日志数据库，请确认隐私与存储安全后再启用": "Lorsque cette option est activée, le texte des requêtes bloquées par les contrôles de sécurité locaux ou en amont est stocké en clair dans la base de données des journaux. Vérifiez la confidentialité et la sécurité du stockage avant de l’activer."
   }
 }

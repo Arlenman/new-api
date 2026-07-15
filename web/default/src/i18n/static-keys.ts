@@ -451,6 +451,7 @@ export const STATIC_I18N_KEYS = [
   'Chat Area',
   'Playground and chat functions',
   'Playground',
+  'Quick Chat',
   'AI model testing environment',
   'Chat session management',
   'No content to copy',
@@ -462,6 +463,7 @@ export const STATIC_I18N_KEYS = [
   'Error establishing connection',
   'Connection closed',
   'Generation was interrupted',
+  'Image generation timed out. You can retry.',
   'Note',
   'Tip',
   'Important',
@@ -543,6 +545,23 @@ export const STATIC_I18N_KEYS = [
   'The user group applied to the requests',
   'The model that was requested',
   'The upstream channel that served the requests',
+
+  // Usage log type labels passed to t at runtime
+  'Sensitive Request',
+
+  // Upstream channel authentication
+  'Authentication method',
+  'Account password',
+  'Management access token',
+  'Upstream numeric user ID',
+  'Leave blank to keep the saved credential',
+  'Turnstile requires a management access token',
+  'This upstream New-API has Turnstile enabled. Background synchronization cannot use account-password login. Enter the numeric user ID and create a management access token in the upstream account settings.',
+  'Configure management access token',
+  'Use the numeric user ID and management access token from the upstream New-API account for background synchronization.',
+  'Management access token authentication is only supported for New-API upstream channels',
+  'Upstream user ID must be a positive integer',
+  'Enter a new password or management access token when changing the authentication method',
 
   // Misc
   'Cancel',

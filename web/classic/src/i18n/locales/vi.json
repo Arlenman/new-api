@@ -4218,6 +4218,19 @@
     "默认折叠侧边栏": "Mặc định thu gọn thanh bên",
     "默认测试模型": "Mô hình kiểm tra mặc định",
     "默认用户消息": "Xin chào",
-    "默认补全倍率": "Tỷ lệ hoàn thành mặc định"
+    "默认补全倍率": "Tỷ lệ hoàn thành mặc định",
+    "敏感请求": "Yêu cầu nhạy cảm",
+    "本地规则": "Quy tắc cục bộ",
+    "上游审核": "Kiểm duyệt thượng nguồn",
+    "触发来源": "Nguồn kích hoạt",
+    "命中的敏感词": "Từ nhạy cảm khớp",
+    "上游状态码": "Mã trạng thái thượng nguồn",
+    "上游错误码": "Mã lỗi thượng nguồn",
+    "上游错误信息": "Thông báo lỗi thượng nguồn",
+    "原始字节数": "Số byte ban đầu",
+    "是否截断": "Đã cắt bớt",
+    "请求 Prompt": "Prompt yêu cầu",
+    "记录敏感请求内容": "Ghi nội dung yêu cầu nhạy cảm",
+    "开启后，本地或上游安全审核拦截的请求文本会以明文写入日志数据库，请确认隐私与存储安全后再启用": "Khi bật, văn bản yêu cầu bị chặn bởi kiểm tra an toàn cục bộ hoặc thượng nguồn sẽ được lưu dưới dạng văn bản thuần trong cơ sở dữ liệu nhật ký. Hãy kiểm tra quyền riêng tư và bảo mật lưu trữ trước khi bật."
   }
 }

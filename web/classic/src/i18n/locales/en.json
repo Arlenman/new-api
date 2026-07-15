@@ -3830,6 +3830,19 @@
     "默认折叠侧边栏": "Default collapse sidebar",
     "默认测试模型": "Default Test Model",
     "默认用户消息": "Default User Message",
-    "默认补全倍率": "Default completion ratio"
+    "默认补全倍率": "Default completion ratio",
+    "敏感请求": "Sensitive Request",
+    "本地规则": "Local Rule",
+    "上游审核": "Upstream Review",
+    "触发来源": "Trigger Source",
+    "命中的敏感词": "Matched Sensitive Words",
+    "上游状态码": "Upstream Status Code",
+    "上游错误码": "Upstream Error Code",
+    "上游错误信息": "Upstream Error Message",
+    "原始字节数": "Original Bytes",
+    "是否截断": "Truncated",
+    "请求 Prompt": "Request Prompt",
+    "记录敏感请求内容": "Log Sensitive Request Content",
+    "开启后，本地或上游安全审核拦截的请求文本会以明文写入日志数据库，请确认隐私与存储安全后再启用": "When enabled, request text blocked by local or upstream safety checks is stored in plaintext in the log database. Review privacy and storage security before enabling."
   }
 }
