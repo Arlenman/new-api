@@ -23,6 +23,7 @@ import {
   ExternalLink,
   FileText,
   FlaskConical,
+  Gauge,
   Key,
   LayoutDashboard,
   ListTodo,
@@ -37,10 +38,11 @@ import {
   Wallet,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+
+import type { SidebarData } from '@/components/layout/types'
+import { useStatus } from '@/hooks/use-status'
 import { getEnabledCustomNavMenusForPlacement } from '@/lib/nav-modules'
 import { ROLE } from '@/lib/roles'
-import { useStatus } from '@/hooks/use-status'
-import { type SidebarData } from '@/components/layout/types'
 
 /**
  * Root navigation groups for the application sidebar.
@@ -62,7 +64,7 @@ export function useSidebarData(): SidebarData {
       title: t('Chat'),
       items: [
         {
-          title: t('Playground'),
+          title: t('Quick Chat'),
           url: '/playground',
           icon: FlaskConical,
         },
@@ -160,6 +162,12 @@ export function useSidebarData(): SidebarData {
           title: t('System Info'),
           url: '/system-info',
           icon: ServerCog,
+          requiredRole: ROLE.SUPER_ADMIN,
+        },
+        {
+          title: t('Channel Panel'),
+          url: '/upstream-channels',
+          icon: Gauge,
           requiredRole: ROLE.SUPER_ADMIN,
         },
         {

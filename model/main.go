@@ -270,7 +270,9 @@ func migrateDB() error {
 
 	err := DB.AutoMigrate(
 		&Channel{},
+		&UpstreamChannel{},
 		&Token{},
+		&TokenIP{},
 		&TokenTag{},
 		&TokenTagBinding{},
 		&User{},
@@ -308,6 +310,9 @@ func migrateDB() error {
 	if err != nil {
 		return err
 	}
+	if err := normalizeUpstreamChannelPriorities(DB); err != nil {
+		return err
+	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		if err := ensureSubscriptionPlanTableSQLite(); err != nil {
 			return err
@@ -329,7 +334,9 @@ func migrateDBFast() error {
 		name  string
 	}{
 		{&Channel{}, "Channel"},
+		{&UpstreamChannel{}, "UpstreamChannel"},
 		{&Token{}, "Token"},
+		{&TokenIP{}, "TokenIP"},
 		{&TokenTag{}, "TokenTag"},
 		{&TokenTagBinding{}, "TokenTagBinding"},
 		{&User{}, "User"},
@@ -384,6 +391,9 @@ func migrateDBFast() error {
 		if err != nil {
 			return err
 		}
+	}
+	if err := normalizeUpstreamChannelPriorities(DB); err != nil {
+		return err
 	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		if err := ensureSubscriptionPlanTableSQLite(); err != nil {

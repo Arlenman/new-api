@@ -230,7 +230,9 @@ func SetApiRouter(router *gin.Engine) {
 			ratioSyncRoute.POST("/fetch", controller.FetchUpstreamRatios)
 		}
 		registerChannelRoutes(apiRouter)
+		registerUpstreamChannelRoutes(apiRouter)
 		registerAuthzRoutes(apiRouter)
+		apiRouter.POST("/token/ip-locations", middleware.RootAuth(), controller.GetTokenIPLocations)
 		tokenRoute := apiRouter.Group("/token")
 		tokenRoute.Use(middleware.UserAuth())
 		{
