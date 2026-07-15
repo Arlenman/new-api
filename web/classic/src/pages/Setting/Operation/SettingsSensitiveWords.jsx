@@ -34,6 +34,7 @@ export default function SettingsSensitiveWords(props) {
   const [inputs, setInputs] = useState({
     CheckSensitiveEnabled: false,
     CheckSensitiveOnPromptEnabled: false,
+    LogSensitiveRequestEnabled: false,
     SensitiveWords: '',
   });
   const refForm = useRef();
@@ -121,6 +122,24 @@ export default function SettingsSensitiveWords(props) {
                     setInputs({
                       ...inputs,
                       CheckSensitiveOnPromptEnabled: value,
+                    })
+                  }
+                />
+              </Col>
+              <Col xs={24} sm={24} md={8} lg={8} xl={8}>
+                <Form.Switch
+                  field={'LogSensitiveRequestEnabled'}
+                  label={t('记录敏感请求内容')}
+                  extraText={t(
+                    '开启后，本地或上游安全审核拦截的请求文本会以明文写入日志数据库，请确认隐私与存储安全后再启用',
+                  )}
+                  size='default'
+                  checkedText='｜'
+                  uncheckedText='〇'
+                  onChange={(value) =>
+                    setInputs({
+                      ...inputs,
+                      LogSensitiveRequestEnabled: value,
                     })
                   }
                 />

@@ -168,6 +168,15 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		&containStreamUsage, info, &shouldSendLastResp); err != nil {
 		logger.LogError(c, fmt.Sprintf("error handling last response: %s, lastStreamData: [%s]", err.Error(), lastStreamData))
 	}
+	var lastStreamResponse dto.ChatCompletionsStreamResponse
+	if err := common.UnmarshalJsonStr(lastStreamData, &lastStreamResponse); err == nil {
+		for _, choice := range lastStreamResponse.Choices {
+			if choice.FinishReason != nil && *choice.FinishReason == constant.FinishReasonContentFilter {
+				common.SetContextKey(c, constant.ContextKeySensitiveRequestReason, "openai_finish_reason=content_filter")
+				break
+			}
+		}
+	}
 
 	if info.RelayFormat == types.RelayFormatOpenAI {
 		if shouldSendLastResp {
@@ -224,6 +233,7 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	for _, choice := range simpleResponse.Choices {
 		if choice.FinishReason == constant.FinishReasonContentFilter {
 			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, "openai_finish_reason=content_filter")
+			common.SetContextKey(c, constant.ContextKeySensitiveRequestReason, "openai_finish_reason=content_filter")
 			break
 		}
 	}

@@ -38,7 +38,11 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 
-import { LOG_TYPE_ALL_VALUE, LOG_TYPE_FILTERS } from '../constants'
+import {
+  LOG_TYPE_ALL_VALUE,
+  LOG_TYPE_ENUM,
+  LOG_TYPE_FILTERS,
+} from '../constants'
 import { buildSearchParams } from '../lib/filter'
 import { getDefaultTimeRange } from '../lib/utils'
 import type { CommonLogFilters } from '../types'
@@ -259,13 +263,20 @@ export function CommonLogsFilterBar<TData>(
     filters.upstreamRequestId,
   ].filter(Boolean).length
   const sensitiveType = sensitiveVisible ? 'text' : 'password'
+  const visibleLogTypeFilters = useMemo(
+    () =>
+      LOG_TYPE_FILTERS.filter(
+        (type) => isAdmin || type.value !== String(LOG_TYPE_ENUM.SENSITIVE)
+      ),
+    [isAdmin]
+  )
   const logTypeItems = useMemo(
     () =>
-      LOG_TYPE_FILTERS.map((type) => ({
+      visibleLogTypeFilters.map((type) => ({
         value: type.value,
         label: t(type.label),
       })),
-    [t]
+    [t, visibleLogTypeFilters]
   )
   const logTypeLabel =
     logTypeItems.find((type) => type.value === logType)?.label ?? t('All Types')
@@ -355,7 +366,7 @@ export function CommonLogsFilterBar<TData>(
         </SelectTrigger>
         <SelectContent alignItemWithTrigger={false}>
           <SelectGroup>
-            {LOG_TYPE_FILTERS.map((type) => (
+            {visibleLogTypeFilters.map((type) => (
               <SelectItem key={type.value} value={type.value}>
                 {t(type.label)}
               </SelectItem>

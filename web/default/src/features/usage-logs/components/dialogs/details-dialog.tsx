@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -31,7 +32,6 @@ import {
   Info,
   LogIn,
 } from 'lucide-react'
-import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
@@ -58,6 +58,7 @@ import {
   getResponseTimeColor,
   renderAuditContent,
 } from '../../lib/format'
+import { getReasoningEffortMeta } from '../../lib/reasoning-effort'
 import {
   getLogTypeConfig,
   isPerCallBilling,
@@ -179,7 +180,9 @@ function getUsageBillingPathLabel(
   }
 }
 
-function isUsageBillingPathLocal(adminInfo: LogOtherData['admin_info']): boolean {
+function isUsageBillingPathLocal(
+  adminInfo: LogOtherData['admin_info']
+): boolean {
   if (adminInfo?.usage_billing_path) {
     return adminInfo.usage_billing_path === USAGE_BILLING_PATH.LOCAL
   }
@@ -468,6 +471,11 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const isConsume = props.log.type === 2
   const isTopup = props.log.type === 1
   const isManage = props.log.type === 3
+  const isSensitive = props.log.type === 8
+  const sensitiveRequest =
+    props.isAdmin && isSensitive
+      ? other?.admin_info?.sensitive_request
+      : undefined
   const isSubscription = other?.billing_source === 'subscription'
   const isTieredBilling =
     isConsume &&
@@ -584,12 +592,10 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const useChannel = other?.admin_info?.use_channel
   const channelChain =
     useChannel && useChannel.length > 0 ? useChannel.join(' → ') : undefined
-  let reasoningEffortVariant: StatusBadgeProps['variant'] = 'green'
-  if (other?.reasoning_effort === 'high') {
-    reasoningEffortVariant = 'orange'
-  } else if (other?.reasoning_effort === 'medium') {
-    reasoningEffortVariant = 'yellow'
-  }
+  const reasoningEffort = getReasoningEffortMeta(other?.reasoning_effort)
+  let dialogContentWidth = 'sm:max-w-lg'
+  if (isSensitive) dialogContentWidth = 'sm:max-w-3xl'
+  if (isTieredBilling) dialogContentWidth = 'sm:max-w-4xl lg:max-w-5xl'
 
   return (
     <Dialog
@@ -610,7 +616,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
       contentClassName={cn(
         'min-w-0 overflow-hidden',
         'max-sm:max-h-[calc(100dvh-1.5rem)] max-sm:w-[calc(100vw-1.5rem)] max-sm:max-w-[calc(100vw-1.5rem)] max-sm:p-4',
-        isTieredBilling ? 'sm:max-w-4xl lg:max-w-5xl' : 'sm:max-w-lg'
+        dialogContentWidth
       )}
       headerClassName='max-sm:gap-1'
       titleClassName='flex items-center gap-2 text-base'
@@ -652,6 +658,10 @@ export function DetailsDialog(props: DetailsDialogProps) {
               }
               mono
             />
+          )}
+
+          {isSensitive && props.log.model_name && (
+            <DetailRow label={t('Model')} value={props.log.model_name} mono />
           )}
 
           {channelChain && props.isAdmin && (
@@ -719,6 +729,108 @@ export function DetailsDialog(props: DetailsDialogProps) {
             />
           )}
         </div>
+
+        {/* Sensitive request details (admin only) */}
+        {sensitiveRequest && (
+          <DetailSection
+            icon={<AlertTriangle className='size-3.5' aria-hidden='true' />}
+            label={t('Sensitive Request')}
+            variant='danger'
+          >
+            <DetailRow
+              label={t('Trigger Source')}
+              value={
+                <StatusBadge
+                  label={
+                    sensitiveRequest.source === 'local'
+                      ? t('Local Rule')
+                      : t('Upstream Review')
+                  }
+                  variant={
+                    sensitiveRequest.source === 'local' ? 'orange' : 'pink'
+                  }
+                  size='sm'
+                  copyable={false}
+                />
+              }
+            />
+            {sensitiveRequest.reason && (
+              <DetailRow
+                label={t('Reason')}
+                value={sensitiveRequest.reason}
+                mono
+              />
+            )}
+            {Array.isArray(sensitiveRequest.matched_words) &&
+              sensitiveRequest.matched_words.length > 0 && (
+                <DetailRow
+                  label={t('Matched Sensitive Words')}
+                  value={sensitiveRequest.matched_words.join(', ')}
+                  mono
+                />
+              )}
+            {sensitiveRequest.status_code != null &&
+              sensitiveRequest.status_code > 0 && (
+                <DetailRow
+                  label={t('Upstream Status Code')}
+                  value={String(sensitiveRequest.status_code)}
+                  mono
+                />
+              )}
+            {sensitiveRequest.error_code && (
+              <DetailRow
+                label={t('Upstream Error Code')}
+                value={sensitiveRequest.error_code}
+                mono
+              />
+            )}
+            {sensitiveRequest.upstream_message && (
+              <DetailRow
+                label={t('Upstream Error Message')}
+                value={sensitiveRequest.upstream_message}
+              />
+            )}
+            {sensitiveRequest.prompt_bytes != null && (
+              <DetailRow
+                label={t('Original Bytes')}
+                value={sensitiveRequest.prompt_bytes.toLocaleString()}
+                mono
+              />
+            )}
+            <DetailRow
+              label={t('Truncated')}
+              value={sensitiveRequest.truncated ? t('Yes') : t('No')}
+            />
+            {sensitiveRequest.prompt && (
+              <div className='space-y-1.5 pt-1'>
+                <Label className='text-xs font-semibold'>
+                  {t('Request Prompt')}
+                </Label>
+                <div className='bg-background relative min-w-0 overflow-hidden rounded-md border p-2.5'>
+                  <Button
+                    variant='ghost'
+                    size='sm'
+                    className='absolute top-1.5 right-1.5 h-5 w-5 p-0'
+                    onClick={() =>
+                      copyToClipboard(sensitiveRequest.prompt ?? '')
+                    }
+                    title={t('Copy to clipboard')}
+                    aria-label={t('Copy to clipboard')}
+                  >
+                    {copiedText === sensitiveRequest.prompt ? (
+                      <Check className='size-3 text-green-600' />
+                    ) : (
+                      <Copy className='size-3' />
+                    )}
+                  </Button>
+                  <pre className='max-h-[28rem] min-w-0 overflow-auto pr-6 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap sm:wrap-break-word'>
+                    {sensitiveRequest.prompt}
+                  </pre>
+                </div>
+              </div>
+            )}
+          </DetailSection>
+        )}
 
         {/* Request conversion (admin only, not for refund) */}
         {showConversion && (
@@ -994,15 +1106,16 @@ export function DetailsDialog(props: DetailsDialogProps) {
         )}
 
         {/* Reasoning effort */}
-        {other?.reasoning_effort && (
+        {reasoningEffort && (
           <DetailRow
             label={t('Reasoning Effort')}
             value={
               <StatusBadge
-                label={other.reasoning_effort}
-                variant={reasoningEffortVariant}
+                label={reasoningEffort.label}
+                variant={reasoningEffort.variant}
                 size='sm'
                 copyable={false}
+                className='font-mono'
               />
             }
           />
@@ -1239,5 +1352,5 @@ export function DetailsDialog(props: DetailsDialogProps) {
 }
 
 function isDisplayableType(type: number): boolean {
-  return [0, 2, 5, 6].includes(type)
+  return [0, 2, 5, 6, 8].includes(type)
 }

@@ -133,6 +133,12 @@ function renderType(type, t) {
           {t('退款')}
         </Tag>
       );
+    case 8:
+      return (
+        <Tag color='pink' shape='circle'>
+          {t('敏感请求')}
+        </Tag>
+      );
     default:
       return (
         <Tag color='grey' shape='circle'>
@@ -424,8 +430,90 @@ function renderCompactDetailSummary(summarySegments) {
   );
 }
 
+function isRequestMetadataLogType(type) {
+  return [0, 2, 5, 6, 8].includes(type);
+}
+
+function renderSensitiveRequestDetails(record, t) {
+  const sensitiveRequest = getLogOther(record.other)?.admin_info?.sensitive_request;
+  if (!sensitiveRequest) {
+    return null;
+  }
+
+  const source =
+    sensitiveRequest.source === 'local' ? t('本地规则') : t('上游审核');
+  const rows = [
+    [t('触发来源'), source],
+    [t('原因'), sensitiveRequest.reason],
+    [t('命中的敏感词'), sensitiveRequest.matched_words?.join(', ')],
+    [t('上游状态码'), sensitiveRequest.status_code || null],
+    [t('上游错误码'), sensitiveRequest.error_code],
+    [t('上游错误信息'), sensitiveRequest.upstream_message],
+    [t('原始字节数'), sensitiveRequest.prompt_bytes],
+    [t('是否截断'), sensitiveRequest.truncated ? t('是') : t('否')],
+  ].filter(([, value]) => value !== undefined && value !== null && value !== '');
+
+  return (
+    <div style={{ width: 520, maxWidth: '70vw' }}>
+      <Space vertical align='start' spacing='tight' style={{ width: '100%' }}>
+        {rows.map(([label, value]) => (
+          <div key={label} style={{ width: '100%', lineHeight: 1.6 }}>
+            <Typography.Text strong>{label}：</Typography.Text>
+            <Typography.Text>{String(value)}</Typography.Text>
+          </div>
+        ))}
+        {sensitiveRequest.prompt ? (
+          <div style={{ width: '100%', marginTop: 6 }}>
+            <Typography.Text strong>{t('请求 Prompt')}：</Typography.Text>
+            <Typography.Paragraph
+              copyable={{ content: sensitiveRequest.prompt }}
+              style={{
+                marginTop: 4,
+                marginBottom: 0,
+                maxHeight: 360,
+                overflow: 'auto',
+                padding: 10,
+                border: '1px solid var(--semi-color-border)',
+                borderRadius: 6,
+                background: 'var(--semi-color-fill-0)',
+                fontFamily: 'JetBrains Mono, Consolas, monospace',
+                fontSize: 12,
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              }}
+            >
+              {sensitiveRequest.prompt}
+            </Typography.Paragraph>
+          </div>
+        ) : null}
+      </Space>
+    </div>
+  );
+}
+
 function getUsageLogDetailSummary(record, text, billingDisplayMode, t) {
   const other = getLogOther(record.other);
+
+  if (record.type === 8) {
+    const sensitiveRequest = other?.admin_info?.sensitive_request;
+    if (!sensitiveRequest) {
+      return null;
+    }
+    return {
+      segments: [
+        {
+          text:
+            sensitiveRequest.source === 'local'
+              ? t('本地规则')
+              : t('上游审核'),
+          tone: 'primary',
+        },
+        sensitiveRequest.reason
+          ? { text: sensitiveRequest.reason, tone: 'secondary' }
+          : null,
+      ].filter(Boolean),
+    };
+  }
 
   if (record.type === 6) {
     return {
@@ -613,10 +701,7 @@ export const getLogsColumns = ({
       title: t('令牌'),
       dataIndex: 'token_name',
       render: (text, record, index) => {
-        return record.type === 0 ||
-          record.type === 2 ||
-          record.type === 5 ||
-          record.type === 6 ? (
+        return isRequestMetadataLogType(record.type) ? (
           <div>
             <Tag
               color='grey'
@@ -639,12 +724,7 @@ export const getLogsColumns = ({
       title: t('分组'),
       dataIndex: 'group',
       render: (text, record, index) => {
-        if (
-          record.type === 0 ||
-          record.type === 2 ||
-          record.type === 5 ||
-          record.type === 6
-        ) {
+        if (isRequestMetadataLogType(record.type)) {
           if (record.group) {
             return <>{renderGroup(record.group)}</>;
           } else {
@@ -684,10 +764,7 @@ export const getLogsColumns = ({
       title: t('模型'),
       dataIndex: 'model_name',
       render: (text, record, index) => {
-        return record.type === 0 ||
-          record.type === 2 ||
-          record.type === 5 ||
-          record.type === 6 ? (
+        return isRequestMetadataLogType(record.type) ? (
           <>{renderModelName(record, copyText, t)}</>
         ) : (
           <></>
@@ -926,6 +1003,20 @@ export const getLogsColumns = ({
             >
               {text}
             </Typography.Paragraph>
+          );
+        }
+
+        if (record.type === 8) {
+          return (
+            <Popover
+              trigger='click'
+              position='leftTop'
+              content={renderSensitiveRequestDetails(record, t)}
+            >
+              <div style={{ cursor: 'pointer' }}>
+                {renderCompactDetailSummary(detailSummary.segments)}
+              </div>
+            </Popover>
           );
         }
 

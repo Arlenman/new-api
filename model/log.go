@@ -82,14 +82,15 @@ type Log struct {
 
 // don't use iota, avoid change log type value
 const (
-	LogTypeUnknown = 0
-	LogTypeTopup   = 1
-	LogTypeConsume = 2
-	LogTypeManage  = 3
-	LogTypeSystem  = 4
-	LogTypeError   = 5
-	LogTypeRefund  = 6
-	LogTypeLogin   = 7
+	LogTypeUnknown   = 0
+	LogTypeTopup     = 1
+	LogTypeConsume   = 2
+	LogTypeManage    = 3
+	LogTypeSystem    = 4
+	LogTypeError     = 5
+	LogTypeRefund    = 6
+	LogTypeLogin     = 7
+	LogTypeSensitive = 8
 )
 
 func ensureLogRequestId(log *Log) {
@@ -136,9 +137,45 @@ func GetLogByTokenId(tokenId int) (logs []*Log, err error) {
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		order = clickHouseLogOrder("")
 	}
-	err = LOG_DB.Model(&Log{}).Where("token_id = ?", tokenId).Order(order).Limit(common.MaxRecentItems).Find(&logs).Error
+	err = LOG_DB.Model(&Log{}).Where("token_id = ? AND type <> ?", tokenId, LogTypeSensitive).Order(order).Limit(common.MaxRecentItems).Find(&logs).Error
 	formatUserLogs(logs, 0)
 	return logs, err
+}
+
+type RecordSensitiveRequestLogParams struct {
+	TokenId          int
+	TokenName        string
+	ModelName        string
+	ChannelId        int
+	Group            string
+	IsStream         bool
+	Content          string
+	SensitiveRequest map[string]interface{}
+}
+
+func RecordSensitiveRequestLog(c *gin.Context, userId int, params RecordSensitiveRequestLogParams) error {
+	other := map[string]interface{}{
+		"admin_info": map[string]interface{}{
+			"sensitive_request": params.SensitiveRequest,
+		},
+	}
+	log := &Log{
+		UserId:            userId,
+		Username:          c.GetString("username"),
+		CreatedAt:         common.GetTimestamp(),
+		Type:              LogTypeSensitive,
+		Content:           params.Content,
+		TokenName:         params.TokenName,
+		ModelName:         params.ModelName,
+		ChannelId:         params.ChannelId,
+		TokenId:           params.TokenId,
+		IsStream:          params.IsStream,
+		Group:             params.Group,
+		RequestId:         c.GetString(common.RequestIdKey),
+		UpstreamRequestId: c.GetString(common.UpstreamRequestIdKey),
+		Other:             common.MapToJsonStr(other),
+	}
+	return createLog(log)
 }
 
 func RecordLog(userId int, logType int, content string) {
@@ -588,6 +625,7 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	} else {
 		tx = LOG_DB.Where("logs.user_id = ? and logs.type = ?", userId, logType)
 	}
+	tx = tx.Where("logs.type <> ?", LogTypeSensitive)
 
 	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
 		return nil, 0, err

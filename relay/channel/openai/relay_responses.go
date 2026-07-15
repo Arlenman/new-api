@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -32,6 +33,9 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	}
 	if oaiError := responsesResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
+	}
+	if responsesResponse.IncompleteDetails != nil && strings.EqualFold(responsesResponse.IncompleteDetails.Reason, "content_filter") {
+		common.SetContextKey(c, constant.ContextKeySensitiveRequestReason, "responses_incomplete_reason=content_filter")
 	}
 
 	if responsesResponse.HasImageGenerationCall() {
@@ -90,6 +94,9 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			return
 		}
 		sendResponsesStreamData(c, streamResponse, data)
+		if streamResponse.Response != nil && streamResponse.Response.IncompleteDetails != nil && strings.EqualFold(streamResponse.Response.IncompleteDetails.Reason, "content_filter") {
+			common.SetContextKey(c, constant.ContextKeySensitiveRequestReason, "responses_incomplete_reason=content_filter")
+		}
 		switch streamResponse.Type {
 		case "response.completed":
 			if streamResponse.Response != nil {

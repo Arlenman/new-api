@@ -40,7 +40,7 @@ import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-import { LOG_TYPE_ALL_VALUE } from '../../constants'
+import { LOG_TYPE_ALL_VALUE, LOG_TYPE_ENUM } from '../../constants'
 import type { UsageLog } from '../../data/schema'
 import {
   formatModelName,
@@ -50,6 +50,7 @@ import {
   isViolationFeeLog,
   renderAuditContent,
 } from '../../lib/format'
+import { getReasoningEffortMeta } from '../../lib/reasoning-effort'
 import {
   isDisplayableLogType,
   isTimingLogType,
@@ -126,6 +127,20 @@ function buildTypeDetailSegments(
   if (log.type === 3 || log.type === 7) {
     const text = renderAuditContent(other, t)
     return text ? [{ text }] : []
+  }
+
+  if (log.type === LOG_TYPE_ENUM.SENSITIVE) {
+    const sensitiveRequest = other?.admin_info?.sensitive_request
+    if (!sensitiveRequest) return []
+    const source =
+      sensitiveRequest.source === 'local'
+        ? t('Local Rule')
+        : t('Upstream Review')
+    const segments: DetailSegment[] = [{ text: source, danger: true }]
+    if (sensitiveRequest.reason) {
+      segments.push({ text: sensitiveRequest.reason, muted: true })
+    }
+    return segments
   }
 
   if (log.type === 6) {
@@ -611,13 +626,26 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
         if (!isDisplayableLogType(log.type)) return null
 
         const modelInfo = formatModelName(log)
+        const reasoningEffort = getReasoningEffortMeta(
+          parseLogOther(log.other)?.reasoning_effort
+        )
 
         return (
-          <div className='flex w-fit flex-col gap-0.5'>
+          <div className='flex max-w-[220px] flex-wrap items-center gap-1'>
             <ModelBadge
               modelName={modelInfo.name}
               actualModel={modelInfo.actualModel}
             />
+            {reasoningEffort && (
+              <StatusBadge
+                label={reasoningEffort.label}
+                variant={reasoningEffort.variant}
+                size='sm'
+                copyable={false}
+                className='font-mono'
+                aria-label={`${t('Reasoning Effort')}: ${reasoningEffort.label}`}
+              />
+            )}
           </div>
         )
       },

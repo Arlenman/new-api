@@ -136,6 +136,17 @@ export interface LogOtherData {
       original: number
       clamped: number
     }
+    sensitive_request?: {
+      source?: 'local' | 'upstream'
+      reason?: string
+      error_code?: string
+      status_code?: number
+      upstream_message?: string
+      matched_words?: string[]
+      prompt?: string
+      prompt_bytes?: number
+      truncated?: boolean
+    }
   }
   // Language-independent operation descriptor (audit/login logs).
   // Frontend renders localized content from action + params via i18n templates.

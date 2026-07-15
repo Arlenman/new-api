@@ -46,6 +46,7 @@ import { useUpdateOption } from '../hooks/use-update-option'
 const sensitiveSchema = z.object({
   CheckSensitiveEnabled: z.boolean(),
   CheckSensitiveOnPromptEnabled: z.boolean(),
+  LogSensitiveRequestEnabled: z.boolean(),
   SensitiveWords: z.string().optional(),
 })
 
@@ -123,6 +124,29 @@ export function SensitiveWordsSection({
                     <FormDescription>
                       {t(
                         'When enabled, prompts are scanned before reaching upstream models.'
+                      )}
+                    </FormDescription>
+                  </SettingsSwitchContent>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </SettingsSwitchItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='LogSensitiveRequestEnabled'
+              render={({ field }) => (
+                <SettingsSwitchItem>
+                  <SettingsSwitchContent>
+                    <FormLabel>{t('Log Sensitive Request Content')}</FormLabel>
+                    <FormDescription>
+                      {t(
+                        'When enabled, request text blocked by local or upstream safety checks is stored in plaintext in the log database. Review privacy and storage security before enabling.'
                       )}
                     </FormDescription>
                   </SettingsSwitchContent>

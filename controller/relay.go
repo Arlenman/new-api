@@ -138,6 +138,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		contains, words := service.CheckSensitiveText(meta.CombineText)
 		if contains {
 			logger.LogWarn(c, fmt.Sprintf("user sensitive words detected: %s", strings.Join(words, ", ")))
+			if setting.LogSensitiveRequestEnabled {
+				snapshot := service.BuildSensitiveRequestSnapshot(request)
+				signal := service.SensitiveUpstreamSignal{
+					Reason:     "sensitive_words",
+					ErrorCode:  string(types.ErrorCodeSensitiveWordsDetected),
+					StatusCode: http.StatusBadRequest,
+				}
+				recordSensitiveRequest(c, relayInfo, 0, "local", words, signal, snapshot, "Local sensitive-word rule blocked request")
+			}
 			newAPIError = types.NewError(err, types.ErrorCodeSensitiveWordsDetected)
 			return
 		}
@@ -216,6 +225,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
+		common.SetContextKey(c, constant.ContextKeySensitiveRequestReason, "")
 		switch relayFormat {
 		case types.RelayFormatOpenAIRealtime:
 			newAPIError = relay.WssHelper(c, relayInfo)
@@ -225,6 +235,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = geminiRelayHandler(c, relayInfo)
 		default:
 			newAPIError = relayHandler(c, relayInfo)
+		}
+
+		if setting.LogSensitiveRequestEnabled {
+			marker := common.GetContextKeyString(c, constant.ContextKeySensitiveRequestReason)
+			if signal, sensitive := service.ClassifySensitiveUpstreamBlock(marker, newAPIError); sensitive {
+				snapshot := service.BuildSensitiveRequestSnapshot(request)
+				recordSensitiveRequest(c, relayInfo, channel.Id, "upstream", nil, signal, snapshot, "Upstream content safety policy blocked request")
+			}
 		}
 
 		if newAPIError == nil {
@@ -255,6 +273,22 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		gopool.Go(func() {
 			perfmetrics.RecordRelaySample(relayInfo, false, 0)
 		})
+	}
+}
+
+func recordSensitiveRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo, channelID int, source string, matchedWords []string, signal service.SensitiveUpstreamSignal, snapshot service.SensitiveRequestSnapshot, content string) {
+	err := model.RecordSensitiveRequestLog(c, relayInfo.UserId, model.RecordSensitiveRequestLogParams{
+		TokenId:          relayInfo.TokenId,
+		TokenName:        c.GetString("token_name"),
+		ModelName:        relayInfo.OriginModelName,
+		ChannelId:        channelID,
+		Group:            relayInfo.UsingGroup,
+		IsStream:         relayInfo.IsStream,
+		Content:          content,
+		SensitiveRequest: service.SensitiveRequestFailureMetadata(source, signal, matchedWords, snapshot),
+	})
+	if err != nil {
+		logger.LogError(c, service.SensitiveRequestLogFailureMessage(source, channelID, err))
 	}
 }
 

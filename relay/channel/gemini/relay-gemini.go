@@ -132,6 +132,31 @@ func handleFinalStream(c *gin.Context, info *relaycommon.RelayInfo, resp *dto.Ch
 	return nil
 }
 
+func isGeminiSensitiveReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "safety", "blocklist", "prohibited_content", "spii", "recitation":
+		return true
+	default:
+		return false
+	}
+}
+
+func markGeminiSensitiveResponse(c *gin.Context, response *dto.GeminiChatResponse) {
+	if c == nil || response == nil {
+		return
+	}
+	if response.PromptFeedback != nil && response.PromptFeedback.BlockReason != nil && isGeminiSensitiveReason(*response.PromptFeedback.BlockReason) {
+		common.SetContextKey(c, constant.ContextKeySensitiveRequestReason, fmt.Sprintf("gemini_block_reason=%s", *response.PromptFeedback.BlockReason))
+		return
+	}
+	for _, candidate := range response.Candidates {
+		if candidate.FinishReason != nil && isGeminiSensitiveReason(*candidate.FinishReason) {
+			common.SetContextKey(c, constant.ContextKeySensitiveRequestReason, fmt.Sprintf("gemini_finish_reason=%s", *candidate.FinishReason))
+			return
+		}
+	}
+}
+
 func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response, callback func(data string, geminiResponse *dto.GeminiChatResponse) bool) (*dto.Usage, *types.NewAPIError) {
 	var usage = &dto.Usage{}
 	var imageCount int
@@ -144,6 +169,8 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			sr.Stop(fmt.Errorf("unmarshal: %w", err))
 			return
 		}
+
+		markGeminiSensitiveResponse(c, &geminiResponse)
 
 		if len(geminiResponse.Candidates) == 0 && geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
 			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", *geminiResponse.PromptFeedback.BlockReason))
@@ -308,6 +335,7 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
+	markGeminiSensitiveResponse(c, &geminiResponse)
 	if len(geminiResponse.Candidates) == 0 {
 		usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
 
