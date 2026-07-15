@@ -40,6 +40,11 @@ func SubscriptionRequestWaffoPancakePay(c *gin.Context) {
 		common.ApiErrorMsg(c, "套餐未启用")
 		return
 	}
+	userId := c.GetInt("id")
+	if err := validateSubscriptionPlanUserGroup(userId, plan); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	if strings.TrimSpace(plan.WaffoPancakeProductId) == "" {
 		common.ApiErrorMsg(c, "该套餐未配置 WaffoPancakeProductId")
 		return
@@ -52,7 +57,6 @@ func SubscriptionRequestWaffoPancakePay(c *gin.Context) {
 		return
 	}
 
-	userId := c.GetInt("id")
 	user, err := model.GetUserById(userId, false)
 	if err != nil {
 		common.ApiError(c, err)

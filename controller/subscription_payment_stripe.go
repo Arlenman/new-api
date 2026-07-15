@@ -40,6 +40,11 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 		common.ApiErrorMsg(c, "套餐未启用")
 		return
 	}
+	userId := c.GetInt("id")
+	if err := validateSubscriptionPlanUserGroup(userId, plan); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	if plan.StripePriceId == "" {
 		common.ApiErrorMsg(c, "该套餐未配置 StripePriceId")
 		return
@@ -53,7 +58,6 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 		return
 	}
 
-	userId := c.GetInt("id")
 	user, err := model.GetUserById(userId, false)
 	if err != nil {
 		common.ApiError(c, err)

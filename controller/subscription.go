@@ -27,6 +27,17 @@ type SubscriptionBalancePayRequest struct {
 	PlanId int `json:"plan_id"`
 }
 
+func validateSubscriptionPlanUserGroup(userId int, plan *model.SubscriptionPlan) error {
+	userGroup, err := model.GetUserGroup(userId, false)
+	if err != nil {
+		return err
+	}
+	if !plan.IsAvailableForGroup(userGroup) {
+		return fmt.Errorf("该套餐不适用于当前用户分组")
+	}
+	return nil
+}
+
 // ---- User APIs ----
 
 func GetSubscriptionPlans(c *gin.Context) {
@@ -35,8 +46,15 @@ func GetSubscriptionPlans(c *gin.Context) {
 		return
 	}
 
+	userGroup, err := model.GetUserGroup(c.GetInt("id"), false)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
 	var plans []model.SubscriptionPlan
-	if err := model.DB.Where("enabled = ?", true).Order("sort_order desc, id desc").Find(&plans).Error; err != nil {
+	if err := model.DB.Where("enabled = ? AND (user_group = ? OR user_group = ?)", true, userGroup, "").
+		Order("sort_order desc, id desc").Find(&plans).Error; err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -138,6 +156,14 @@ type AdminUpsertSubscriptionPlanRequest struct {
 	Plan model.SubscriptionPlan `json:"plan"`
 }
 
+func normalizeSubscriptionPlanUserGroup(plan *model.SubscriptionPlan) error {
+	plan.UserGroup = strings.TrimSpace(plan.UserGroup)
+	if plan.UserGroup != "" && !ratio_setting.ContainsGroupRatio(plan.UserGroup) {
+		return fmt.Errorf("适用分组不存在")
+	}
+	return nil
+}
+
 func AdminCreateSubscriptionPlan(c *gin.Context) {
 	if !requirePaymentCompliance(c) {
 		return
@@ -183,6 +209,10 @@ func AdminCreateSubscriptionPlan(c *gin.Context) {
 	}
 	if req.Plan.TotalAmount < 0 {
 		common.ApiErrorMsg(c, "总额度不能为负数")
+		return
+	}
+	if err := normalizeSubscriptionPlanUserGroup(&req.Plan); err != nil {
+		common.ApiErrorMsg(c, err.Error())
 		return
 	}
 	req.Plan.UpgradeGroup = strings.TrimSpace(req.Plan.UpgradeGroup)
@@ -259,6 +289,10 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 		common.ApiErrorMsg(c, "总额度不能为负数")
 		return
 	}
+	if err := normalizeSubscriptionPlanUserGroup(&req.Plan); err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
+	}
 	req.Plan.UpgradeGroup = strings.TrimSpace(req.Plan.UpgradeGroup)
 	if req.Plan.UpgradeGroup != "" {
 		if _, ok := ratio_setting.GetGroupRatioCopy()[req.Plan.UpgradeGroup]; !ok {
@@ -296,6 +330,7 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 			"waffo_pancake_product_id":   req.Plan.WaffoPancakeProductId,
 			"max_purchase_per_user":      req.Plan.MaxPurchasePerUser,
 			"total_amount":               req.Plan.TotalAmount,
+			"user_group":                 req.Plan.UserGroup,
 			"upgrade_group":              req.Plan.UpgradeGroup,
 			"downgrade_group":            req.Plan.DowngradeGroup,
 			"quota_reset_period":         req.Plan.QuotaResetPeriod,

@@ -172,6 +172,9 @@ type SubscriptionPlan struct {
 	// Max purchases per user (0 = unlimited)
 	MaxPurchasePerUser int `json:"max_purchase_per_user" gorm:"type:int;default:0"`
 
+	// User group allowed to view and purchase this plan (empty = all groups)
+	UserGroup string `json:"user_group" gorm:"type:varchar(64);default:''"`
+
 	// Upgrade user group after purchase (empty = no change)
 	UpgradeGroup string `json:"upgrade_group" gorm:"type:varchar(64);default:''"`
 
@@ -208,6 +211,11 @@ func (p *SubscriptionPlan) NormalizeDefaults() {
 	if p.AllowWalletOverflow == nil {
 		p.AllowWalletOverflow = common.GetPointer(true)
 	}
+}
+
+func (p *SubscriptionPlan) IsAvailableForGroup(userGroup string) bool {
+	planGroup := strings.TrimSpace(p.UserGroup)
+	return planGroup == "" || planGroup == strings.TrimSpace(userGroup)
 }
 
 // Subscription order (payment -> webhook -> create UserSubscription)
@@ -763,6 +771,9 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 		var user User
 		if err := lockForUpdate(tx).Where("id = ?", userId).First(&user).Error; err != nil {
 			return err
+		}
+		if !plan.IsAvailableForGroup(user.Group) {
+			return errors.New("该套餐不适用于当前用户分组")
 		}
 		if requiredQuota > 0 && user.Quota < requiredQuota {
 			return errors.New("余额不足")
