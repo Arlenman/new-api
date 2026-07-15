@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,12 +24,23 @@ var (
 )
 
 func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("stopped after 10 redirects")
+	}
+
+	// The initial target of this client is operator-managed and may legitimately
+	// resolve to a private address or a local proxy Fake-IP. A same-host redirect
+	// stays inside that trust boundary, while cross-host redirects still receive
+	// the configured SSRF validation below.
+	if len(via) > 0 && req != nil && req.URL != nil && via[0] != nil && via[0].URL != nil &&
+		req.URL.Hostname() != "" && strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) &&
+		(req.URL.Scheme == "http" || req.URL.Scheme == "https") {
+		return nil
+	}
+
 	urlStr := req.URL.String()
 	if err := validateURLWithCurrentFetchSetting(urlStr, true); err != nil {
 		return fmt.Errorf("redirect to %s blocked: %v", urlStr, err)
-	}
-	if len(via) >= 10 {
-		return fmt.Errorf("stopped after 10 redirects")
 	}
 	return nil
 }

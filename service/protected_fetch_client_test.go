@@ -315,3 +315,43 @@ func TestProtectedFetchRoundTripperReusesTransportPerProxy(t *testing.T) {
 	require.True(t, direct.ForceAttemptHTTP2)
 	require.False(t, direct.DisableKeepAlives)
 }
+
+func TestGeneralRedirectAllowsSameOperatorManagedHost(t *testing.T) {
+	configureSSRFTestFetchSetting(t)
+	initialRequest := &http.Request{
+		URL: mustParseURL(t, "https://198.18.0.14/api/token?p=1&page_size=100"),
+	}
+	redirectRequest := &http.Request{
+		URL: mustParseURL(t, "https://198.18.0.14/api/token/?p=1&page_size=100"),
+	}
+
+	require.NoError(t, checkRedirect(redirectRequest, []*http.Request{initialRequest}))
+}
+
+func TestGeneralRedirectRejectsPrivateAddressOnDifferentHost(t *testing.T) {
+	configureSSRFTestFetchSetting(t)
+	initialRequest := &http.Request{
+		URL: mustParseURL(t, "https://upstream.example/api/token"),
+	}
+	redirectRequest := &http.Request{
+		URL: mustParseURL(t, "http://198.18.0.14/api/token"),
+	}
+
+	err := checkRedirect(redirectRequest, []*http.Request{initialRequest})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "private IP address not allowed")
+}
+
+func TestProtectedFetchRedirectRejectsSamePrivateHost(t *testing.T) {
+	configureSSRFTestFetchSetting(t)
+	initialRequest := &http.Request{
+		URL: mustParseURL(t, "https://198.18.0.14/start"),
+	}
+	redirectRequest := &http.Request{
+		URL: mustParseURL(t, "https://198.18.0.14/next"),
+	}
+
+	err := checkProtectedFetchRedirect(redirectRequest, []*http.Request{initialRequest})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "private IP address not allowed")
+}
