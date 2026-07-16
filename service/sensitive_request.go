@@ -231,7 +231,7 @@ func appendSensitiveJSONValue(sections *[]sensitivePromptSection, role string, v
 			}
 			return
 		}
-		if content, ok := typed["content"]; ok {
+		if content, ok := typed["content"]; ok && (itemType == "" || strings.EqualFold(itemType, "message")) {
 			appendSensitiveJSONValue(sections, itemRole, content)
 			return
 		}
@@ -250,7 +250,7 @@ func appendSensitiveJSONValue(sections *[]sensitivePromptSection, role string, v
 
 func isSensitiveTextPartType(partType string) bool {
 	switch strings.ToLower(partType) {
-	case "text", "input_text", "output_text", "message":
+	case "text", "input_text", "output_text":
 		return true
 	default:
 		return false
@@ -308,6 +308,9 @@ func ClassifySensitiveUpstreamBlock(marker string, apiErr *types.NewAPIError) (S
 
 	if apiErr != nil {
 		signal.StatusCode = apiErr.StatusCode
+		if apiErr.OriginalStatusCode != 0 {
+			signal.StatusCode = apiErr.OriginalStatusCode
+		}
 		signal.UpstreamMessage, _ = truncateSensitiveText(apiErr.Error(), SensitiveRequestUpstreamMessageMaxBytes)
 		errorCode := strings.ToLower(strings.TrimSpace(string(apiErr.GetErrorCode())))
 		if signal.ErrorCode == "" {

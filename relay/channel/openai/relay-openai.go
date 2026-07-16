@@ -137,9 +137,13 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			}
 
 			lastStreamData = data
-			if err := processTokenData(info.RelayMode, data, &responseTextBuilder, &toolCount); err != nil {
+			sensitive, err := processTokenData(info.RelayMode, data, &responseTextBuilder, &toolCount)
+			if err != nil {
 				logger.LogError(c, "error processing stream token data: "+err.Error())
 				sr.Error(err)
+			}
+			if sensitive {
+				common.SetContextKey(c, constant.ContextKeySensitiveRequestReason, "openai_finish_reason=content_filter")
 			}
 		}
 	})
@@ -168,16 +172,6 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		&containStreamUsage, info, &shouldSendLastResp); err != nil {
 		logger.LogError(c, fmt.Sprintf("error handling last response: %s, lastStreamData: [%s]", err.Error(), lastStreamData))
 	}
-	var lastStreamResponse dto.ChatCompletionsStreamResponse
-	if err := common.UnmarshalJsonStr(lastStreamData, &lastStreamResponse); err == nil {
-		for _, choice := range lastStreamResponse.Choices {
-			if choice.FinishReason != nil && *choice.FinishReason == constant.FinishReasonContentFilter {
-				common.SetContextKey(c, constant.ContextKeySensitiveRequestReason, "openai_finish_reason=content_filter")
-				break
-			}
-		}
-	}
-
 	if info.RelayFormat == types.RelayFormatOpenAI {
 		if shouldSendLastResp {
 			_ = sendStreamData(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
