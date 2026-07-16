@@ -19,6 +19,16 @@ For commercial licensing, please contact support@quantumnous.com
 import { api } from '@/lib/api'
 
 import type {
+  AlertRule,
+  AlertRuleInput,
+  AlertRulePreviewRequest,
+  AlertRuleProviderCatalog,
+  AlertRuleTestSendRequest,
+  AlertRuleTestSendResult,
+  ApiNoticeConfig,
+  ApiNoticeConfigUpdate,
+  ApiNoticeConnectionStatus,
+  ApiNoticeMessage,
   ApiResponse,
   CreateUpstreamChannelConfig,
   ImportUpstreamKeysRequest,
@@ -147,6 +157,107 @@ export async function importManagedUpstreamKeys(
 ): Promise<ApiResponse<ImportUpstreamKeysResult>> {
   const res = await api.post<ApiResponse<ImportUpstreamKeysResult>>(
     `/api/upstream-channels/${channelId}/keys/import`,
+    request,
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function getAlertRules(): Promise<ApiResponse<AlertRule[]>> {
+  const res = await api.get<ApiResponse<AlertRule[]>>('/api/alert-rules/', {
+    skipBusinessError: true,
+  })
+  return res.data
+}
+
+export async function getAlertRuleProviders(): Promise<
+  ApiResponse<AlertRuleProviderCatalog>
+> {
+  const res = await api.get<ApiResponse<AlertRuleProviderCatalog>>(
+    '/api/alert-rules/providers',
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function getApiNoticeConfig(): Promise<
+  ApiResponse<ApiNoticeConfig>
+> {
+  const res = await api.get<ApiResponse<ApiNoticeConfig>>(
+    '/api/alert-rules/config',
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function updateApiNoticeConfig(
+  config: ApiNoticeConfigUpdate
+): Promise<ApiResponse<ApiNoticeConfig>> {
+  const res = await api.put<ApiResponse<ApiNoticeConfig>>(
+    '/api/alert-rules/config',
+    config,
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function createAlertRule(
+  rule: AlertRuleInput
+): Promise<ApiResponse<AlertRule>> {
+  const res = await api.post<ApiResponse<AlertRule>>(
+    '/api/alert-rules/',
+    rule,
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function updateAlertRule(
+  id: number,
+  rule: AlertRuleInput
+): Promise<ApiResponse<AlertRule>> {
+  const res = await api.put<ApiResponse<AlertRule>>(
+    `/api/alert-rules/${id}`,
+    rule,
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function deleteAlertRule(id: number): Promise<ApiResponse<null>> {
+  const res = await api.delete<ApiResponse<null>>(`/api/alert-rules/${id}`, {
+    skipBusinessError: true,
+  })
+  return res.data
+}
+
+export async function previewAlertRule(
+  request: AlertRulePreviewRequest
+): Promise<ApiResponse<ApiNoticeMessage>> {
+  const res = await api.post<ApiResponse<ApiNoticeMessage>>(
+    '/api/alert-rules/preview',
+    request,
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function testAlertRuleConnection(): Promise<
+  ApiResponse<ApiNoticeConnectionStatus>
+> {
+  const res = await api.post<ApiResponse<ApiNoticeConnectionStatus>>(
+    '/api/alert-rules/test-connection',
+    undefined,
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function testSendAlertRule(
+  request: AlertRuleTestSendRequest
+): Promise<ApiResponse<AlertRuleTestSendResult>> {
+  const res = await api.post<ApiResponse<AlertRuleTestSendResult>>(
+    '/api/alert-rules/test-send',
     request,
     { skipBusinessError: true }
   )

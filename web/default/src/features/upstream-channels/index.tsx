@@ -17,8 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { LoaderCircle, Plus, RefreshCw } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { Bell, LoaderCircle, Plus, RefreshCw } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -26,19 +26,30 @@ import { SectionPageLayout } from '@/components/layout'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { NativeSelect } from '@/components/ui/native-select'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Switch } from '@/components/ui/switch'
 
 import {
+  createDefaultAlertRuleInput,
+  getAlertRuleTriggerTypeLabel,
+} from './alert-rule-lib'
+import {
+  createAlertRule,
   createManagedUpstreamChannel,
+  getAlertRuleProviders,
+  getAlertRules,
   getManagedUpstreamChannels,
   pinManagedUpstreamChannel,
   refreshAllManagedUpstreamChannels,
   refreshManagedUpstreamChannel,
   updateManagedUpstreamChannel,
   updateManagedUpstreamChannelNote,
+  updateAlertRule,
   updateManagedUpstreamChannelSelectedGroup,
 } from './api'
+import { AlertRuleDialog } from './components/alert-rule-dialog'
 import { UpstreamChannelCard } from './components/upstream-channel-card'
 import { UpstreamChannelConfigDialog } from './components/upstream-channel-config-dialog'
 import {
@@ -53,12 +64,15 @@ import {
   type UpstreamChannelStatusFilter,
 } from './lib'
 import type {
+  AlertRule,
+  AlertRuleInput,
   CreateUpstreamChannelConfig,
   UpstreamChannel,
   UpstreamChannelConfig,
 } from './types'
 
 const queryKey = ['managed-upstream-channels'] as const
+const alertRulesQueryKey = ['alert-rules'] as const
 const emptyChannels: UpstreamChannel[] = []
 
 export function UpstreamChannels() {
@@ -67,6 +81,7 @@ export function UpstreamChannels() {
   const [selectedChannel, setSelectedChannel] =
     useState<UpstreamChannel | null>(null)
   const [configOpen, setConfigOpen] = useState(false)
+  const [alertRulesOpen, setAlertRulesOpen] = useState(false)
   const [accessTokenRequired, setAccessTokenRequired] = useState(false)
   const [refreshingChannelId, setRefreshingChannelId] = useState<number | null>(
     null
@@ -80,12 +95,40 @@ export function UpstreamChannels() {
   const [selectingGroupChannelId, setSelectingGroupChannelId] = useState<
     number | null
   >(null)
+  const [enabledChannelThreshold, setEnabledChannelThreshold] = useState('1')
+  const [enabledChannelNoticeEnabled, setEnabledChannelNoticeEnabled] =
+    useState(false)
+  const deferredEnabledChannelThresholdSaveRef = useRef(false)
 
   const channelsQuery = useQuery({
     queryKey,
     queryFn: getManagedUpstreamChannels,
     refetchInterval: 30_000,
   })
+  const alertRulesQuery = useQuery({
+    queryKey: alertRulesQueryKey,
+    queryFn: getAlertRules,
+  })
+  const enabledChannelCountRule = useMemo(
+    () =>
+      alertRulesQuery.data?.data?.find(
+        (rule) => rule.trigger_type === 'enabled_channel_count'
+      ),
+    [alertRulesQuery.data?.data]
+  )
+
+  useEffect(() => {
+    if (alertRulesQuery.isLoading) return
+    setEnabledChannelThreshold(
+      String(enabledChannelCountRule?.trigger_config.threshold ?? 1)
+    )
+    setEnabledChannelNoticeEnabled(enabledChannelCountRule?.enabled ?? false)
+  }, [
+    alertRulesQuery.isLoading,
+    enabledChannelCountRule?.enabled,
+    enabledChannelCountRule?.trigger_config.threshold,
+  ])
+
   const channels = channelsQuery.data?.data ?? emptyChannels
   const totalBalance = useMemo(
     () => getTotalAdjustedUpstreamBalance(channels),
@@ -99,6 +142,86 @@ export function UpstreamChannels() {
     () => filterAndSortUpstreamChannels(channels, statusFilter, channelSort),
     [channelSort, channels, statusFilter]
   )
+
+  const enabledChannelAlertMutation = useMutation({
+    mutationFn: async ({
+      rule,
+      threshold,
+      enabled,
+    }: {
+      rule?: AlertRule
+      threshold: number
+      enabled: boolean
+    }) => {
+      let response
+      if (rule) {
+        const input: AlertRuleInput = {
+          name: rule.name,
+          enabled,
+          trigger_type: 'enabled_channel_count',
+          trigger_config: {
+            operator: 'lte',
+            threshold,
+            window_seconds: 0,
+          },
+          providers: [...rule.providers],
+          message_format: rule.message_format,
+          message_template: rule.message_template,
+          consecutive_required: 1,
+          cooldown_seconds: 0,
+          send_recovery: rule.send_recovery,
+        }
+        response = await updateAlertRule(rule.id, input)
+      } else {
+        const providersResponse = await getAlertRuleProviders()
+        if (!providersResponse.success || !providersResponse.data) {
+          throw new Error(
+            providersResponse.message ||
+              'Configure a ready default notification provider in Alert rules first'
+          )
+        }
+        const providers = providersResponse.data.providers
+        const provider =
+          providers.find((item) => item.default && item.ready) ||
+          providers.find((item) => item.ready)
+        if (!provider) {
+          throw new Error(
+            'Configure a ready default notification provider in Alert rules first'
+          )
+        }
+
+        const input = createDefaultAlertRuleInput(
+          [provider.name],
+          'enabled_channel_count'
+        )
+        input.name = t(getAlertRuleTriggerTypeLabel('enabled_channel_count'))
+        input.enabled = enabled
+        input.trigger_config.threshold = threshold
+        response = await createAlertRule(input)
+      }
+      if (!response.success || !response.data) {
+        throw new Error(
+          response.message || 'Failed to save available channel alert'
+        )
+      }
+      return response
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: alertRulesQueryKey })
+      toast.success(t('Available channel alert saved'))
+    },
+    onError: (error) => {
+      setEnabledChannelThreshold(
+        String(enabledChannelCountRule?.trigger_config.threshold ?? 1)
+      )
+      setEnabledChannelNoticeEnabled(enabledChannelCountRule?.enabled ?? false)
+      toast.error(
+        error instanceof Error
+          ? t(error.message)
+          : t('Failed to save available channel alert')
+      )
+    },
+  })
 
   const refreshAllMutation = useMutation({
     mutationFn: refreshAllManagedUpstreamChannels,
@@ -439,9 +562,53 @@ export function UpstreamChannels() {
     await queryClient.invalidateQueries({ queryKey })
   }
 
+  function parseEnabledChannelThreshold() {
+    if (!/^\d+$/.test(enabledChannelThreshold)) {
+      toast.error(
+        t('Enabled channel count threshold must be a non-negative integer')
+      )
+      return null
+    }
+    const threshold = Number(enabledChannelThreshold)
+    if (!Number.isSafeInteger(threshold) || threshold > 1_000_000) {
+      toast.error(
+        t('Enabled channel count threshold must be a non-negative integer')
+      )
+      return null
+    }
+    return threshold
+  }
+
+  function saveEnabledChannelAlert(enabled = enabledChannelNoticeEnabled) {
+    if (enabledChannelAlertMutation.isPending) return
+    const threshold = parseEnabledChannelThreshold()
+    if (threshold === null) return
+    const savedThreshold =
+      enabledChannelCountRule?.trigger_config.threshold ?? 1
+    const savedEnabled = enabledChannelCountRule?.enabled ?? false
+    if (threshold === savedThreshold && enabled === savedEnabled) return
+    enabledChannelAlertMutation.mutate({
+      rule: enabledChannelCountRule,
+      threshold,
+      enabled,
+    })
+  }
+
+  function toggleEnabledChannelAlert(checked: boolean) {
+    deferredEnabledChannelThresholdSaveRef.current = false
+    const threshold = parseEnabledChannelThreshold()
+    if (threshold === null) return
+    setEnabledChannelNoticeEnabled(checked)
+    enabledChannelAlertMutation.mutate({
+      rule: enabledChannelCountRule,
+      threshold,
+      enabled: checked,
+    })
+  }
+
   return (
     <>
-      <SectionPageLayout>
+      <SectionPageLayout actionsBelowTitle>
         <SectionPageLayout.Title>
           <span className='inline-flex min-w-0 items-center gap-2'>
             <span className='truncate'>{t('Channel Panel')}</span>
@@ -490,6 +657,10 @@ export function UpstreamChannels() {
               </NativeSelect>
             </>
           )}
+          <Button variant='outline' onClick={() => setAlertRulesOpen(true)}>
+            <Bell />
+            {t('Alert rules')}
+          </Button>
           <Button variant='outline' onClick={openAddConfiguration}>
             <Plus />
             {t('Add configuration')}
@@ -509,7 +680,7 @@ export function UpstreamChannels() {
         <SectionPageLayout.Content>
           <div className='space-y-2'>
             {!channelsQuery.isLoading && !channelsQuery.isError && (
-              <div className='flex flex-wrap items-center gap-x-5 gap-y-1 border-b px-1 pb-2 text-sm'>
+              <div className='flex flex-wrap items-center gap-x-5 gap-y-2 border-b px-1 pb-2 text-sm'>
                 <OverviewMetric
                   label={t('Total balance')}
                   value={formatUpstreamBalance(totalBalance)}
@@ -522,6 +693,67 @@ export function UpstreamChannels() {
                   label={t('Active keys')}
                   value={String(keyStats.active)}
                 />
+                <div className='ml-auto flex flex-wrap items-center justify-end gap-2'>
+                  <span className='text-muted-foreground'>
+                    {t('Notify when only')}
+                  </span>
+                  <Input
+                    className='h-7 w-20 px-2 text-center tabular-nums'
+                    type='number'
+                    min='0'
+                    max='1000000'
+                    step='1'
+                    inputMode='numeric'
+                    aria-label={t('Available channel count')}
+                    value={enabledChannelThreshold}
+                    disabled={
+                      alertRulesQuery.isLoading ||
+                      enabledChannelAlertMutation.isPending
+                    }
+                    onChange={(event) =>
+                      setEnabledChannelThreshold(event.target.value)
+                    }
+                    onBlur={(event) => {
+                      const nextTarget = event.relatedTarget
+                      if (
+                        nextTarget instanceof HTMLElement &&
+                        nextTarget.closest(
+                          '[data-enabled-channel-alert-switch="true"]'
+                        )
+                      ) {
+                        deferredEnabledChannelThresholdSaveRef.current = true
+                        return
+                      }
+                      saveEnabledChannelAlert()
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') event.currentTarget.blur()
+                    }}
+                  />
+                  <span className='text-muted-foreground'>
+                    {t('available channels remain')}
+                  </span>
+                  {enabledChannelAlertMutation.isPending && (
+                    <LoaderCircle className='size-4 animate-spin' />
+                  )}
+                  <Switch
+                    checked={enabledChannelNoticeEnabled}
+                    disabled={
+                      alertRulesQuery.isLoading ||
+                      enabledChannelAlertMutation.isPending
+                    }
+                    data-enabled-channel-alert-switch='true'
+                    aria-label={t('Available channel alert')}
+                    onBlur={() => {
+                      if (!deferredEnabledChannelThresholdSaveRef.current) {
+                        return
+                      }
+                      deferredEnabledChannelThresholdSaveRef.current = false
+                      saveEnabledChannelAlert()
+                    }}
+                    onCheckedChange={toggleEnabledChannelAlert}
+                  />
+                </div>
               </div>
             )}
             {channelsQuery.isLoading && <LoadingCards />}
@@ -583,6 +815,17 @@ export function UpstreamChannels() {
           </div>
         </SectionPageLayout.Content>
       </SectionPageLayout>
+
+      <AlertRuleDialog
+        open={alertRulesOpen}
+        channels={channels}
+        onOpenChange={(nextOpen) => {
+          setAlertRulesOpen(nextOpen)
+          if (!nextOpen) {
+            void queryClient.invalidateQueries({ queryKey: alertRulesQueryKey })
+          }
+        }}
+      />
 
       <UpstreamChannelConfigDialog
         channel={selectedChannel}

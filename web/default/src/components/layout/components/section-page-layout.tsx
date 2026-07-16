@@ -52,6 +52,7 @@ SectionPageLayoutBreadcrumb.displayName = 'SectionPageLayout.Breadcrumb'
 export type SectionPageLayoutProps = {
   children: ReactNode
   fixedContent?: boolean
+  actionsBelowTitle?: boolean
 }
 
 export function SectionPageLayout(props: SectionPageLayoutProps) {
@@ -67,13 +68,15 @@ export function SectionPageLayout(props: SectionPageLayoutProps) {
   Children.forEach(props.children, (node) => {
     if (!isValidElement(node)) return
     const child = node as ReactElement<SlotProps>
-    if (child.type === SectionPageLayoutTitle) title = child.props.children
-    else if (child.type === SectionPageLayoutActions)
+    if (child.type === SectionPageLayoutTitle) {
+      title = child.props.children
+    } else if (child.type === SectionPageLayoutActions) {
       actions = child.props.children
-    else if (child.type === SectionPageLayoutContent)
+    } else if (child.type === SectionPageLayoutContent) {
       content = child.props.children
-    else if (child.type === SectionPageLayoutBreadcrumb)
+    } else if (child.type === SectionPageLayoutBreadcrumb) {
       breadcrumb = child.props.children
+    }
   })
 
   return (
@@ -83,14 +86,28 @@ export function SectionPageLayout(props: SectionPageLayoutProps) {
           {breadcrumb != null && (
             <div className='mb-2 sm:mb-3'>{breadcrumb}</div>
           )}
-          <div className='flex flex-wrap items-center justify-between gap-x-3 gap-y-2 sm:gap-x-4'>
-            <div className='min-w-0 flex-1'>
+          <div
+            className={
+              props.actionsBelowTitle
+                ? 'space-y-2'
+                : 'flex flex-wrap items-center justify-between gap-x-3 gap-y-2 sm:gap-x-4'
+            }
+          >
+            <div
+              className={props.actionsBelowTitle ? 'min-w-0' : 'min-w-0 flex-1'}
+            >
               <h2 className='truncate text-base font-bold tracking-tight sm:text-lg'>
                 {title}
               </h2>
             </div>
             {actions != null && (
-              <div className='flex shrink-0 flex-wrap items-center justify-end gap-2 sm:gap-x-4'>
+              <div
+                className={
+                  props.actionsBelowTitle
+                    ? 'flex flex-wrap items-center justify-end gap-2 sm:gap-x-4'
+                    : 'flex shrink-0 flex-wrap items-center justify-end gap-2 sm:gap-x-4'
+                }
+              >
                 {actions}
               </div>
             )}

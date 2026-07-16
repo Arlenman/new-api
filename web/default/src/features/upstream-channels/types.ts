@@ -19,8 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 export type UpstreamProvider = 'auto' | 'new-api' | 'sub2api' | 'other'
 export type UpstreamAuthType = 'password' | 'access_token'
 export type UpstreamChannelStatus = 'unconfigured' | 'ready' | 'error'
-export type UpstreamErrorCode =
-  | 'upstream_turnstile_requires_access_token'
+export type UpstreamErrorCode = 'upstream_turnstile_requires_access_token'
 
 export interface UpstreamAccount {
   id: number
@@ -138,4 +137,146 @@ export interface ImportUpstreamKeysResult {
   skipped: number
   disabled: number
   channel_ids: number[]
+}
+
+export type AlertMessageFormat = 'text' | 'markdown' | 'card' | 'table'
+export type AlertEventType = 'trigger' | 'recovery'
+export type AlertComparisonOperator = 'lt' | 'lte' | 'gt' | 'gte' | 'eq'
+export type AlertRuleStateName = 'normal' | 'pending' | 'active'
+export type AlertRuleTriggerType =
+  | 'upstream_channel_effective_balance'
+  | 'enabled_channel_count'
+
+export interface ApiNoticeProvider {
+  name: string
+  default: boolean
+  capabilities: string[]
+  ready: boolean
+  reason?: string
+}
+
+export interface AlertRuleProviderCatalog {
+  providers: ApiNoticeProvider[]
+  api_key_configured: boolean
+}
+
+export interface ApiNoticeConfig {
+  base_url: string
+  api_key_configured: boolean
+  api_key_masked: string
+  api_key_source: string
+  persistent_storage_available: boolean
+}
+
+export interface ApiNoticeConfigUpdate {
+  base_url: string
+  api_key?: string
+  clear_api_key?: boolean
+}
+
+export interface ApiNoticeEndpointStatus {
+  status: string
+  http_status: number
+}
+
+export interface ApiNoticeConnectionStatus {
+  health: ApiNoticeEndpointStatus
+  ready: ApiNoticeEndpointStatus
+  providers: ApiNoticeProvider[]
+  api_key_configured: boolean
+}
+
+export interface ApiNoticeField {
+  name: string
+  value: string
+}
+
+export interface ApiNoticeSection {
+  title?: string
+  text: string
+}
+
+export interface ApiNoticeAction {
+  label: string
+  url: string
+}
+
+export interface ApiNoticeColumn {
+  key: string
+  label: string
+}
+
+export interface ApiNoticeTable {
+  columns: ApiNoticeColumn[]
+  rows: Array<Record<string, string>>
+}
+
+export interface ApiNoticeMessage {
+  format: AlertMessageFormat
+  title?: string
+  level?: string
+  text?: string
+  fields?: ApiNoticeField[]
+  sections?: ApiNoticeSection[]
+  actions?: ApiNoticeAction[]
+  table?: ApiNoticeTable
+}
+
+export interface AlertRuleTriggerConfig {
+  operator: AlertComparisonOperator
+  threshold: number
+  window_seconds: number
+}
+
+export interface AlertRuleInput {
+  name: string
+  enabled: boolean
+  trigger_type: AlertRuleTriggerType
+  trigger_config: AlertRuleTriggerConfig
+  providers: string[]
+  message_format: AlertMessageFormat
+  message_template: ApiNoticeMessage
+  consecutive_required: number
+  cooldown_seconds: number
+  send_recovery: boolean
+}
+
+export interface AlertRuleStateSummary {
+  state: AlertRuleStateName
+  active_subjects: number
+  pending_subjects: number
+  last_triggered_at: number
+  last_recovered_at: number
+  last_error_summary: string
+}
+
+export interface AlertRule extends AlertRuleInput {
+  id: number
+  revision: number
+  created_at: number
+  updated_at: number
+  state: AlertRuleStateSummary
+}
+
+export interface AlertRulePreviewRequest {
+  rule: AlertRuleInput
+  event_type: AlertEventType
+  channel_id: number
+}
+
+export interface AlertRuleTestSendRequest extends AlertRulePreviewRequest {
+  providers: string[]
+}
+
+export interface AlertRuleTestProviderResult {
+  provider: string
+  accepted: boolean
+  attempts: number
+  error?: string
+}
+
+export interface AlertRuleTestSendResult {
+  http_status: number
+  results: AlertRuleTestProviderResult[]
+  error?: string
 }
