@@ -189,6 +189,9 @@ func RefreshUpstreamChannel(ctx context.Context, id int) (*model.UpstreamChannel
 		content := fmt.Sprintf("Upstream %s (%s) balance %.4f is below the configured threshold %.4f.", row.BaseURL, snapshot.Provider, effectiveBalance, row.BalanceThreshold)
 		NotifyRootUser(dto.NotifyTypeUpstreamBalanceLow, subject, content)
 	}
+	if err = EvaluateUpstreamChannelAlertRules(ctx, row); err != nil {
+		common.SysError("failed to evaluate upstream channel alert rules: " + err.Error())
+	}
 	return row, snapshot, nil
 }
 
@@ -259,6 +262,11 @@ func runUpstreamChannelAutoRefreshOnce() {
 		return
 	}
 	defer upstreamChannelRefreshRunning.Store(false)
+	defer func() {
+		if err := EvaluateEnabledChannelCountAlertRules(context.Background()); err != nil {
+			logger.LogWarn(context.Background(), fmt.Sprintf("evaluate enabled channel count alert failed: %v", err))
+		}
+	}()
 
 	if _, _, err := DiscoverUpstreamChannels(); err != nil {
 		logger.LogWarn(context.Background(), fmt.Sprintf("upstream channel discovery failed: %v", err))

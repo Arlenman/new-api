@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -25,8 +26,17 @@ func DisableChannel(channelError types.ChannelError, reason string) {
 		return
 	}
 
+	previousEnabledCount, countErr := model.CountEnabledChannels()
 	success := model.UpdateChannelStatus(channelError.ChannelId, channelError.UsingKey, common.ChannelStatusAutoDisabled, reason)
 	if success {
+		if countErr != nil {
+			common.SysError("count enabled channels before automatic disable: " + countErr.Error())
+			if err := EvaluateEnabledChannelCountAlertRules(context.Background()); err != nil {
+				common.SysError("evaluate enabled channel count alert after automatic disable fallback: " + err.Error())
+			}
+		} else if err := EvaluateEnabledChannelCountAlertRulesAfterChannelDisable(context.Background(), previousEnabledCount); err != nil {
+			common.SysError("evaluate enabled channel count alert after automatic disable: " + err.Error())
+		}
 		subject := fmt.Sprintf("通道「%s」（#%d）已被禁用", channelError.ChannelName, channelError.ChannelId)
 		content := fmt.Sprintf("通道「%s」（#%d）已被禁用，原因：%s", channelError.ChannelName, channelError.ChannelId, reason)
 		NotifyRootUser(formatNotifyType(channelError.ChannelId, common.ChannelStatusAutoDisabled), subject, content)
@@ -36,6 +46,9 @@ func DisableChannel(channelError types.ChannelError, reason string) {
 func EnableChannel(channelId int, usingKey string, channelName string) {
 	success := model.UpdateChannelStatus(channelId, usingKey, common.ChannelStatusEnabled, "")
 	if success {
+		if err := EvaluateEnabledChannelCountAlertRules(context.Background()); err != nil {
+			common.SysError("evaluate enabled channel count alert after automatic enable: " + err.Error())
+		}
 		subject := fmt.Sprintf("通道「%s」（#%d）已被启用", channelName, channelId)
 		content := fmt.Sprintf("通道「%s」（#%d）已被启用", channelName, channelId)
 		NotifyRootUser(formatNotifyType(channelId, common.ChannelStatusEnabled), subject, content)

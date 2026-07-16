@@ -203,6 +203,9 @@ func importUpstreamChannelKeys(ctx context.Context, client *http.Client, upstrea
 	if len(upsertResult.ChannelIDs) > 0 {
 		model.InitChannelCache()
 		ResetProxyClientCache()
+		if evaluateErr := EvaluateEnabledChannelCountAlertRules(ctx); evaluateErr != nil {
+			common.SysError("evaluate enabled channel count alert after upstream key import: " + evaluateErr.Error())
+		}
 	}
 	if err = markImportedUpstreamKeys(row.BaseURL, &snapshot); err != nil {
 		return UpstreamKeyImportResult{}, err

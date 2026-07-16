@@ -22,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
+	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 )
@@ -594,9 +595,15 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 		channel, err := model.GetChannelById(midjourneyTask.ChannelId, true)
 		if err != nil {
 			common.SysLog("get_channel_null: " + err.Error())
-		}
-		if channel.GetAutoBan() && common.AutomaticDisableChannelEnabled {
-			model.UpdateChannelStatus(midjourneyTask.ChannelId, "", 2, "No available account instance")
+		} else if channel.GetAutoBan() && common.AutomaticDisableChannelEnabled {
+			service.DisableChannel(*types.NewChannelError(
+				channel.Id,
+				channel.Type,
+				channel.Name,
+				channel.ChannelInfo.IsMultiKey,
+				"",
+				channel.GetAutoBan(),
+			), "No available account instance")
 		}
 	}
 	if midjResponse.Code != 1 && midjResponse.Code != 21 && midjResponse.Code != 22 {

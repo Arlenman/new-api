@@ -1080,6 +1080,12 @@ func CountAllChannels() (int64, error) {
 	return total, err
 }
 
+func CountEnabledChannels() (int64, error) {
+	var total int64
+	err := DB.Model(&Channel{}).Where("status = ?", common.ChannelStatusEnabled).Count(&total).Error
+	return total, err
+}
+
 // CountAllTags returns number of non-empty distinct tags
 func CountAllTags() (int64, error) {
 	return CountChannelTags(DB.Model(&Channel{}))

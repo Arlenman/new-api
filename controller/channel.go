@@ -53,6 +53,23 @@ type OpenAIModelsResponse struct {
 	Success bool          `json:"success"`
 }
 
+func evaluateEnabledChannelCountAlertRules(ctx context.Context) {
+	if err := service.EvaluateEnabledChannelCountAlertRules(ctx); err != nil {
+		common.SysError("evaluate enabled channel count alert: " + err.Error())
+	}
+}
+
+func evaluateEnabledChannelCountAlertRulesAfterChannelDisable(ctx context.Context, previousEnabledCount int64, countErr error) {
+	if countErr != nil {
+		common.SysError("count enabled channels before disable: " + countErr.Error())
+		evaluateEnabledChannelCountAlertRules(ctx)
+		return
+	}
+	if err := service.EvaluateEnabledChannelCountAlertRulesAfterChannelDisable(ctx, previousEnabledCount); err != nil {
+		common.SysError("evaluate enabled channel count alert after disable: " + err.Error())
+	}
+}
+
 func parseStatusFilter(statusParam string) int {
 	switch strings.ToLower(statusParam) {
 	case "enabled", "1":
@@ -691,6 +708,7 @@ func AddChannel(c *gin.Context) {
 		return
 	}
 	service.ResetProxyClientCache()
+	evaluateEnabledChannelCountAlertRules(c.Request.Context())
 	recordManageAudit(c, "channel.create", map[string]interface{}{
 		"name":  addChannelRequest.Channel.Name,
 		"type":  addChannelRequest.Channel.Type,
@@ -716,6 +734,7 @@ func DeleteChannel(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	evaluateEnabledChannelCountAlertRules(c.Request.Context())
 	recordManageAudit(c, "channel.delete", map[string]interface{}{
 		"id":   id,
 		"name": channelName,
@@ -768,12 +787,14 @@ func DisableTagChannels(c *gin.Context) {
 		})
 		return
 	}
+	previousEnabledCount, countErr := model.CountEnabledChannels()
 	err = model.DisableChannelByTag(channelTag.Tag)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	model.InitChannelCache()
+	evaluateEnabledChannelCountAlertRulesAfterChannelDisable(c.Request.Context(), previousEnabledCount, countErr)
 	recordManageAudit(c, "channel.tag_disable", map[string]interface{}{
 		"tag": channelTag.Tag,
 	})
@@ -800,6 +821,7 @@ func EnableTagChannels(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	evaluateEnabledChannelCountAlertRules(c.Request.Context())
 	recordManageAudit(c, "channel.tag_enable", map[string]interface{}{
 		"tag": channelTag.Tag,
 	})
@@ -902,6 +924,7 @@ func DeleteChannelBatch(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	evaluateEnabledChannelCountAlertRules(c.Request.Context())
 	recordManageAudit(c, "channel.delete_batch", map[string]interface{}{
 		"count": len(channelBatch.Ids),
 	})
@@ -1115,10 +1138,20 @@ func UpdateChannelStatus(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
+	var previousEnabledCount int64
+	var countErr error
+	if req.Status == common.ChannelStatusManuallyDisabled {
+		previousEnabledCount, countErr = model.CountEnabledChannels()
+	}
 	changed := model.UpdateChannelStatus(id, "", req.Status, "manual operation")
 	if changed {
 		model.InitChannelCache()
 		service.ResetProxyClientCache()
+		if req.Status == common.ChannelStatusManuallyDisabled {
+			evaluateEnabledChannelCountAlertRulesAfterChannelDisable(c.Request.Context(), previousEnabledCount, countErr)
+		} else {
+			evaluateEnabledChannelCountAlertRules(c.Request.Context())
+		}
 	}
 	recordManageAudit(c, "channel.status_update", map[string]interface{}{
 		"id":      id,
@@ -1138,6 +1171,11 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
+	var previousEnabledCount int64
+	var countErr error
+	if req.Status == common.ChannelStatusManuallyDisabled {
+		previousEnabledCount, countErr = model.CountEnabledChannels()
+	}
 	changedCount := 0
 	for _, id := range req.Ids {
 		if model.UpdateChannelStatus(id, "", req.Status, "manual batch operation") {
@@ -1147,6 +1185,11 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 	if changedCount > 0 {
 		model.InitChannelCache()
 		service.ResetProxyClientCache()
+		if req.Status == common.ChannelStatusManuallyDisabled {
+			evaluateEnabledChannelCountAlertRulesAfterChannelDisable(c.Request.Context(), previousEnabledCount, countErr)
+		} else {
+			evaluateEnabledChannelCountAlertRules(c.Request.Context())
+		}
 	}
 	recordManageAudit(c, "channel.status_update_batch", map[string]interface{}{
 		"count":  changedCount,
@@ -1411,6 +1454,7 @@ func CopyChannel(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	evaluateEnabledChannelCountAlertRules(c.Request.Context())
 	recordManageAudit(c, "channel.copy", map[string]interface{}{
 		"sourceId": id,
 		"id":       clone.Id,
