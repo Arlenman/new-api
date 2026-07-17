@@ -194,6 +194,23 @@ func TestFetchSub2APIUpstreamSnapshot(t *testing.T) {
 	assert.Equal(t, 0.9, snapshot.Ratios["5"])
 }
 
+func TestApplyUpstreamGroupNamesUsesReadableName(t *testing.T) {
+	groupID := int64(27)
+	unknownGroupID := int64(99)
+	keys := []UpstreamKey{
+		{ID: 1, Group: "27", GroupID: &groupID},
+		{ID: 2, Group: "99", GroupID: &unknownGroupID},
+	}
+	groups := []UpstreamGroup{{ID: groupID, Name: " 云起 "}}
+
+	applyUpstreamGroupNames(keys, groups)
+
+	assert.Equal(t, "云起", keys[0].Group)
+	require.NotNil(t, keys[0].GroupID)
+	assert.Equal(t, groupID, *keys[0].GroupID)
+	assert.Equal(t, "99", keys[1].Group)
+}
+
 func TestDetectUpstreamProviderRequiresExplicitSub2APIEnvelope(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		require.Equal(t, "/api/v1/settings/public", r.URL.Path)

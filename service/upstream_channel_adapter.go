@@ -93,6 +93,24 @@ type UpstreamSnapshot struct {
 	RetrievedAt int64              `json:"retrieved_at"`
 }
 
+func applyUpstreamGroupNames(keys []UpstreamKey, groups []UpstreamGroup) {
+	groupNames := make(map[int64]string, len(groups))
+	for _, group := range groups {
+		name := strings.TrimSpace(group.Name)
+		if group.ID != 0 && name != "" {
+			groupNames[group.ID] = name
+		}
+	}
+	for i := range keys {
+		if keys[i].GroupID == nil {
+			continue
+		}
+		if name, ok := groupNames[*keys[i].GroupID]; ok {
+			keys[i].Group = name
+		}
+	}
+}
+
 type newAPIEnvelope struct {
 	Success bool            `json:"success"`
 	Message string          `json:"message"`
@@ -400,15 +418,7 @@ func fetchSub2APIUpstreamSnapshot(ctx context.Context, client *http.Client, base
 			groups[i].Ratio = ratio
 		}
 	}
-	groupNames := make(map[int64]string, len(groups))
-	for _, group := range groups {
-		groupNames[group.ID] = group.Name
-	}
-	for i := range keys {
-		if keys[i].GroupID != nil {
-			keys[i].Group = groupNames[*keys[i].GroupID]
-		}
-	}
+	applyUpstreamGroupNames(keys, groups)
 
 	return UpstreamSnapshot{
 		Provider: UpstreamProviderSub2API,

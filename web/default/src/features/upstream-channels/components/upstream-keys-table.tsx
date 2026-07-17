@@ -219,6 +219,7 @@ export function UpstreamKeysTable({
                     (key.group_id != null && group.id === key.group_id) ||
                     (!!keyGroup && group.name.trim() === keyGroup)
                 )
+                const groupName = ratioGroup?.name.trim() || keyGroup
                 const upstreamRatio =
                   snapshot.ratios[ratioKey] ?? ratioGroup?.ratio
                 const ratio =
@@ -248,7 +249,7 @@ export function UpstreamKeysTable({
                       {revealed || key.masked_key || '****'}
                     </TableCell>
                     <TableCell className='py-1'>
-                      {keyGroup || key.group_id || '-'}
+                      {groupName || key.group_id || '-'}
                     </TableCell>
                     <TableCell className='py-1'>
                       {typeof ratio === 'number'
