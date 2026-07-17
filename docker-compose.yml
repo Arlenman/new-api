@@ -37,7 +37,7 @@ services:
       - TZ=Asia/Shanghai
       - SESSION_SECRET=9ad5b7d2e69d43f8a6130bf8904f4c39a4f64ac64b0b4e31a7b92e62f76aab26
       - GODEBUG=http2client=0
-      - RELAY_TIMEOUT=60
+      - RELAY_TIMEOUT=600
       - ERROR_LOG_ENABLED=true # 是否启用错误日志记录 (Whether to enable error log recording)
       - BATCH_UPDATE_ENABLED=true  # 是否启用批量更新 (Whether to enable batch update)
       - NODE_NAME=new-api-node-1  # 节点名称，用于审计日志中标识节点身份；多节点/容器部署时建议设置 (Node name used in audit logs; recommended when running multiple instances or in containers)

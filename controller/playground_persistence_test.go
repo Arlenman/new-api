@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -119,6 +120,102 @@ func TestPlaygroundImageStreamResponseConvertsBase64ToFileURL(t *testing.T) {
 	content, err := os.ReadFile(files[0].AbsolutePath())
 	require.NoError(t, err)
 	require.Equal(t, []byte("final-image"), content)
+}
+
+func TestPlaygroundImageStreamResponseRejectsPartialOnlyStream(t *testing.T) {
+	rawStream := strings.Join([]string{
+		`event: image_generation.partial_image`,
+		`data: {"type":"image_generation.partial_image","b64_json":"` + base64.StdEncoding.EncodeToString([]byte("preview-image")) + `"}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	response, err := playgroundImageResponseFromStream([]byte(rawStream))
+
+	require.ErrorContains(t, err, "did not complete")
+	require.Empty(t, response.Data)
+}
+
+func TestPlaygroundImageStreamResponsePrefersStreamErrorOverPartialImage(t *testing.T) {
+	rawStream := strings.Join([]string{
+		`event: image_generation.partial_image`,
+		`data: {"type":"image_generation.partial_image","b64_json":"` + base64.StdEncoding.EncodeToString([]byte("preview-image")) + `"}`,
+		``,
+		`event: error`,
+		`data: {"type":"error","error":{"message":"upstream stream failed"}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	response, err := playgroundImageResponseFromStream([]byte(rawStream))
+
+	require.ErrorContains(t, err, "upstream stream failed")
+	require.Empty(t, response.Data)
+}
+
+func TestPersistPlaygroundImageTerminalStateRetriesUntilPendingMessageExists(t *testing.T) {
+	setupPlaygroundControllerTest(t)
+
+	const (
+		sessionID  = "session-delayed-pending"
+		messageKey = "assistant-delayed-pending"
+	)
+	_, err := model.UpsertPlaygroundSession(1, sessionID, "Image session", 1000, 1000)
+	require.NoError(t, err)
+
+	insertErr := make(chan error, 1)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		payload, marshalErr := common.Marshal(map[string]any{
+			"key":      messageKey,
+			"from":     "assistant",
+			"mode":     "image",
+			"status":   "loading",
+			"versions": []map[string]any{{"id": "assistant-version", "content": ""}},
+			"imageGeneration": map[string]any{
+				"status": "pending",
+				"prompt": "draw a cat",
+			},
+		})
+		if marshalErr != nil {
+			insertErr <- marshalErr
+			return
+		}
+		_, replaceErr := model.SavePlaygroundSessionMessages(1, sessionID, []model.JSONValue{payload})
+		insertErr <- replaceErr
+	}()
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/images/generations", nil)
+	persistPlaygroundImageTerminalState(
+		ctx,
+		1,
+		sessionID,
+		messageKey,
+		"complete",
+		playgroundImageTerminalStateComplete,
+		"![Generated image 1](/api/playground/files/file-1/content)",
+		2000,
+	)
+	require.NoError(t, <-insertErr)
+
+	var message model.PlaygroundMessage
+	require.NoError(t, model.DB.Where("user_id = ? AND session_id = ? AND message_key = ?", 1, sessionID, messageKey).First(&message).Error)
+	var payload struct {
+		Status          string `json:"status"`
+		ImageGeneration struct {
+			Status string `json:"status"`
+		} `json:"imageGeneration"`
+		Versions []struct {
+			Content string `json:"content"`
+		} `json:"versions"`
+	}
+	require.NoError(t, common.Unmarshal(message.Payload, &payload))
+	require.Equal(t, "complete", payload.Status)
+	require.Equal(t, "complete", payload.ImageGeneration.Status)
+	require.Contains(t, payload.Versions[0].Content, "/api/playground/files/file-1/content")
 }
 
 func TestWriteCapturedPlaygroundImageResponseUpdatesContentLengthAfterRewrite(t *testing.T) {

@@ -77,6 +77,80 @@ func TestShouldIncreaseRetryBudgetForPlaygroundImageGatewayTimeouts(t *testing.T
 	require.True(t, shouldIncreaseRelayRetryBudget(ctx, err))
 }
 
+func TestPlaygroundImageTransportFailureGetsLimitedRetryBudget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	origRetryRanges := operation_setting.AutomaticRetryStatusCodeRanges
+	origDisableRanges := operation_setting.AutomaticDisableStatusCodeRanges
+	t.Cleanup(func() {
+		operation_setting.AutomaticRetryStatusCodeRanges = origRetryRanges
+		operation_setting.AutomaticDisableStatusCodeRanges = origDisableRanges
+	})
+	operation_setting.AutomaticRetryStatusCodeRanges = nil
+	operation_setting.AutomaticDisableStatusCodeRanges = nil
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/images/generations", nil)
+	err := types.NewErrorWithStatusCode(errors.New("socks connect failed: EOF"), types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+
+	require.True(t, shouldIncreaseRelayRetryBudget(ctx, err))
+	require.True(t, shouldRetry(ctx, err, 1))
+}
+
+func TestPlaygroundImageTransportFailureRetryDoesNotAffectRegularRelay(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	origRetryRanges := operation_setting.AutomaticRetryStatusCodeRanges
+	origDisableRanges := operation_setting.AutomaticDisableStatusCodeRanges
+	t.Cleanup(func() {
+		operation_setting.AutomaticRetryStatusCodeRanges = origRetryRanges
+		operation_setting.AutomaticDisableStatusCodeRanges = origDisableRanges
+	})
+	operation_setting.AutomaticRetryStatusCodeRanges = nil
+	operation_setting.AutomaticDisableStatusCodeRanges = nil
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+	err := types.NewErrorWithStatusCode(errors.New("socks connect failed: EOF"), types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+
+	require.False(t, shouldIncreaseRelayRetryBudget(ctx, err))
+	require.False(t, shouldRetry(ctx, err, 1))
+}
+
+func TestPlaygroundImageTransportFailureDoesNotRetryAfterWritingOrWithSpecificChannel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	origRetryRanges := operation_setting.AutomaticRetryStatusCodeRanges
+	origDisableRanges := operation_setting.AutomaticDisableStatusCodeRanges
+	t.Cleanup(func() {
+		operation_setting.AutomaticRetryStatusCodeRanges = origRetryRanges
+		operation_setting.AutomaticDisableStatusCodeRanges = origDisableRanges
+	})
+	operation_setting.AutomaticRetryStatusCodeRanges = []operation_setting.StatusCodeRange{
+		{Start: http.StatusInternalServerError, End: http.StatusInternalServerError},
+	}
+	operation_setting.AutomaticDisableStatusCodeRanges = nil
+
+	err := types.NewErrorWithStatusCode(errors.New("socks connect failed: EOF"), types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+
+	newContext := func() *gin.Context {
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/images/edits", nil)
+		return ctx
+	}
+
+	writtenContext := newContext()
+	writtenContext.Writer.WriteHeaderNow()
+	require.False(t, shouldRetry(writtenContext, err, 1))
+
+	specificChannelContext := newContext()
+	specificChannelContext.Set("specific_channel_id", 123)
+	require.False(t, shouldRetry(specificChannelContext, err, 1))
+
+	tokenSpecificChannelContext := newContext()
+	common.SetContextKey(tokenSpecificChannelContext, constant.ContextKeyTokenSpecificChannelId, 123)
+	require.False(t, shouldRetry(tokenSpecificChannelContext, err, 1))
+}
+
 func TestShouldStopPlaygroundImageGatewayTimeoutRetryAfterSameChannelRetryLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())

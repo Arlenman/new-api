@@ -16,38 +16,37 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { loadSessions, saveSessions } from '../storage/storage'
 import {
   createPlaygroundSessionRemote,
   getPlaygroundSessions,
   savePlaygroundSessionMessages,
 } from '../../api'
+import { loadSessions, saveSessions } from '../storage/storage'
 import { createImageGenerationTaskManager } from './image-generation-task-manager'
 
 export const imageGenerationTaskManager = createImageGenerationTaskManager({
   getSessions: loadSessions,
   saveSessions,
-  saveSessionMessages: (sessionId, messages) => {
-    void savePlaygroundSessionMessages(sessionId, messages).catch(async () => {
+  saveSessionMessages: async (sessionId, messages) => {
+    try {
+      await savePlaygroundSessionMessages(sessionId, messages)
+    } catch (error) {
       const session = loadSessions()?.find((item) => item.id === sessionId)
       if (!session) {
-        return
+        throw error
       }
-      try {
-        await createPlaygroundSessionRemote(session)
-        await savePlaygroundSessionMessages(sessionId, messages)
-      } catch {
-        /* empty */
-      }
-    })
+      await createPlaygroundSessionRemote(session)
+      await savePlaygroundSessionMessages(sessionId, messages)
+    }
   },
   recoverImageMessage: async (sessionId, assistantMessageKey) => {
     const sessions = await getPlaygroundSessions()
     saveSessions(sessions)
     const session = sessions.find((item) => item.id === sessionId)
     return (
-      session?.messages.find((message) => message.key === assistantMessageKey) ??
-      null
+      session?.messages.find(
+        (message) => message.key === assistantMessageKey
+      ) ?? null
     )
   },
 })

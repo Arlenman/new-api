@@ -64,6 +64,300 @@ describe('image generation task manager', () => {
     )
   })
 
+  test('waits for the pending message to persist before requesting an image', async () => {
+    const session: PlaygroundSession = {
+      id: 'session-1',
+      title: 'Image session',
+      createdAt: 1000,
+      updatedAt: 1000,
+      messages: [
+        {
+          key: 'assistant-1',
+          from: MESSAGE_ROLES.ASSISTANT,
+          mode: 'image',
+          status: MESSAGE_STATUS.LOADING,
+          versions: [{ id: 'assistant-version', content: '' }],
+        },
+      ],
+    }
+    let resolvePendingPersistence: (() => void) | undefined
+    let requestCount = 0
+    const manager = createImageGenerationTaskManager({
+      id: () => 'task-1',
+      now: () => 2000,
+      getSessions: () => [session],
+      saveSessionMessages: () =>
+        new Promise<void>((resolve) => {
+          resolvePendingPersistence = resolve
+        }),
+      requestImage: async () => {
+        requestCount += 1
+        return { data: [{ url: 'https://example.com/cat.png' }] }
+      },
+    })
+
+    const task = manager.start({
+      sessionId: session.id,
+      assistantMessageKey: 'assistant-1',
+      prompt: 'cute cat',
+      model: 'gpt-image-1',
+      sessions: [session],
+      sessionMessages: session.messages,
+    })
+
+    await Promise.resolve()
+    assert.equal(requestCount, 0)
+
+    resolvePendingPersistence?.()
+    await task.done
+
+    assert.equal(requestCount, 1)
+  })
+
+  test('marks the image retryable without requesting it when pending persistence fails', async () => {
+    const session: PlaygroundSession = {
+      id: 'session-1',
+      title: 'Image session',
+      createdAt: 1000,
+      updatedAt: 1000,
+      messages: [
+        {
+          key: 'assistant-1',
+          from: MESSAGE_ROLES.ASSISTANT,
+          mode: 'image',
+          status: MESSAGE_STATUS.LOADING,
+          versions: [{ id: 'assistant-version', content: '' }],
+        },
+      ],
+    }
+    let currentSessions = [session]
+    let saveCount = 0
+    let requestCount = 0
+    const manager = createImageGenerationTaskManager({
+      id: () => 'task-1',
+      now: () => 2000,
+      getSessions: () => currentSessions,
+      saveSessions: (sessions) => {
+        currentSessions = sessions
+      },
+      saveSessionMessages: () => {
+        saveCount += 1
+        if (saveCount === 1) {
+          return Promise.reject(new Error('pending persistence failed'))
+        }
+        return Promise.resolve()
+      },
+      requestImage: async () => {
+        requestCount += 1
+        return { data: [{ url: 'https://example.com/cat.png' }] }
+      },
+    })
+
+    await manager.start({
+      sessionId: session.id,
+      assistantMessageKey: 'assistant-1',
+      prompt: 'cute cat',
+      model: 'gpt-image-1',
+      sessions: currentSessions,
+      sessionMessages: session.messages,
+    }).done
+
+    assert.equal(requestCount, 0)
+    assert.equal(
+      currentSessions[0].messages[0].imageGeneration?.status,
+      'retryable'
+    )
+  })
+
+  test('runs image generation independently across multiple sessions', async () => {
+    const firstSession: PlaygroundSession = {
+      id: 'session-1',
+      title: 'First image session',
+      createdAt: 1000,
+      updatedAt: 1000,
+      messages: [
+        {
+          key: 'assistant-1',
+          from: MESSAGE_ROLES.ASSISTANT,
+          mode: 'image',
+          status: MESSAGE_STATUS.LOADING,
+          versions: [{ id: 'assistant-version-1', content: '' }],
+        },
+      ],
+    }
+    const secondSession: PlaygroundSession = {
+      id: 'session-2',
+      title: 'Second image session',
+      createdAt: 3000,
+      updatedAt: 3000,
+      messages: [
+        {
+          key: 'assistant-2',
+          from: MESSAGE_ROLES.ASSISTANT,
+          mode: 'image',
+          status: MESSAGE_STATUS.LOADING,
+          versions: [{ id: 'assistant-version-2', content: '' }],
+        },
+      ],
+    }
+    let currentSessions = [firstSession]
+    let taskSequence = 0
+    const resolveRequests = new Map<
+      string,
+      (response: { data: Array<{ url: string }> }) => void
+    >()
+    const manager = createImageGenerationTaskManager({
+      id: () => `task-${++taskSequence}`,
+      now: () => 4000 + taskSequence,
+      getSessions: () => currentSessions,
+      saveSessions: (nextSessions) => {
+        currentSessions = nextSessions
+      },
+      requestImage: ({ payload }) =>
+        new Promise((resolve) => {
+          assert.ok(payload.session_id)
+          resolveRequests.set(payload.session_id, resolve)
+        }),
+    })
+
+    const firstTask = manager.start({
+      sessionId: firstSession.id,
+      assistantMessageKey: 'assistant-1',
+      prompt: 'first image',
+      model: 'gpt-image-1',
+      sessions: currentSessions,
+      sessionMessages: firstSession.messages,
+    })
+
+    currentSessions = [secondSession, ...currentSessions]
+    manager.setSessionsSnapshot(currentSessions)
+    const secondTask = manager.start({
+      sessionId: secondSession.id,
+      assistantMessageKey: 'assistant-2',
+      prompt: 'second image',
+      model: 'gpt-image-1',
+      sessions: currentSessions,
+      sessionMessages: secondSession.messages,
+    })
+
+    assert.deepEqual(manager.getSnapshot().activeSessionIds.sort(), [
+      'session-1',
+      'session-2',
+    ])
+
+    resolveRequests.get('session-2')?.({
+      data: [{ url: 'https://example.com/second.png' }],
+    })
+    await secondTask.done
+
+    assert.deepEqual(manager.getSnapshot().activeSessionIds, ['session-1'])
+    assert.match(
+      currentSessions.find((session) => session.id === 'session-2')?.messages[0]
+        .versions[0].content ?? '',
+      /second\.png/
+    )
+
+    resolveRequests.get('session-1')?.({
+      data: [{ url: 'https://example.com/first.png' }],
+    })
+    await firstTask.done
+
+    assert.equal(manager.getSnapshot().activeSessionIds.length, 0)
+    assert.equal(currentSessions.length, 2)
+    assert.match(
+      currentSessions.find((session) => session.id === 'session-1')?.messages[0]
+        .versions[0].content ?? '',
+      /first\.png/
+    )
+    assert.match(
+      currentSessions.find((session) => session.id === 'session-2')?.messages[0]
+        .versions[0].content ?? '',
+      /second\.png/
+    )
+  })
+
+  test('cancels image generation only for the selected session', async () => {
+    const sessions: PlaygroundSession[] = ['session-1', 'session-2'].map(
+      (sessionId, index) => ({
+        id: sessionId,
+        title: `Image session ${index + 1}`,
+        createdAt: 1000 + index,
+        updatedAt: 1000 + index,
+        messages: [
+          {
+            key: `assistant-${index + 1}`,
+            from: MESSAGE_ROLES.ASSISTANT,
+            mode: 'image',
+            status: MESSAGE_STATUS.LOADING,
+            versions: [{ id: `assistant-version-${index + 1}`, content: '' }],
+          },
+        ],
+      })
+    )
+    let currentSessions = sessions
+    let taskSequence = 0
+    const requestSignals = new Map<string, AbortSignal>()
+    const resolveRequests = new Map<
+      string,
+      (response: { data: Array<{ url: string }> }) => void
+    >()
+    const manager = createImageGenerationTaskManager({
+      id: () => `task-${++taskSequence}`,
+      now: () => 2000 + taskSequence,
+      getSessions: () => currentSessions,
+      saveSessions: (nextSessions) => {
+        currentSessions = nextSessions
+      },
+      requestImage: ({ payload, signal }) =>
+        new Promise((resolve) => {
+          assert.ok(payload.session_id)
+          requestSignals.set(payload.session_id, signal)
+          resolveRequests.set(payload.session_id, resolve)
+        }),
+    })
+
+    const firstTask = manager.start({
+      sessionId: 'session-1',
+      assistantMessageKey: 'assistant-1',
+      prompt: 'first image',
+      model: 'gpt-image-1',
+      sessions: currentSessions,
+      sessionMessages: sessions[0].messages,
+    })
+    const secondTask = manager.start({
+      sessionId: 'session-2',
+      assistantMessageKey: 'assistant-2',
+      prompt: 'second image',
+      model: 'gpt-image-1',
+      sessions: currentSessions,
+      sessionMessages: sessions[1].messages,
+    })
+
+    manager.cancelSession('session-1')
+    await firstTask.done
+
+    assert.equal(requestSignals.get('session-1')?.aborted, true)
+    assert.equal(requestSignals.get('session-2')?.aborted, false)
+    assert.equal(manager.hasActiveTaskForSession('session-1'), false)
+    assert.equal(manager.hasActiveTaskForSession('session-2'), true)
+
+    resolveRequests.get('session-2')?.({
+      data: [{ url: 'https://example.com/second.png' }],
+    })
+    await secondTask.done
+
+    assert.equal(
+      currentSessions.find((session) => session.id === 'session-1')?.messages[0]
+        .imageGeneration?.status,
+      'cancelled'
+    )
+    assert.equal(
+      currentSessions.find((session) => session.id === 'session-2')?.messages[0]
+        .imageGeneration?.status,
+      'complete'
+    )
+  })
+
   test('omits auto size and sends explicit image size', async () => {
     const session: PlaygroundSession = {
       id: 'session-1',

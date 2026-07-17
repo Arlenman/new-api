@@ -55,7 +55,10 @@ type ImageGenerationTaskManagerOptions = {
   now?: () => number
   getSessions?: () => PlaygroundSession[] | null
   saveSessions?: (sessions: PlaygroundSession[]) => void
-  saveSessionMessages?: (sessionId: string, messages: Message[]) => void
+  saveSessionMessages?: (
+    sessionId: string,
+    messages: Message[]
+  ) => void | Promise<void>
   requestImage?: RequestImage
   recoverImageMessage?: (
     sessionId: string,
@@ -81,6 +84,7 @@ export type StartImageGenerationTaskOptions = {
 
 export type ImageGenerationTaskSnapshot = {
   activeTaskIds: string[]
+  activeSessionIds: string[]
   sessions?: PlaygroundSession[]
 }
 
@@ -174,6 +178,9 @@ function getSnapshot(
 ): ImageGenerationTaskSnapshot {
   return {
     activeTaskIds: [...activeTasks.keys()],
+    activeSessionIds: [
+      ...new Set([...activeTasks.values()].map((task) => task.sessionId)),
+    ],
     sessions,
   }
 }
@@ -236,7 +243,7 @@ export function createImageGenerationTaskManager(
     messages: Message[],
     fallbackSessions?: PlaygroundSession[],
     timestamp: number = now()
-  ): PlaygroundSession[] {
+  ): { sessions: PlaygroundSession[]; persistence: Promise<void> | null } {
     const sessions = readSessions(fallbackSessions)
     const updatedSessions = updatePlaygroundSessionMessages(
       sessions,
@@ -246,10 +253,18 @@ export function createImageGenerationTaskManager(
     )
 
     persistSessions(updatedSessions)
-    persistSessionMessages(sessionId, messages)
+    let persistence: Promise<void> | null = null
+    try {
+      const persistenceResult = persistSessionMessages(sessionId, messages)
+      if (persistenceResult) {
+        persistence = Promise.resolve(persistenceResult)
+      }
+    } catch (error) {
+      persistence = Promise.reject(error)
+    }
     lastSessions = updatedSessions
     notify(updatedSessions)
-    return updatedSessions
+    return { sessions: updatedSessions, persistence }
   }
 
   function updateTargetMessage(
@@ -276,7 +291,16 @@ export function createImageGenerationTaskManager(
       updater
     )
 
-    return writeSessionMessages(task.sessionId, messages, sessions, now())
+    const writeResult = writeSessionMessages(
+      task.sessionId,
+      messages,
+      sessions,
+      now()
+    )
+    if (writeResult.persistence) {
+      void writeResult.persistence.catch(() => undefined)
+    }
+    return writeResult.sessions
   }
 
   function markTaskError(
@@ -410,7 +434,7 @@ export function createImageGenerationTaskManager(
       })
     )
 
-    writeSessionMessages(
+    const pendingWrite = writeSessionMessages(
       startOptions.sessionId,
       messagesWithTask,
       startOptions.sessions,
@@ -452,6 +476,14 @@ export function createImageGenerationTaskManager(
 
     const done = (async () => {
       try {
+        if (pendingWrite.persistence) {
+          await Promise.race([
+            pendingWrite.persistence,
+            timeoutPromise,
+            abortPromise,
+          ])
+        }
+
         const response = await Promise.race([
           requestImage({
             payload,
@@ -548,6 +580,18 @@ export function createImageGenerationTaskManager(
     activeTasks.forEach((task) => task.abortController.abort())
   }
 
+  function cancelSession(sessionId: string): void {
+    activeTasks.forEach((task) => {
+      if (task.sessionId === sessionId) {
+        task.abortController.abort()
+      }
+    })
+  }
+
+  function setSessionsSnapshot(sessions: PlaygroundSession[]): void {
+    lastSessions = sessions
+  }
+
   function subscribe(listener: ImageGenerationTaskListener): () => void {
     listeners.add(listener)
     return () => listeners.delete(listener)
@@ -557,8 +601,12 @@ export function createImageGenerationTaskManager(
     start,
     cancel,
     cancelAll,
+    cancelSession,
+    setSessionsSnapshot,
     subscribe,
     getSnapshot: () => getSnapshot(activeTasks),
     getActiveTaskCount: () => activeTasks.size,
+    hasActiveTaskForSession: (sessionId: string) =>
+      [...activeTasks.values()].some((task) => task.sessionId === sessionId),
   }
 }

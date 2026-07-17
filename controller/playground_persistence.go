@@ -15,19 +15,30 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 const (
-	playgroundSessionHeader              = "X-Playground-Session-Id"
-	playgroundMessageKeyHeader           = "X-Playground-Message-Key"
-	playgroundAsyncHeader                = "X-Playground-Async"
-	playgroundAsyncTimeout               = 10 * time.Minute
-	maxPlaygroundPersistenceRequestBytes = 128 * 1024 * 1024
+	playgroundSessionHeader               = "X-Playground-Session-Id"
+	playgroundMessageKeyHeader            = "X-Playground-Message-Key"
+	playgroundAsyncHeader                 = "X-Playground-Async"
+	playgroundAsyncTimeout                = 10 * time.Minute
+	maxPlaygroundPersistenceRequestBytes  = 128 * 1024 * 1024
+	playgroundImageTerminalUpdateAttempts = 5
+	playgroundImageTerminalUpdateInterval = 100 * time.Millisecond
+)
+
+type playgroundImageTerminalState string
+
+const (
+	playgroundImageTerminalStateComplete playgroundImageTerminalState = "complete"
+	playgroundImageTerminalStateFailed   playgroundImageTerminalState = "failed"
 )
 
 type playgroundImageCaptureWriter struct {
@@ -210,6 +221,64 @@ func clonePlaygroundAsyncRequest(request *http.Request, body []byte) (*http.Requ
 	return cloned, cancel
 }
 
+func persistPlaygroundImageTerminalState(
+	c *gin.Context,
+	userID int,
+	sessionID string,
+	messageKey string,
+	stage string,
+	state playgroundImageTerminalState,
+	value string,
+	completedAt int64,
+) {
+	var firstErr error
+	for attempt := 1; attempt <= playgroundImageTerminalUpdateAttempts; attempt++ {
+		var err error
+		switch state {
+		case playgroundImageTerminalStateComplete:
+			err = model.CompletePlaygroundImageMessage(userID, sessionID, messageKey, value, completedAt)
+		case playgroundImageTerminalStateFailed:
+			err = model.FailPlaygroundImageMessage(userID, sessionID, messageKey, value, completedAt)
+		default:
+			err = fmt.Errorf("unsupported playground image terminal state %q", state)
+		}
+
+		if err == nil {
+			if attempt > 1 {
+				logger.LogWarn(c, fmt.Sprintf(
+					"playground image terminal update recovered user_id=%d session_id=%q message_key=%q stage=%q state=%q attempt=%d first_error=%q",
+					userID,
+					sessionID,
+					messageKey,
+					stage,
+					state,
+					attempt,
+					firstErr,
+				))
+			}
+			return
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) || attempt == playgroundImageTerminalUpdateAttempts {
+			logger.LogError(c, fmt.Sprintf(
+				"playground image terminal update failed user_id=%d session_id=%q message_key=%q stage=%q state=%q attempt=%d error=%q first_error=%q",
+				userID,
+				sessionID,
+				messageKey,
+				stage,
+				state,
+				attempt,
+				err,
+				firstErr,
+			))
+			return
+		}
+		time.Sleep(playgroundImageTerminalUpdateInterval)
+	}
+}
+
 func runAsyncPlaygroundImage(c *gin.Context, userID int, sessionID string, messageKey string) {
 	writer, _ := c.Writer.(*playgroundImageCaptureWriter)
 	if writer == nil {
@@ -227,48 +296,48 @@ func runAsyncPlaygroundImage(c *gin.Context, userID int, sessionID string, messa
 		if strings.Contains(contentType, "text/event-stream") {
 			streamResponse, err := playgroundImageResponseFromStream(body)
 			if err != nil {
-				_ = model.FailPlaygroundImageMessage(userID, sessionID, messageKey, err.Error(), time.Now().UnixMilli())
+				persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "parse_stream", playgroundImageTerminalStateFailed, err.Error(), time.Now().UnixMilli())
 				return
 			}
 			rawResponse, err := common.Marshal(streamResponse)
 			if err != nil {
-				_ = model.FailPlaygroundImageMessage(userID, sessionID, messageKey, "invalid image stream response", time.Now().UnixMilli())
+				persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "marshal_stream", playgroundImageTerminalStateFailed, "invalid image stream response", time.Now().UnixMilli())
 				return
 			}
 			rewritten, err := rewritePlaygroundImageResponse(c, rawResponse)
 			if err != nil {
-				_ = model.FailPlaygroundImageMessage(userID, sessionID, messageKey, fmt.Sprintf("failed to persist playground image: %s", err.Error()), time.Now().UnixMilli())
+				persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "persist_stream_image", playgroundImageTerminalStateFailed, fmt.Sprintf("failed to persist playground image: %s", err.Error()), time.Now().UnixMilli())
 				return
 			}
 			if err := common.Unmarshal(rewritten, &response); err != nil {
-				_ = model.FailPlaygroundImageMessage(userID, sessionID, messageKey, "invalid image stream response", time.Now().UnixMilli())
+				persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "decode_stream_response", playgroundImageTerminalStateFailed, "invalid image stream response", time.Now().UnixMilli())
 				return
 			}
 		} else {
 			rewritten, err := rewritePlaygroundImageResponse(c, body)
 			if err != nil {
-				_ = model.FailPlaygroundImageMessage(userID, sessionID, messageKey, fmt.Sprintf("failed to persist playground image: %s", err.Error()), time.Now().UnixMilli())
+				persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "persist_image", playgroundImageTerminalStateFailed, fmt.Sprintf("failed to persist playground image: %s", err.Error()), time.Now().UnixMilli())
 				return
 			}
 			if err := common.Unmarshal(rewritten, &response); err != nil {
-				_ = model.FailPlaygroundImageMessage(userID, sessionID, messageKey, "invalid image response", time.Now().UnixMilli())
+				persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "decode_response", playgroundImageTerminalStateFailed, "invalid image response", time.Now().UnixMilli())
 				return
 			}
 		}
 		if len(response.Data) == 0 {
-			_ = model.FailPlaygroundImageMessage(userID, sessionID, messageKey, "empty image response", time.Now().UnixMilli())
+			persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "validate_image_data", playgroundImageTerminalStateFailed, "empty image response", time.Now().UnixMilli())
 			return
 		}
 		content := buildPlaygroundImageResponseContent(response)
 		if strings.TrimSpace(content) == "" {
-			_ = model.FailPlaygroundImageMessage(userID, sessionID, messageKey, "empty image response", time.Now().UnixMilli())
+			persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "build_image_content", playgroundImageTerminalStateFailed, "empty image response", time.Now().UnixMilli())
 			return
 		}
-		_ = model.CompletePlaygroundImageMessage(userID, sessionID, messageKey, content, time.Now().UnixMilli())
+		persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "complete", playgroundImageTerminalStateComplete, content, time.Now().UnixMilli())
 		return
 	}
 
-	_ = model.FailPlaygroundImageMessage(userID, sessionID, messageKey, playgroundImageErrorFromResponse(status, body), time.Now().UnixMilli())
+	persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "relay", playgroundImageTerminalStateFailed, playgroundImageErrorFromResponse(status, body), time.Now().UnixMilli())
 }
 
 func buildPlaygroundImageResponseContent(response dto.ImageResponse) string {
@@ -328,7 +397,7 @@ func playgroundImageResponseFromStream(body []byte) (dto.ImageResponse, error) {
 	events := playgroundImageStreamDataEvents(body)
 	response := dto.ImageResponse{}
 	completedImages := make([]dto.ImageData, 0)
-	fallbackImages := make([]dto.ImageData, 0)
+	hasPartialImage := false
 	streamError := ""
 
 	for _, event := range events {
@@ -374,19 +443,19 @@ func playgroundImageResponseFromStream(body []byte) (dto.ImageResponse, error) {
 		if isPlaygroundImageCompletedEvent(payload.Type) {
 			completedImages = append(completedImages, image)
 		} else {
-			fallbackImages = append(fallbackImages, image)
+			hasPartialImage = true
 		}
 	}
 
 	switch {
-	case len(completedImages) > 0:
-		response.Data = completedImages
-	case len(fallbackImages) > 0:
-		response.Data = []dto.ImageData{fallbackImages[len(fallbackImages)-1]}
 	case streamError != "":
 		return response, fmt.Errorf("%s", streamError)
+	case len(completedImages) > 0:
+		response.Data = completedImages
+	case hasPartialImage:
+		return response, errors.New("image stream did not complete")
 	default:
-		return response, fmt.Errorf("empty image stream response")
+		return response, errors.New("empty image stream response")
 	}
 
 	if response.Created == 0 {

@@ -419,6 +419,21 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
 		return false
 	}
+	if isPlaygroundImageTransportFailure(c, openaiErr) {
+		if retryTimes <= 0 {
+			return false
+		}
+		if c.Writer != nil && c.Writer.Written() {
+			return false
+		}
+		if _, ok := c.Get("specific_channel_id"); ok {
+			return false
+		}
+		if _, ok := c.Get(string(constant.ContextKeyTokenSpecificChannelId)); ok {
+			return false
+		}
+		return true
+	}
 	if types.IsChannelError(openaiErr) {
 		return true
 	}
@@ -460,6 +475,9 @@ func shouldIncreaseRelayRetryBudget(c *gin.Context, openaiErr *types.NewAPIError
 	if isPlaygroundImageGatewayTimeout(c, openaiErr.StatusCode) {
 		return true
 	}
+	if isPlaygroundImageTransportFailure(c, openaiErr) {
+		return true
+	}
 	return shouldRetryByAutomaticDisableStatusCode(openaiErr)
 }
 
@@ -487,6 +505,17 @@ func isPlaygroundImageGatewayTimeout(c *gin.Context, code int) bool {
 	if code != http.StatusGatewayTimeout && code != 524 {
 		return false
 	}
+	return isPlaygroundImageRequest(c)
+}
+
+func isPlaygroundImageTransportFailure(c *gin.Context, err *types.NewAPIError) bool {
+	if err == nil || err.GetErrorCode() != types.ErrorCodeDoRequestFailed {
+		return false
+	}
+	return isPlaygroundImageRequest(c)
+}
+
+func isPlaygroundImageRequest(c *gin.Context) bool {
 	if c == nil || c.Request == nil || c.Request.URL == nil {
 		return false
 	}
