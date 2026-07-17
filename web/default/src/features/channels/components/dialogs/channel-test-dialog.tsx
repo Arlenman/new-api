@@ -332,8 +332,8 @@ function ChannelTestDialogContent({
   const batchProgressToastIdRef = useRef<ReturnType<
     typeof toast.loading
   > | null>(null)
-  const [endpointType, setEndpointType] = useState('auto')
-  const [isStreamTest, setIsStreamTest] = useState(false)
+  const [endpointType, setEndpointType] = useState('openai-response')
+  const [isStreamTest, setIsStreamTest] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({})
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
@@ -399,8 +399,8 @@ function ChannelTestDialogContent({
 
   const resetState = useCallback(() => {
     batchStopRequestedRef.current = true
-    setEndpointType('auto')
-    setIsStreamTest(false)
+    setEndpointType('openai-response')
+    setIsStreamTest(true)
     setSearchTerm('')
     setTestResults({})
     setRowSelection({})
