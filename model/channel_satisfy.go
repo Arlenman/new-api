@@ -20,11 +20,11 @@ func CountEnabledChannelsForGroupModel(group string, modelName string, requestPa
 		return 0
 	}
 
-	channels := filterChannelsByRequestPath(group2model2channels[group][modelName], requestPath)
+	channels := filterChannelsByRequestPathAndModel(group2model2channels[group][modelName], requestPath, modelName)
 	if len(channels) == 0 {
 		normalized := ratio_setting.FormatMatchingModelName(modelName)
 		if normalized != "" && normalized != modelName {
-			channels = filterChannelsByRequestPath(group2model2channels[group][normalized], requestPath)
+			channels = filterChannelsByRequestPathAndModel(group2model2channels[group][normalized], requestPath, modelName)
 		}
 	}
 	return countUniqueChannelIDs(channels)
@@ -103,7 +103,7 @@ func countEnabledChannelsForGroupModelDB(group string, modelName string, request
 			return 0
 		}
 	}
-	abilities = filterAbilitiesByRequestPath(abilities, requestPath)
+	abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, modelName)
 	ids := make([]int, 0, len(abilities))
 	for _, ability := range abilities {
 		ids = append(ids, ability.ChannelId)
