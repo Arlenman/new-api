@@ -668,6 +668,20 @@ export function DetailsDialog(props: DetailsDialogProps) {
             <DetailRow label={t('Retry Chain')} value={channelChain} mono />
           )}
 
+          {props.isAdmin && adminInfo?.channel_auto_disable_triggered && (
+            <DetailRow
+              label={t('Auto disable')}
+              value={
+                <StatusBadge
+                  label={t('Yes')}
+                  variant='danger'
+                  size='sm'
+                  copyable={false}
+                />
+              }
+            />
+          )}
+
           {props.log.token_name && (
             <DetailRow label={t('Token')} value={props.log.token_name} mono />
           )}
