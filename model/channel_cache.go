@@ -111,22 +111,28 @@ func SyncChannelCache(frequency int) {
 	}
 }
 
-func GetRandomSatisfiedChannel(group string, model string, retry int, requestPath string) (*Channel, error) {
+func GetRandomSatisfiedChannel(group string, model string, retry int, requestPath string, excludedChannelIdSets ...map[int]struct{}) (*Channel, error) {
+	var excludedChannelIds map[int]struct{}
+	if len(excludedChannelIdSets) > 0 {
+		excludedChannelIds = excludedChannelIdSets[0]
+	}
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
-		return GetChannel(group, model, retry, requestPath)
+		return GetChannel(group, model, retry, requestPath, excludedChannelIds)
 	}
 
 	channelSyncLock.RLock()
 	defer channelSyncLock.RUnlock()
 
 	// First, try to find channels with the exact model name.
-	channels := filterChannelsByRequestPathAndModel(group2model2channels[group][model], requestPath, model)
+	channels := filterExcludedChannelIds(group2model2channels[group][model], excludedChannelIds)
+	channels = filterChannelsByRequestPathAndModel(channels, requestPath, model)
 
 	// If no channels found, try to find channels with the normalized model name.
 	if len(channels) == 0 {
 		normalizedModel := ratio_setting.FormatMatchingModelName(model)
-		channels = filterChannelsByRequestPathAndModel(group2model2channels[group][normalizedModel], requestPath, model)
+		channels = filterExcludedChannelIds(group2model2channels[group][normalizedModel], excludedChannelIds)
+		channels = filterChannelsByRequestPathAndModel(channels, requestPath, model)
 	}
 
 	if len(channels) == 0 {
@@ -206,6 +212,19 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	}
 	// return null if no channel is not found
 	return nil, errors.New("channel not found")
+}
+
+func filterExcludedChannelIds(channelIds []int, excludedChannelIds map[int]struct{}) []int {
+	if len(channelIds) == 0 || len(excludedChannelIds) == 0 {
+		return channelIds
+	}
+	filtered := make([]int, 0, len(channelIds))
+	for _, channelId := range channelIds {
+		if _, excluded := excludedChannelIds[channelId]; !excluded {
+			filtered = append(filtered, channelId)
+		}
+	}
+	return filtered
 }
 
 // filterChannelsByRequestPathAndModel restricts candidates by request path and

@@ -204,7 +204,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
-			newAPIError = channelErr
+			if isModelCapacityError(relayInfo.LastError) {
+				newAPIError = relayInfo.LastError
+			} else {
+				newAPIError = channelErr
+			}
 			break
 		}
 		if shouldStopPlaygroundImageGatewayTimeoutRetry(c, channel.Id, relayInfo.LastError, retryParam.GetRetry()) {
@@ -252,6 +256,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
+		if isModelCapacityError(newAPIError) {
+			excludedChannelIds, _ := common.GetContextKeyType[map[int]struct{}](c, constant.ContextKeyModelCapacityExcludedChannelIds)
+			if excludedChannelIds == nil {
+				excludedChannelIds = make(map[int]struct{})
+			}
+			excludedChannelIds[channel.Id] = struct{}{}
+			common.SetContextKey(c, constant.ContextKeyModelCapacityExcludedChannelIds, excludedChannelIds)
+		}
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
@@ -392,6 +404,18 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if openaiErr == nil {
 		return false
 	}
+	if isModelCapacityError(openaiErr) {
+		if retryTimes <= 0 {
+			return false
+		}
+		if _, ok := c.Get(string(constant.ContextKeyTokenSpecificChannelId)); ok {
+			return false
+		}
+		if c.Writer != nil && c.Writer.Written() {
+			return false
+		}
+		return true
+	}
 	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
 		return false
 	}
@@ -430,6 +454,9 @@ func shouldIncreaseRelayRetryBudget(c *gin.Context, openaiErr *types.NewAPIError
 	if openaiErr == nil {
 		return false
 	}
+	if isModelCapacityError(openaiErr) {
+		return true
+	}
 	if isPlaygroundImageGatewayTimeout(c, openaiErr.StatusCode) {
 		return true
 	}
@@ -440,10 +467,20 @@ func shouldAutoDisableChannel(c *gin.Context, err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
+	if isModelCapacityError(err) {
+		return false
+	}
 	if isPlaygroundImageGatewayTimeout(c, err.StatusCode) {
 		return false
 	}
 	return service.ShouldDisableChannel(err)
+}
+
+func isModelCapacityError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "selected model is at capacity. please try a different model.")
 }
 
 func isPlaygroundImageGatewayTimeout(c *gin.Context, code int) bool {

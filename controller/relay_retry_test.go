@@ -147,3 +147,84 @@ func TestShouldAutoDisableChannelSkipsPlaygroundImageGatewayTimeouts(t *testing.
 	err = types.NewErrorWithStatusCode(errors.New("cloudflare timeout"), types.ErrorCodeBadResponseStatusCode, 524)
 	require.True(t, shouldAutoDisableChannel(ctx, err))
 }
+
+func TestShouldRetryModelCapacityError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	origRetryRanges := operation_setting.AutomaticRetryStatusCodeRanges
+	origDisableRanges := operation_setting.AutomaticDisableStatusCodeRanges
+	t.Cleanup(func() {
+		operation_setting.AutomaticRetryStatusCodeRanges = origRetryRanges
+		operation_setting.AutomaticDisableStatusCodeRanges = origDisableRanges
+	})
+	operation_setting.AutomaticRetryStatusCodeRanges = nil
+	operation_setting.AutomaticDisableStatusCodeRanges = nil
+
+	newContext := func() *gin.Context {
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		return ctx
+	}
+	capacityErr := types.NewErrorWithStatusCode(
+		errors.New("upstream error: Selected model is at capacity. Please try a different model."),
+		types.ErrorCodeBadResponseBody,
+		http.StatusTooManyRequests,
+		types.ErrOptionWithSkipRetry(),
+	)
+
+	require.True(t, shouldRetry(newContext(), capacityErr, 1))
+	require.False(t, shouldRetry(newContext(), capacityErr, 0))
+
+	writtenContext := newContext()
+	writtenContext.Writer.WriteHeaderNow()
+	require.False(t, shouldRetry(writtenContext, capacityErr, 1))
+
+	specificChannelContext := newContext()
+	common.SetContextKey(specificChannelContext, constant.ContextKeyTokenSpecificChannelId, 123)
+	require.False(t, shouldRetry(specificChannelContext, capacityErr, 1))
+
+	affinityContext := newContext()
+	affinityContext.Set("channel_affinity_skip_retry_on_failure", true)
+	require.True(t, shouldRetry(affinityContext, capacityErr, 1))
+
+	nonCapacityErr := types.NewErrorWithStatusCode(
+		errors.New("upstream error: selected model is unavailable"),
+		types.ErrorCodeBadResponseBody,
+		http.StatusTooManyRequests,
+	)
+	require.False(t, shouldRetry(newContext(), nonCapacityErr, 1))
+}
+
+func TestShouldIncreaseRetryBudgetForModelCapacityError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	err := types.NewErrorWithStatusCode(
+		errors.New("Selected model is at capacity. Please try a different model."),
+		types.ErrorCodeBadResponseBody,
+		http.StatusTooManyRequests,
+	)
+	require.True(t, shouldIncreaseRelayRetryBudget(ctx, err))
+}
+
+func TestShouldAutoDisableChannelSkipsModelCapacityError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	origDisableEnabled := common.AutomaticDisableChannelEnabled
+	origDisableRanges := operation_setting.AutomaticDisableStatusCodeRanges
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled = origDisableEnabled
+		operation_setting.AutomaticDisableStatusCodeRanges = origDisableRanges
+	})
+	common.AutomaticDisableChannelEnabled = true
+	operation_setting.AutomaticDisableStatusCodeRanges = []operation_setting.StatusCodeRange{
+		{Start: http.StatusTooManyRequests, End: http.StatusTooManyRequests},
+	}
+
+	err := types.NewErrorWithStatusCode(
+		errors.New("Selected model is at capacity. Please try a different model."),
+		types.ErrorCodeBadResponseStatusCode,
+		http.StatusTooManyRequests,
+	)
+	require.False(t, shouldAutoDisableChannel(ctx, err))
+}

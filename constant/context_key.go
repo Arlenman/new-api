@@ -79,3 +79,5 @@ const (
 	// duplicate entries.
 	ContextKeyAuditLogged ContextKey = "audit_logged"
 )
+
+const ContextKeyModelCapacityExcludedChannelIds ContextKey = "model_capacity_excluded_channel_ids"
