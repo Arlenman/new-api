@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
@@ -18,7 +19,37 @@ import (
 
 type tokenRequest struct {
 	model.Token
-	Tags *[]string `json:"tags"`
+	Tags                    *[]string `json:"tags"`
+	QuotaResetEnabled       *bool     `json:"quota_reset_enabled"`
+	QuotaResetPeriod        *string   `json:"quota_reset_period"`
+	QuotaResetIntervalHours *int      `json:"quota_reset_interval_hours"`
+	QuotaResetAmount        *int      `json:"quota_reset_amount"`
+	QuotaResetCarryOver     *bool     `json:"quota_reset_carry_over"`
+}
+
+func (req tokenRequest) quotaResetConfig(existing *model.Token, creating bool) *model.TokenQuotaResetConfig {
+	patch := req.quotaResetConfigPatch()
+	if patch == nil {
+		return nil
+	}
+	config := patch.Resolve(existing)
+	if patch.CarryOver == nil && config.Enabled && creating {
+		config.CarryOver = true
+	}
+	return &config
+}
+
+func (req tokenRequest) quotaResetConfigPatch() *model.TokenQuotaResetConfigPatch {
+	if req.QuotaResetEnabled == nil && req.QuotaResetPeriod == nil && req.QuotaResetIntervalHours == nil && req.QuotaResetAmount == nil && req.QuotaResetCarryOver == nil {
+		return nil
+	}
+	return &model.TokenQuotaResetConfigPatch{
+		Enabled:       req.QuotaResetEnabled,
+		Period:        req.QuotaResetPeriod,
+		IntervalHours: req.QuotaResetIntervalHours,
+		Amount:        req.QuotaResetAmount,
+		CarryOver:     req.QuotaResetCarryOver,
+	}
 }
 
 type tokenResponse struct {
@@ -401,6 +432,12 @@ func AddToken(c *gin.Context) {
 		Group:              token.Group,
 		CrossGroupRetry:    token.CrossGroupRetry,
 	}
+	if config := req.quotaResetConfig(nil, true); config != nil {
+		if _, err := cleanToken.ApplyQuotaResetConfig(*config, time.Now()); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
 	err = cleanToken.InsertWithTags(req.Tags)
 	if err != nil {
 		common.ApiError(c, err)
@@ -466,6 +503,7 @@ func UpdateToken(c *gin.Context) {
 			return
 		}
 	}
+	var quotaResetPatch *model.TokenQuotaResetConfigPatch
 	if statusOnly != "" {
 		cleanToken.Status = token.Status
 	} else {
@@ -479,12 +517,13 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.AllowIps = token.AllowIps
 		cleanToken.Group = token.Group
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
+		quotaResetPatch = req.quotaResetConfigPatch()
 	}
 	var tags *[]string
 	if statusOnly == "" {
 		tags = req.Tags
 	}
-	err = cleanToken.UpdateWithTags(tags)
+	err = cleanToken.UpdateWithTags(tags, quotaResetPatch)
 	if err != nil {
 		common.ApiError(c, err)
 		return

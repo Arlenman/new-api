@@ -19,6 +19,10 @@ type BillingSettler interface {
 	// GetPreConsumedQuota 返回实际预扣的额度值（信任用户可能为 0）。
 	GetPreConsumedQuota() int
 
+	// GetChargedQuota 返回当前实际已扣额度。
+	// 结算补扣失败时保留预扣额度，避免日志和异步任务记录未实际扣除的额度。
+	GetChargedQuota() int
+
 	// Reserve 将预扣额度补到目标值；若目标值不高于当前预扣额度则不做任何事。
 	Reserve(targetQuota int) error
 }

@@ -22,6 +22,27 @@ import { z } from 'zod'
 // API Key Schema & Types
 // ============================================================================
 
+export const API_KEY_QUOTA_RESET_PERIODS = [
+  'hourly',
+  'daily',
+  'weekly',
+  'monthly',
+  'custom_hours',
+] as const
+
+export type ApiKeyQuotaResetPeriod =
+  (typeof API_KEY_QUOTA_RESET_PERIODS)[number]
+
+export const API_KEY_QUOTA_RESET_FORM_PERIODS = [
+  'daily',
+  'weekly',
+  'monthly',
+  'custom_hours',
+] as const
+
+export type ApiKeyQuotaResetFormPeriod =
+  (typeof API_KEY_QUOTA_RESET_FORM_PERIODS)[number]
+
 export const apiKeyIPSchema = z.object({
   ip: z.string(),
   country_code: z.string().optional(),
@@ -57,6 +78,20 @@ export const apiKeySchema = z.object({
   allow_ips: z.string().nullish().default(''),
   tags: z.array(z.string()).optional().default([]),
   ips: z.array(apiKeyIPSchema).optional(),
+  quota_reset_enabled: z.boolean().optional().default(false),
+  quota_reset_period: z
+    .preprocess(
+      (value) => (value === '' || value == null ? 'daily' : value),
+      z.enum(API_KEY_QUOTA_RESET_PERIODS)
+    )
+    .optional()
+    .default('daily'),
+  quota_reset_interval_hours: z.number().optional(),
+  quota_reset_amount: z.number().optional().default(0),
+  quota_reset_remaining: z.number().optional().default(0),
+  quota_reset_carry_over: z.boolean().optional().default(false),
+  quota_reset_last_time: z.number().optional().default(0),
+  quota_reset_next_time: z.number().optional().default(0),
 })
 
 export type ApiKey = z.infer<typeof apiKeySchema>
@@ -105,6 +140,11 @@ export interface ApiKeyFormData {
   group: string
   cross_group_retry: boolean
   tags: string[]
+  quota_reset_enabled: boolean
+  quota_reset_period: ApiKeyQuotaResetFormPeriod
+  quota_reset_interval_hours: number
+  quota_reset_amount: number
+  quota_reset_carry_over: boolean
 }
 
 export interface ApiKeyTag {

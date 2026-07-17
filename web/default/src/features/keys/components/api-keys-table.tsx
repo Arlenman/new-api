@@ -43,6 +43,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import { toIntlLocale } from '@/i18n/languages'
 import { formatQuota } from '@/lib/format'
 import { ROLE } from '@/lib/roles'
 import { cn } from '@/lib/utils'
@@ -55,7 +56,9 @@ import {
   API_KEY_STATUSES,
   ERROR_MESSAGES,
 } from '../constants'
+import { getApiKeyPeriodicQuotaView } from '../lib/api-key-quota-reset'
 import type { ApiKey } from '../types'
+import { ApiKeyTimestampCell } from './api-key-timestamp-cell'
 import { ApiKeyCell } from './api-keys-cells'
 import { useApiKeysColumns } from './api-keys-columns'
 import { useApiKeys } from './api-keys-provider'
@@ -100,12 +103,16 @@ function ApiKeysMobileSkeleton() {
 function ApiKeysMobileList({
   table,
   isLoading,
+  now,
 }: {
   table: TanstackTable<ApiKey>
   isLoading: boolean
+  now: number
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const rows = table.getRowModel().rows
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  const justNowLabel = t('Just now')
 
   if (isLoading) return <ApiKeysMobileSkeleton />
 
@@ -135,6 +142,7 @@ function ApiKeysMobileList({
         const apiKey = row.original
         const statusConfig = API_KEY_STATUSES[apiKey.status]
         const total = apiKey.used_quota + apiKey.remain_quota
+        const periodicQuota = getApiKeyPeriodicQuotaView(apiKey)
 
         return (
           <div
@@ -183,6 +191,43 @@ function ApiKeysMobileList({
                 </span>
               )}
             </div>
+
+            <div className='flex items-start justify-between gap-3 text-xs'>
+              <span className='text-muted-foreground'>
+                {t('Periodic Quota')}
+              </span>
+              {!periodicQuota.enabled ? (
+                <span className='font-medium'>{t('Not enabled')}</span>
+              ) : (
+                <div className='text-right'>
+                  <div className='font-medium tabular-nums'>
+                    {formatQuota(periodicQuota.remaining)}
+                    <span className='text-muted-foreground font-normal'>
+                      {' / '}
+                      {formatQuota(periodicQuota.amount)}
+                    </span>
+                  </div>
+                  <div className='text-muted-foreground text-[11px]'>
+                    {t(periodicQuota.cadenceLabel, periodicQuota.cadenceValues)}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {periodicQuota.enabled && (
+              <div className='flex items-center justify-between gap-3 text-xs'>
+                <span className='text-muted-foreground'>{t('Next reset')}</span>
+                <div className='max-w-[65%] min-w-0'>
+                  <ApiKeyTimestampCell
+                    timestamp={periodicQuota.nextTime}
+                    now={now}
+                    locale={locale}
+                    justNowLabel={justNowLabel}
+                    className='text-muted-foreground text-right'
+                  />
+                </div>
+              </div>
+            )}
           </div>
         )
       })}
@@ -421,7 +466,9 @@ export function ApiKeysTable() {
             </div>
           ) : undefined,
       }}
-      mobile={<ApiKeysMobileList table={table} isLoading={isLoading} />}
+      mobile={
+        <ApiKeysMobileList table={table} isLoading={isLoading} now={now} />
+      }
       getRowClassName={(row) =>
         isDisabledApiKeyRow(row.original) ? DISABLED_ROW_DESKTOP : undefined
       }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -12,23 +13,32 @@ import (
 )
 
 type Token struct {
-	Id                 int            `json:"id"`
-	UserId             int            `json:"user_id" gorm:"index"`
-	Key                string         `json:"key" gorm:"type:varchar(128);uniqueIndex"`
-	Status             int            `json:"status" gorm:"default:1"`
-	Name               string         `json:"name" gorm:"index" `
-	CreatedTime        int64          `json:"created_time" gorm:"bigint"`
-	AccessedTime       int64          `json:"accessed_time" gorm:"bigint"`
-	ExpiredTime        int64          `json:"expired_time" gorm:"bigint;default:-1"` // -1 means never expired
-	RemainQuota        int            `json:"remain_quota" gorm:"default:0"`
-	UnlimitedQuota     bool           `json:"unlimited_quota"`
-	ModelLimitsEnabled bool           `json:"model_limits_enabled"`
-	ModelLimits        string         `json:"model_limits" gorm:"type:text"`
-	AllowIps           *string        `json:"allow_ips" gorm:"default:''"`
-	UsedQuota          int            `json:"used_quota" gorm:"default:0"` // used quota
-	Group              string         `json:"group" gorm:"default:''"`
-	CrossGroupRetry    bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
-	DeletedAt          gorm.DeletedAt `gorm:"index"`
+	Id                      int            `json:"id"`
+	UserId                  int            `json:"user_id" gorm:"index"`
+	Key                     string         `json:"key" gorm:"type:varchar(128);uniqueIndex"`
+	Status                  int            `json:"status" gorm:"default:1"`
+	Name                    string         `json:"name" gorm:"index" `
+	CreatedTime             int64          `json:"created_time" gorm:"bigint"`
+	AccessedTime            int64          `json:"accessed_time" gorm:"bigint"`
+	ExpiredTime             int64          `json:"expired_time" gorm:"bigint;default:-1"` // -1 means never expired
+	RemainQuota             int            `json:"remain_quota" gorm:"default:0"`
+	UnlimitedQuota          bool           `json:"unlimited_quota"`
+	QuotaResetEnabled       bool           `json:"quota_reset_enabled" gorm:"index:idx_tokens_quota_reset_due,priority:1"`
+	QuotaResetPeriod        string         `json:"quota_reset_period" gorm:"type:varchar(16)"`
+	QuotaResetIntervalHours int            `json:"quota_reset_interval_hours"`
+	QuotaResetAmount        int            `json:"quota_reset_amount"`
+	QuotaResetRemaining     int            `json:"quota_reset_remaining"`
+	QuotaResetCarryOver     bool           `json:"quota_reset_carry_over"`
+	QuotaResetLastTime      int64          `json:"quota_reset_last_time" gorm:"bigint"`
+	QuotaResetNextTime      int64          `json:"quota_reset_next_time" gorm:"bigint;index:idx_tokens_quota_reset_due,priority:2"`
+	QuotaResetVersion       int64          `json:"-" gorm:"bigint"`
+	ModelLimitsEnabled      bool           `json:"model_limits_enabled"`
+	ModelLimits             string         `json:"model_limits" gorm:"type:text"`
+	AllowIps                *string        `json:"allow_ips" gorm:"default:''"`
+	UsedQuota               int            `json:"used_quota" gorm:"default:0"` // used quota
+	Group                   string         `json:"group" gorm:"default:''"`
+	CrossGroupRetry         bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
+	DeletedAt               gorm.DeletedAt `gorm:"index"`
 }
 
 func (token *Token) Clean() {
@@ -80,9 +90,13 @@ func (token *Token) GetIpLimits() []string {
 
 func GetAllUserTokens(userId int, startIdx int, num int) ([]*Token, error) {
 	var tokens []*Token
-	var err error
-	err = DB.Where("user_id = ?", userId).Order("id desc").Limit(num).Offset(startIdx).Find(&tokens).Error
-	return tokens, err
+	if err := DB.Where("user_id = ?", userId).Order("id desc").Limit(num).Offset(startIdx).Find(&tokens).Error; err != nil {
+		return nil, err
+	}
+	if err := resetDueTokenQuotaList(tokens); err != nil {
+		return nil, err
+	}
+	return tokens, nil
 }
 
 // sanitizeLikePattern 校验并清洗用户输入的 LIKE 搜索模式。
@@ -189,6 +203,9 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 		common.SysError("failed to search tokens: " + err.Error())
 		return nil, 0, errors.New("搜索令牌失败")
 	}
+	if err := resetDueTokenQuotaList(tokens); err != nil {
+		return nil, 0, err
+	}
 	return tokens, total, nil
 }
 
@@ -198,6 +215,12 @@ func ValidateUserToken(key string) (token *Token, err error) {
 	}
 	token, err = GetTokenByKey(key, false)
 	if err == nil {
+		if token.QuotaResetEnabled && token.QuotaResetNextTime > 0 && token.QuotaResetNextTime <= common.GetTimestamp() {
+			token, _, err = ResetTokenQuotaIfDue(token.Id, common.GetTimestamp())
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrDatabase, err)
+			}
+		}
 		if token.Status == common.TokenStatusExhausted ||
 			token.Status == common.TokenStatusExpired ||
 			token.Status != common.TokenStatusEnabled {
@@ -223,6 +246,9 @@ func ValidateUserToken(key string) (token *Token, err error) {
 			}
 			return token, ErrTokenInvalid
 		}
+		if token.QuotaResetEnabled && token.QuotaResetRemaining <= 0 {
+			return token, ErrTokenQuotaResetExhausted
+		}
 		return token, nil
 	}
 	common.SysLog("ValidateUserToken: failed to get token: " + err.Error())
@@ -239,7 +265,10 @@ func GetTokenByIds(id int, userId int) (*Token, error) {
 	token := Token{Id: id, UserId: userId}
 	var err error = nil
 	err = DB.First(&token, "id = ? and user_id = ?", id, userId).Error
-	return &token, err
+	if err != nil {
+		return &token, err
+	}
+	return resetDueTokenQuota(&token)
 }
 
 func GetTokenById(id int) (*Token, error) {
@@ -249,6 +278,13 @@ func GetTokenById(id int) (*Token, error) {
 	token := Token{Id: id}
 	var err error = nil
 	err = DB.First(&token, "id = ?", id).Error
+	if err == nil {
+		var refreshed *Token
+		refreshed, err = resetDueTokenQuota(&token)
+		if refreshed != nil {
+			token = *refreshed
+		}
+	}
 	if shouldUpdateRedis(true, err) {
 		gopool.Go(func() {
 			if err := cacheSetToken(token); err != nil {
@@ -272,14 +308,17 @@ func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
 	}()
 	if !fromDB && common.RedisEnabled {
 		// Try Redis first
-		token, err := cacheGetTokenByKey(key)
+		token, err = cacheGetTokenByKey(key)
 		if err == nil {
-			return token, nil
+			return resetDueTokenQuota(token)
 		}
 		// Don't return error - fall through to DB
 	}
 	fromDB = true
 	err = DB.Where(commonKeyCol+" = ?", key).First(&token).Error
+	if err == nil {
+		token, err = resetDueTokenQuota(token)
+	}
 	return token, err
 }
 
@@ -301,43 +340,59 @@ func (token *Token) InsertWithTags(tags *[]string) error {
 	})
 }
 
-// Update Make sure your token's fields is completed, because this will update non-zero values
-func (token *Token) Update() (err error) {
-	defer func() {
-		if shouldUpdateRedis(true, err) {
-			gopool.Go(func() {
-				err := cacheSetToken(*token)
-				if err != nil {
-					common.SysLog("failed to update token cache: " + err.Error())
-				}
-			})
-		}
-	}()
-	err = DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
-		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry").Updates(token).Error
-	return err
+// Update Make sure your token's fields is completed, because this will update non-zero values.
+// Periodic quota configuration and runtime state are preserved unless an explicit patch is supplied.
+func (token *Token) Update() error {
+	return token.UpdateWithTags(nil, nil)
 }
 
-func (token *Token) UpdateWithTags(tags *[]string) (err error) {
+func (token *Token) UpdateWithTags(tags *[]string, quotaResetPatch *TokenQuotaResetConfigPatch) (err error) {
 	defer func() {
 		if shouldUpdateRedis(true, err) {
-			gopool.Go(func() {
-				err := cacheSetToken(*token)
-				if err != nil {
-					common.SysLog("failed to update token cache: " + err.Error())
-				}
-			})
+			if cacheErr := cacheSetToken(*token); cacheErr != nil {
+				common.SysLog("failed to update token cache: " + cacheErr.Error())
+			}
 		}
 	}()
 	err = DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
-			"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry").Updates(token).Error; err != nil {
+		var current Token
+		if err := lockForUpdate(tx).Where("id = ?", token.Id).First(&current).Error; err != nil {
+			return err
+		}
+
+		current.RemainQuota = token.RemainQuota
+		current.UnlimitedQuota = token.UnlimitedQuota
+		if quotaResetPatch != nil {
+			if _, err := current.ApplyQuotaResetConfig(quotaResetPatch.Resolve(&current), time.Now()); err != nil {
+				return err
+			}
+		}
+
+		current.Name = token.Name
+		current.Status = token.Status
+		current.ExpiredTime = token.ExpiredTime
+		current.ModelLimitsEnabled = token.ModelLimitsEnabled
+		current.ModelLimits = token.ModelLimits
+		current.AllowIps = token.AllowIps
+		current.Group = token.Group
+		current.CrossGroupRetry = token.CrossGroupRetry
+		current.clampQuotaResetRemainingToTotal()
+
+		if err := tx.Model(&current).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
+			"quota_reset_enabled", "quota_reset_period", "quota_reset_interval_hours", "quota_reset_amount", "quota_reset_remaining",
+			"quota_reset_carry_over", "quota_reset_last_time", "quota_reset_next_time", "quota_reset_version",
+			"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry").Updates(&current).Error; err != nil {
 			return err
 		}
 		if tags == nil {
+			*token = current
 			return nil
 		}
-		return ReplaceTokenTagsTx(tx, token.UserId, token.Id, *tags)
+		if err := ReplaceTokenTagsTx(tx, current.UserId, current.Id, *tags); err != nil {
+			return err
+		}
+		*token = current
+		return nil
 	})
 	return err
 }
@@ -440,13 +495,20 @@ func IncreaseTokenQuota(tokenId int, key string, quota int) (err error) {
 }
 
 func increaseTokenQuota(id int, quota int) (err error) {
-	err = DB.Model(&Token{}).Where("id = ?", id).Updates(
-		map[string]interface{}{
-			"remain_quota":  gorm.Expr("remain_quota + ?", quota),
-			"used_quota":    gorm.Expr("used_quota - ?", quota),
-			"accessed_time": common.GetTimestamp(),
-		},
-	).Error
+	var token Token
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).Where("id = ?", id).First(&token).Error; err != nil {
+			return err
+		}
+		token.RemainQuota += quota
+		token.UsedQuota -= quota
+		token.AccessedTime = common.GetTimestamp()
+		token.clampQuotaResetRemainingToTotal()
+		return updateTokenQuotaRuntime(tx, &token)
+	})
+	if err == nil {
+		invalidateTokenCache(token.Key)
+	}
 	return err
 }
 

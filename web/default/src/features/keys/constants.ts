@@ -16,7 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type StatusBadgeProps } from '@/components/status-badge'
+import type { StatusBadgeProps } from '@/components/status-badge'
+
+import {
+  API_KEY_QUOTA_RESET_FORM_PERIODS,
+  type ApiKeyQuotaResetPeriod,
+} from './types'
 
 // ============================================================================
 // API Key Status Configuration
@@ -65,6 +70,51 @@ export const API_KEY_STATUS_OPTIONS = Object.values(API_KEY_STATUSES).map(
     value: String(config.value),
   })
 )
+
+// ============================================================================
+// Periodic Quota Reset Configuration
+// label values are i18n keys; use t(config.label) in components
+// ============================================================================
+
+export const API_KEY_QUOTA_RESET_PERIOD_OPTIONS: Record<
+  ApiKeyQuotaResetPeriod,
+  {
+    value: ApiKeyQuotaResetPeriod
+    label: string
+    cadenceLabel: string
+  }
+> = {
+  hourly: {
+    value: 'hourly',
+    label: 'Hourly',
+    cadenceLabel: 'Every hour',
+  },
+  daily: {
+    value: 'daily',
+    label: 'Daily',
+    cadenceLabel: 'Every day',
+  },
+  weekly: {
+    value: 'weekly',
+    label: 'Weekly',
+    cadenceLabel: 'Every week',
+  },
+  monthly: {
+    value: 'monthly',
+    label: 'Monthly',
+    cadenceLabel: 'Every month',
+  },
+  custom_hours: {
+    value: 'custom_hours',
+    label: 'Reset after a number of hours',
+    cadenceLabel: 'Every {{hours}} hours',
+  },
+}
+
+export const API_KEY_QUOTA_RESET_FORM_PERIOD_OPTIONS =
+  API_KEY_QUOTA_RESET_FORM_PERIODS.map(
+    (period) => API_KEY_QUOTA_RESET_PERIOD_OPTIONS[period]
+  )
 
 // ============================================================================
 // Default Values

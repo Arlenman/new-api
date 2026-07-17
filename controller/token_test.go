@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -763,4 +764,150 @@ func TestGetTokenIPLocationsRejectsNonRoot(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, recorder.Code)
 	response := decodeAPIResponse(t, recorder)
 	assert.False(t, response.Success)
+}
+
+func TestAddTokenInitializesPeriodicQuotaAndDefaultsCarryOver(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	body := map[string]any{
+		"name":                 "periodic-create",
+		"expired_time":         -1,
+		"remain_quota":         50,
+		"unlimited_quota":      false,
+		"model_limits_enabled": false,
+		"model_limits":         "",
+		"group":                "default",
+		"cross_group_retry":    false,
+		"quota_reset_enabled":  true,
+		"quota_reset_period":   model.TokenQuotaResetDaily,
+		"quota_reset_amount":   40,
+	}
+
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", body, 1)
+	AddToken(ctx)
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+
+	var token model.Token
+	require.NoError(t, db.First(&token, "name = ?", "periodic-create").Error)
+	assert.True(t, token.QuotaResetEnabled)
+	assert.Equal(t, model.TokenQuotaResetDaily, token.QuotaResetPeriod)
+	assert.Equal(t, 40, token.QuotaResetAmount)
+	assert.Equal(t, 40, token.QuotaResetRemaining)
+	assert.True(t, token.QuotaResetCarryOver)
+	assert.NotZero(t, token.QuotaResetLastTime)
+	assert.NotZero(t, token.QuotaResetNextTime)
+	assert.Equal(t, int64(1), token.QuotaResetVersion)
+}
+
+func TestAddTokenPersistsCustomHourQuotaResetInterval(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	body := map[string]any{
+		"name":                       "custom-hour-create",
+		"expired_time":               -1,
+		"remain_quota":               100,
+		"unlimited_quota":            false,
+		"model_limits_enabled":       false,
+		"model_limits":               "",
+		"group":                      "default",
+		"cross_group_retry":          false,
+		"quota_reset_enabled":        true,
+		"quota_reset_period":         model.TokenQuotaResetCustomHours,
+		"quota_reset_interval_hours": 6,
+		"quota_reset_amount":         40,
+	}
+
+	before := time.Now().Unix()
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", body, 1)
+	AddToken(ctx)
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+
+	var token model.Token
+	require.NoError(t, db.First(&token, "name = ?", "custom-hour-create").Error)
+	assert.Equal(t, model.TokenQuotaResetCustomHours, token.QuotaResetPeriod)
+	assert.Equal(t, 6, token.QuotaResetIntervalHours)
+	assert.GreaterOrEqual(t, token.QuotaResetNextTime, before+6*60*60)
+	assert.LessOrEqual(t, token.QuotaResetNextTime, time.Now().Unix()+6*60*60)
+}
+
+func TestUpdateTokenWithoutPeriodicFieldsPreservesExistingConfiguration(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 1, "periodic-existing", "periodic-existing-key")
+	token.UnlimitedQuota = false
+	token.RemainQuota = 100
+	token.QuotaResetEnabled = true
+	token.QuotaResetPeriod = model.TokenQuotaResetWeekly
+	token.QuotaResetAmount = 80
+	token.QuotaResetRemaining = 25
+	token.QuotaResetCarryOver = false
+	token.QuotaResetLastTime = time.Now().Add(-time.Hour).Unix()
+	token.QuotaResetNextTime = time.Now().Add(24 * time.Hour).Unix()
+	token.QuotaResetVersion = 7
+	require.NoError(t, db.Save(token).Error)
+
+	body := map[string]any{
+		"id":                   token.Id,
+		"name":                 "periodic-existing-updated",
+		"expired_time":         -1,
+		"remain_quota":         120,
+		"unlimited_quota":      false,
+		"model_limits_enabled": false,
+		"model_limits":         "",
+		"group":                "default",
+		"cross_group_retry":    false,
+	}
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+	UpdateToken(ctx)
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+
+	var stored model.Token
+	require.NoError(t, db.First(&stored, token.Id).Error)
+	assert.True(t, stored.QuotaResetEnabled)
+	assert.Equal(t, model.TokenQuotaResetWeekly, stored.QuotaResetPeriod)
+	assert.Equal(t, 80, stored.QuotaResetAmount)
+	assert.Equal(t, 25, stored.QuotaResetRemaining)
+	assert.False(t, stored.QuotaResetCarryOver)
+	assert.Equal(t, int64(7), stored.QuotaResetVersion)
+}
+
+func TestUpdateTokenSamePeriodicConfigurationDoesNotReplenishBalance(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 1, "periodic-same", "periodic-same-key")
+	token.UnlimitedQuota = false
+	token.RemainQuota = 100
+	token.QuotaResetEnabled = true
+	token.QuotaResetPeriod = model.TokenQuotaResetDaily
+	token.QuotaResetAmount = 80
+	token.QuotaResetRemaining = 15
+	token.QuotaResetCarryOver = true
+	token.QuotaResetLastTime = time.Now().Unix()
+	token.QuotaResetNextTime = time.Now().Add(24 * time.Hour).Unix()
+	token.QuotaResetVersion = 4
+	require.NoError(t, db.Save(token).Error)
+
+	body := map[string]any{
+		"id":                     token.Id,
+		"name":                   token.Name,
+		"expired_time":           -1,
+		"remain_quota":           100,
+		"unlimited_quota":        false,
+		"model_limits_enabled":   false,
+		"model_limits":           "",
+		"group":                  "default",
+		"cross_group_retry":      false,
+		"quota_reset_enabled":    true,
+		"quota_reset_period":     model.TokenQuotaResetDaily,
+		"quota_reset_amount":     80,
+		"quota_reset_carry_over": true,
+	}
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+	UpdateToken(ctx)
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+
+	var stored model.Token
+	require.NoError(t, db.First(&stored, token.Id).Error)
+	assert.Equal(t, 15, stored.QuotaResetRemaining)
+	assert.Equal(t, int64(4), stored.QuotaResetVersion)
 }

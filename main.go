@@ -129,6 +129,9 @@ func main() {
 	// Subscription quota reset task (daily/weekly/monthly/custom)
 	service.StartSubscriptionQuotaResetTask()
 
+	// API token periodic quota reset task (hourly/daily/weekly/monthly)
+	service.StartTokenQuotaResetTask()
+
 	// Root-only upstream channel balance and account snapshot refresh.
 	service.StartUpstreamChannelAutoRefreshTask()
 

@@ -22,7 +22,11 @@ import { z } from 'zod'
 import { parseQuotaFromDollars, quotaUnitsToDollars } from '@/lib/format'
 
 import { DEFAULT_GROUP } from '../constants'
-import { type ApiKeyFormData, type ApiKey } from '../types'
+import {
+  API_KEY_QUOTA_RESET_FORM_PERIODS,
+  type ApiKeyFormData,
+  type ApiKey,
+} from '../types'
 import { normalizeApiKeyTags } from './api-key-tags'
 
 // ============================================================================
@@ -36,6 +40,11 @@ export function getApiKeyFormSchema(t: TFunction) {
       remain_quota_dollars: z.number().optional(),
       expired_time: z.date().optional(),
       unlimited_quota: z.boolean(),
+      quota_reset_enabled: z.boolean(),
+      quota_reset_period: z.enum(API_KEY_QUOTA_RESET_FORM_PERIODS),
+      quota_reset_interval_hours: z.number().optional(),
+      quota_reset_amount_dollars: z.number().optional(),
+      quota_reset_carry_over: z.boolean(),
       model_limits: z.array(z.string()),
       allow_ips: z.string().optional(),
       group: z.string().optional(),
@@ -44,18 +53,41 @@ export function getApiKeyFormSchema(t: TFunction) {
       tokenCount: z.number().min(1).optional(),
     })
     .superRefine((data, ctx) => {
-      if (data.unlimited_quota) {
-        return
-      }
-
       if (
-        data.remain_quota_dollars === undefined ||
-        data.remain_quota_dollars < 0
+        !data.unlimited_quota &&
+        (data.remain_quota_dollars === undefined ||
+          data.remain_quota_dollars < 0)
       ) {
         ctx.addIssue({
           code: 'custom',
           path: ['remain_quota_dollars'],
           message: t('Quota must be zero or greater'),
+        })
+      }
+
+      if (
+        data.quota_reset_enabled &&
+        (data.quota_reset_amount_dollars === undefined ||
+          data.quota_reset_amount_dollars <= 0)
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['quota_reset_amount_dollars'],
+          message: t('Periodic quota must be greater than zero'),
+        })
+      }
+
+      if (
+        data.quota_reset_enabled &&
+        data.quota_reset_period === 'custom_hours' &&
+        (data.quota_reset_interval_hours === undefined ||
+          data.quota_reset_interval_hours <= 0 ||
+          !Number.isInteger(data.quota_reset_interval_hours))
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['quota_reset_interval_hours'],
+          message: t('Reset interval must be a positive whole number'),
         })
       }
     })
@@ -72,6 +104,11 @@ export const API_KEY_FORM_DEFAULT_VALUES: ApiKeyFormValues = {
   remain_quota_dollars: 10,
   expired_time: undefined,
   unlimited_quota: true,
+  quota_reset_enabled: false,
+  quota_reset_period: 'daily',
+  quota_reset_interval_hours: 24,
+  quota_reset_amount_dollars: 10,
+  quota_reset_carry_over: true,
   model_limits: [],
   allow_ips: '',
   group: DEFAULT_GROUP,
@@ -109,6 +146,16 @@ export function transformFormDataToPayload(
       ? Math.floor(data.expired_time.getTime() / 1000)
       : -1,
     unlimited_quota: data.unlimited_quota,
+    quota_reset_enabled: data.quota_reset_enabled,
+    quota_reset_period: data.quota_reset_period,
+    quota_reset_interval_hours:
+      data.quota_reset_period === 'custom_hours'
+        ? (data.quota_reset_interval_hours ?? 0)
+        : 0,
+    quota_reset_amount: parseQuotaFromDollars(
+      data.quota_reset_amount_dollars ?? 0
+    ),
+    quota_reset_carry_over: data.quota_reset_carry_over,
     model_limits_enabled: data.model_limits.length > 0,
     model_limits: data.model_limits.join(','),
     allow_ips: data.allow_ips || '',
@@ -124,6 +171,16 @@ export function transformFormDataToPayload(
 export function transformApiKeyToFormDefaults(
   apiKey: ApiKey
 ): ApiKeyFormValues {
+  const defaultQuotaResetIntervalHours =
+    API_KEY_FORM_DEFAULT_VALUES.quota_reset_interval_hours ?? 24
+  let quotaResetIntervalHours =
+    apiKey.quota_reset_interval_hours ?? defaultQuotaResetIntervalHours
+  if (apiKey.quota_reset_period === 'hourly') {
+    quotaResetIntervalHours = 1
+  } else if (quotaResetIntervalHours <= 0) {
+    quotaResetIntervalHours = defaultQuotaResetIntervalHours
+  }
+
   return {
     name: apiKey.name,
     remain_quota_dollars: apiKey.unlimited_quota
@@ -134,6 +191,18 @@ export function transformApiKeyToFormDefaults(
         ? new Date(apiKey.expired_time * 1000)
         : undefined,
     unlimited_quota: apiKey.unlimited_quota,
+    quota_reset_enabled: apiKey.quota_reset_enabled,
+    quota_reset_period:
+      apiKey.quota_reset_period === 'hourly'
+        ? 'custom_hours'
+        : apiKey.quota_reset_period || 'daily',
+    quota_reset_interval_hours: quotaResetIntervalHours,
+    quota_reset_amount_dollars:
+      apiKey.quota_reset_amount > 0
+        ? quotaUnitsToDollars(apiKey.quota_reset_amount)
+        : API_KEY_FORM_DEFAULT_VALUES.quota_reset_amount_dollars,
+    quota_reset_carry_over:
+      apiKey.quota_reset_amount > 0 ? apiKey.quota_reset_carry_over : true,
     model_limits: apiKey.model_limits
       ? apiKey.model_limits.split(',').filter(Boolean)
       : [],

@@ -103,6 +103,12 @@ export const STATIC_I18N_KEYS = [
   'Successfully created {{count}} API Key(s)',
   'Successfully deleted {{count}} API key(s)',
   'Enter API key for this channel',
+  'Reset after a number of hours',
+  'Every {{hours}} hours',
+  'Reset {{amount}} {{currency}} every day at 00:00',
+  'Reset {{amount}} {{currency}} every Monday at 00:00',
+  'Reset {{amount}} {{currency}} on the first day of every month at 00:00',
+  'Starting now, reset {{amount}} {{currency}} every {{hours}} hours',
 
   // Users
   'Root',

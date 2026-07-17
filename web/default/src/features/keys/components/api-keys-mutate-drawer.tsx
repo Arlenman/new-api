@@ -18,7 +18,13 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery } from '@tanstack/react-query'
-import { ChevronDown, KeyRound, Settings2, WalletCards } from 'lucide-react'
+import {
+  ChevronDown,
+  Clock3,
+  KeyRound,
+  Settings2,
+  WalletCards,
+} from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useForm, type SubmitErrorHandler } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -35,6 +41,7 @@ import {
   sideDrawerSwitchItemClassName,
 } from '@/components/drawer-layout'
 import { MultiSelect } from '@/components/multi-select'
+import { TagInput } from '@/components/tag-input'
 import { Button } from '@/components/ui/button'
 import {
   Collapsible,
@@ -52,6 +59,19 @@ import {
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+} from '@/components/ui/input-group'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   Sheet,
   SheetClose,
   SheetContent,
@@ -62,15 +82,19 @@ import {
 } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { TagInput } from '@/components/tag-input'
 import { useStatus } from '@/hooks/use-status'
 import { getUserModels, getUserGroups } from '@/lib/api'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { cn } from '@/lib/utils'
 
 import { createApiKey, updateApiKey, getApiKey } from '../api'
-import { ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
 import {
+  API_KEY_QUOTA_RESET_FORM_PERIOD_OPTIONS,
+  ERROR_MESSAGES,
+  SUCCESS_MESSAGES,
+} from '../constants'
+import {
+  getApiKeyQuotaResetDescription,
   getApiKeyFormSchema,
   type ApiKeyFormValues,
   getApiKeyFormDefaultValues,
@@ -248,8 +272,24 @@ export function ApiKeysMutateDrawer({
   const quotaPlaceholder = tokensOnly
     ? t('Enter quota in tokens')
     : t('Enter quota in {{currency}}', { currency: currencyLabel })
+  const resetQuotaLabel = tokensOnly
+    ? t('Reset Quota')
+    : t('Reset Quota ({{currency}})', { currency: currencyLabel })
+  const resetQuotaPlaceholder = tokensOnly
+    ? t('Enter reset quota in tokens')
+    : t('Enter reset quota in {{currency}}', { currency: currencyLabel })
   const selectedGroup = form.watch('group')
   const unlimitedQuota = form.watch('unlimited_quota')
+  const quotaResetEnabled = form.watch('quota_reset_enabled')
+  const quotaResetPeriod = form.watch('quota_reset_period')
+  const quotaResetIntervalHours = form.watch('quota_reset_interval_hours') ?? 0
+  const quotaResetAmount = form.watch('quota_reset_amount_dollars') ?? 0
+  const quotaResetDescription = getApiKeyQuotaResetDescription({
+    period: quotaResetPeriod,
+    intervalHours: quotaResetIntervalHours,
+    amount: quotaResetAmount,
+    currency: currencyLabel,
+  })
 
   return (
     <Sheet
@@ -521,6 +561,198 @@ export function ApiKeysMutateDrawer({
                   </FormItem>
                 )}
               />
+
+              <div className='border-border/70 border-t pt-4'>
+                <FormField
+                  control={form.control}
+                  name='quota_reset_enabled'
+                  render={({ field }) => (
+                    <FormItem className={sideDrawerSwitchItemClassName()}>
+                      <div className='flex flex-col gap-0.5'>
+                        <FormLabel className='text-sm'>
+                          {t('Periodic Quota Reset')}
+                        </FormLabel>
+                        <FormDescription className='text-xs'>
+                          {t(
+                            "Automatically replenish this API key's periodic quota"
+                          )}
+                        </FormDescription>
+                      </div>
+                      <FormControl>
+                        <Switch
+                          checked={field.value}
+                          onCheckedChange={field.onChange}
+                        />
+                      </FormControl>
+                    </FormItem>
+                  )}
+                />
+              </div>
+
+              {quotaResetEnabled && (
+                <div className='bg-muted/20 space-y-5 rounded-xl border p-4 sm:p-5'>
+                  <FormField
+                    control={form.control}
+                    name='quota_reset_period'
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{t('Reset Period')}</FormLabel>
+                        <Select
+                          items={API_KEY_QUOTA_RESET_FORM_PERIOD_OPTIONS.map(
+                            (option) => ({
+                              value: option.value,
+                              label: t(option.label),
+                            })
+                          )}
+                          value={field.value}
+                          onValueChange={field.onChange}
+                        >
+                          <FormControl>
+                            <SelectTrigger className='h-10 w-full'>
+                              <SelectValue />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent alignItemWithTrigger={false}>
+                            <SelectGroup>
+                              {API_KEY_QUOTA_RESET_FORM_PERIOD_OPTIONS.map(
+                                (option) => (
+                                  <SelectItem
+                                    key={option.value}
+                                    value={option.value}
+                                  >
+                                    {t(option.label)}
+                                  </SelectItem>
+                                )
+                              )}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <div className='grid gap-4 sm:grid-cols-2'>
+                    {quotaResetPeriod === 'custom_hours' && (
+                      <FormField
+                        control={form.control}
+                        name='quota_reset_interval_hours'
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>{t('Reset Interval')}</FormLabel>
+                            <FormControl>
+                              <InputGroup className='bg-background h-10'>
+                                <InputGroupInput
+                                  {...field}
+                                  type='number'
+                                  min={1}
+                                  step={1}
+                                  inputMode='numeric'
+                                  className='h-10 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none'
+                                  onChange={(event) => {
+                                    const value = event.target.value
+                                    field.onChange(
+                                      value === ''
+                                        ? undefined
+                                        : Number.parseFloat(value)
+                                    )
+                                  }}
+                                />
+                                <InputGroupAddon
+                                  align='inline-end'
+                                  className='bg-muted/50 h-full border-l px-3'
+                                >
+                                  {t('hours')}
+                                </InputGroupAddon>
+                              </InputGroup>
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    )}
+
+                    <FormField
+                      control={form.control}
+                      name='quota_reset_amount_dollars'
+                      render={({ field }) => (
+                        <FormItem
+                          className={cn(
+                            quotaResetPeriod !== 'custom_hours' &&
+                              'sm:col-span-2'
+                          )}
+                        >
+                          <FormLabel>{resetQuotaLabel}</FormLabel>
+                          <FormControl>
+                            <Input
+                              {...field}
+                              type='number'
+                              min={tokensOnly ? 1 : 0.01}
+                              step={tokensOnly ? 1 : 0.01}
+                              placeholder={resetQuotaPlaceholder}
+                              className='bg-background h-10 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none'
+                              onChange={(event) => {
+                                const value = event.target.value
+                                field.onChange(
+                                  value === ''
+                                    ? undefined
+                                    : Number.parseFloat(value)
+                                )
+                              }}
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+
+                  <div className='border-primary/20 bg-primary/5 flex gap-3 rounded-lg border p-3'>
+                    <div className='bg-primary/10 text-primary flex size-8 shrink-0 items-center justify-center rounded-full'>
+                      <Clock3 className='size-4' aria-hidden='true' />
+                    </div>
+                    <div className='min-w-0 space-y-0.5'>
+                      <p className='text-sm font-medium'>
+                        {t('Reset Schedule')}
+                      </p>
+                      <p className='text-muted-foreground text-sm leading-5'>
+                        {t(
+                          quotaResetDescription.key,
+                          quotaResetDescription.values
+                        )}
+                      </p>
+                    </div>
+                  </div>
+
+                  <FormField
+                    control={form.control}
+                    name='quota_reset_carry_over'
+                    render={({ field }) => (
+                      <FormItem
+                        className={cn(
+                          sideDrawerSwitchItemClassName(),
+                          'border-border/70 border-t pt-4'
+                        )}
+                      >
+                        <div className='flex flex-col gap-0.5'>
+                          <FormLabel className='text-sm'>
+                            {t('Carry Over Unused Quota')}
+                          </FormLabel>
+                          <FormDescription className='text-xs'>
+                            {t('Add unused quota to the next period')}
+                          </FormDescription>
+                        </div>
+                        <FormControl>
+                          <Switch
+                            checked={field.value}
+                            onCheckedChange={field.onChange}
+                          />
+                        </FormControl>
+                      </FormItem>
+                    )}
+                  />
+                </div>
+              )}
             </SideDrawerSection>
 
             <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>

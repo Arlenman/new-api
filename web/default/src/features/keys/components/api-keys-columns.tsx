@@ -37,6 +37,7 @@ import { formatQuota } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 import { API_KEY_STATUSES } from '../constants'
+import { getApiKeyPeriodicQuotaView } from '../lib/api-key-quota-reset'
 import type { ApiKey } from '../types'
 import { ApiKeyTimestampCell } from './api-key-timestamp-cell'
 import {
@@ -201,6 +202,56 @@ export function useApiKeysColumns(
         )
       },
       size: 170,
+    },
+    {
+      id: 'periodic_quota',
+      accessorKey: 'quota_reset_remaining',
+      header: t('Periodic Quota'),
+      cell: ({ row }) => {
+        const apiKey = row.original
+        const periodicQuota = getApiKeyPeriodicQuotaView(apiKey)
+        if (!periodicQuota.enabled) {
+          return (
+            <StatusBadge
+              label={t('Not enabled')}
+              variant='neutral'
+              copyable={false}
+              className='-ml-1.5'
+            />
+          )
+        }
+
+        return (
+          <div className='w-[180px] space-y-1'>
+            <div className='font-medium tabular-nums'>
+              {formatQuota(periodicQuota.remaining)}
+              <span className='text-muted-foreground font-normal'>
+                {' / '}
+                {formatQuota(periodicQuota.amount)}
+              </span>
+            </div>
+            <div className='text-muted-foreground text-[11px]'>
+              {t(periodicQuota.cadenceLabel, periodicQuota.cadenceValues)}
+            </div>
+            <div className='flex min-w-0 items-center gap-1 text-[11px]'>
+              <span className='text-muted-foreground shrink-0'>
+                {t('Next reset')}:
+              </span>
+              <div className='min-w-0 flex-1'>
+                <ApiKeyTimestampCell
+                  timestamp={periodicQuota.nextTime}
+                  now={now}
+                  locale={locale}
+                  justNowLabel={justNowLabel}
+                  className='text-muted-foreground'
+                />
+              </div>
+            </div>
+          </div>
+        )
+      },
+      size: 200,
+      meta: { mobileHidden: true },
     },
     {
       accessorKey: 'group',

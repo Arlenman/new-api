@@ -53,6 +53,7 @@ const (
 	MsgTokenNotProvided          = "token.not_provided"
 	MsgTokenExpired              = "token.expired"
 	MsgTokenExhausted            = "token.exhausted"
+	MsgTokenQuotaResetExhausted  = "token.quota_reset_exhausted"
 	MsgTokenStatusUnavailable    = "token.status_unavailable"
 	MsgTokenDbError              = "token.db_error"
 )

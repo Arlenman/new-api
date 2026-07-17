@@ -101,11 +101,12 @@ type TaskPrivateData struct {
 	UpstreamTaskID string `json:"upstream_task_id,omitempty"` // 上游真实 task ID
 	ResultURL      string `json:"result_url,omitempty"`       // 任务成功后的结果 URL（视频地址等）
 	// 计费上下文：用于异步退款/差额结算（轮询阶段读取）
-	BillingSource  string              `json:"billing_source,omitempty"`  // "wallet" 或 "subscription"
-	SubscriptionId int                 `json:"subscription_id,omitempty"` // 订阅 ID，用于订阅退款
-	TokenId        int                 `json:"token_id,omitempty"`        // 令牌 ID，用于令牌额度退款
-	NodeName       string              `json:"node_name,omitempty"`       // 发起任务的节点名，轮询结算阶段据此归属日志而非最后查询节点
-	BillingContext *TaskBillingContext `json:"billing_context,omitempty"` // 计费参数快照（用于轮询阶段重新计算）
+	BillingSource     string              `json:"billing_source,omitempty"`      // "wallet" 或 "subscription"
+	SubscriptionId    int                 `json:"subscription_id,omitempty"`     // 订阅 ID，用于订阅退款
+	TokenId           int                 `json:"token_id,omitempty"`            // 令牌 ID，用于令牌额度退款
+	NodeName          string              `json:"node_name,omitempty"`           // 发起任务的节点名，轮询结算阶段据此归属日志而非最后查询节点
+	BillingContext    *TaskBillingContext `json:"billing_context,omitempty"`     // 计费参数快照（用于轮询阶段重新计算）
+	TokenQuotaCharges []TokenQuotaCharge  `json:"token_quota_charges,omitempty"` // 令牌预扣凭据（用于安全退款与差额结算）
 }
 
 // TaskBillingContext 记录任务提交时的计费参数，以便轮询阶段可以重新计算额度。
@@ -151,7 +152,9 @@ func (p *TaskPrivateData) Scan(val interface{}) error {
 }
 
 func (p TaskPrivateData) Value() (driver.Value, error) {
-	if (p == TaskPrivateData{}) {
+	if p.Key == "" && p.UpstreamTaskID == "" && p.ResultURL == "" &&
+		p.BillingSource == "" && p.SubscriptionId == 0 && p.TokenId == 0 &&
+		p.NodeName == "" && p.BillingContext == nil && len(p.TokenQuotaCharges) == 0 {
 		return nil, nil
 	}
 	return common.Marshal(p)
@@ -423,6 +426,10 @@ func (Task *Task) Update() error {
 
 func (t *Task) UpdateQuota() error {
 	return DB.Model(t).Update("quota", t.Quota).Error
+}
+
+func (t *Task) UpdateBillingState() error {
+	return DB.Model(t).Select("quota", "private_data").Updates(t).Error
 }
 
 // UpdateWithStatus performs a conditional UPDATE guarded by fromStatus (CAS).

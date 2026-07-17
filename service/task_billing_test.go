@@ -263,6 +263,13 @@ func getTokenUsedQuota(t *testing.T, id int) int {
 	return token.UsedQuota
 }
 
+func getTokenQuotaResetRemaining(t *testing.T, id int) int {
+	t.Helper()
+	var token model.Token
+	require.NoError(t, model.DB.Select("quota_reset_remaining").Where("id = ?", id).First(&token).Error)
+	return token.QuotaResetRemaining
+}
+
 func getSubscriptionUsed(t *testing.T, id int) int64 {
 	t.Helper()
 	var sub model.UserSubscription
@@ -427,6 +434,67 @@ func TestRecalculate_PositiveDelta(t *testing.T) {
 	require.NotNil(t, log)
 	assert.Equal(t, model.LogTypeConsume, log.Type)
 	assert.Equal(t, actualQuota-preConsumed, log.Quota)
+}
+
+func TestRecalculate_PeriodicShortageDoesNotTouchFunding(t *testing.T) {
+	truncate(t)
+	ctx := context.Background()
+
+	const userID, tokenID, channelID = 15, 15, 15
+	const initQuota, preConsumed = 10000, 2000
+	const actualQuota = 3000
+	const tokenRemain = 5000
+	const periodicRemain = 100
+
+	seedUser(t, userID, initQuota)
+	seedChannel(t, channelID)
+	token := &model.Token{
+		Id:                  tokenID,
+		UserId:              userID,
+		Key:                 "sk-recalc-periodic-shortage",
+		Name:                "test_token",
+		Status:              common.TokenStatusEnabled,
+		RemainQuota:         tokenRemain,
+		QuotaResetEnabled:   true,
+		QuotaResetPeriod:    model.TokenQuotaResetHourly,
+		QuotaResetAmount:    preConsumed,
+		QuotaResetRemaining: periodicRemain,
+		QuotaResetCarryOver: true,
+		QuotaResetNextTime:  time.Now().Add(time.Hour).Unix(),
+		QuotaResetVersion:   1,
+	}
+	require.NoError(t, model.DB.Create(token).Error)
+
+	// If funding is touched before checking the token, the compensating refund below
+	// fails and exposes the partial wallet deduction. Token-first settlement never
+	// reaches the wallet update when the periodic balance is insufficient.
+	require.NoError(t, model.DB.Exec(`
+		CREATE TRIGGER reject_periodic_shortage_wallet_refund
+		BEFORE UPDATE OF quota ON users
+		WHEN OLD.id = 15 AND NEW.quota > OLD.quota
+		BEGIN
+			SELECT RAISE(ABORT, 'wallet refund blocked');
+		END
+	`).Error)
+	t.Cleanup(func() {
+		_ = model.DB.Exec("DROP TRIGGER IF EXISTS reject_periodic_shortage_wallet_refund").Error
+	})
+
+	task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
+	task.PrivateData.TokenQuotaCharges = []model.TokenQuotaCharge{{
+		Amount:         preConsumed,
+		ResetVersion:   1,
+		TotalDeducted:  true,
+		PeriodDeducted: true,
+	}}
+
+	RecalculateTaskQuota(ctx, task, actualQuota, "periodic shortage")
+
+	assert.Equal(t, initQuota, getUserQuota(t, userID))
+	assert.Equal(t, tokenRemain, getTokenRemainQuota(t, tokenID))
+	assert.Equal(t, periodicRemain, getTokenQuotaResetRemaining(t, tokenID))
+	assert.Equal(t, preConsumed, task.Quota)
+	assert.Equal(t, int64(0), countLogs(t))
 }
 
 func TestRecalculate_NegativeDelta(t *testing.T) {
@@ -816,4 +884,141 @@ func TestSettle_NonPerCallBilling_AppliesAdaptorAdjustment(t *testing.T) {
 	log := getLastLog(t)
 	require.NotNil(t, log)
 	assert.Equal(t, model.LogTypeRefund, log.Type)
+}
+
+func seedPeriodicTaskTokenState(t *testing.T, key string, remain, periodicRemaining, used int, version int64) *model.Token {
+	t.Helper()
+	token := &model.Token{
+		UserId:              1,
+		Key:                 key,
+		Name:                key,
+		Status:              common.TokenStatusEnabled,
+		RemainQuota:         remain,
+		UsedQuota:           used,
+		QuotaResetEnabled:   true,
+		QuotaResetPeriod:    model.TokenQuotaResetHourly,
+		QuotaResetAmount:    1000,
+		QuotaResetRemaining: periodicRemaining,
+		QuotaResetCarryOver: true,
+		QuotaResetNextTime:  time.Now().Add(time.Hour).Unix(),
+		QuotaResetVersion:   version,
+	}
+	require.NoError(t, model.DB.Create(token).Error)
+	return token
+}
+
+func TestRefundTaskQuotaUsesPeriodicChargeCredentials(t *testing.T) {
+	tests := []struct {
+		name              string
+		currentVersion    int64
+		periodicRemaining int
+		expectedPeriodic  int
+	}{
+		{name: "same version refunds periodic quota", currentVersion: 1, periodicRemaining: 700, expectedPeriodic: 1000},
+		{name: "new version only refunds total quota", currentVersion: 2, periodicRemaining: 500, expectedPeriodic: 500},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			truncate(t)
+			seedUser(t, 1, 1000)
+			token := seedPeriodicTaskTokenState(t, "periodic-task-refund-"+tt.name, 700, tt.periodicRemaining, 300, tt.currentVersion)
+			task := makeTask(1, 0, 300, token.Id, BillingSourceWallet, 0)
+			task.PrivateData.TokenQuotaCharges = []model.TokenQuotaCharge{{
+				Amount:         300,
+				ResetVersion:   1,
+				TotalDeducted:  true,
+				PeriodDeducted: true,
+			}}
+			require.NoError(t, task.Insert())
+
+			RefundTaskQuota(context.Background(), task, "failed")
+
+			storedToken := loadPeriodicBillingToken(t, token.Id)
+			assert.Equal(t, 1000, storedToken.RemainQuota)
+			assert.Equal(t, tt.expectedPeriodic, storedToken.QuotaResetRemaining)
+			assert.Zero(t, storedToken.UsedQuota)
+
+			var storedTask model.Task
+			require.NoError(t, model.DB.First(&storedTask, task.ID).Error)
+			require.Len(t, storedTask.PrivateData.TokenQuotaCharges, 1)
+			assert.Zero(t, storedTask.PrivateData.TokenQuotaCharges[0].Amount)
+		})
+	}
+}
+
+func TestRecalculateTaskQuotaPersistsPeriodicChargeRefundAcrossVersions(t *testing.T) {
+	truncate(t)
+	seedUser(t, 1, 1000)
+	token := seedPeriodicTaskTokenState(t, "periodic-task-partial-refund", 700, 500, 300, 2)
+	task := makeTask(1, 0, 300, token.Id, BillingSourceWallet, 0)
+	task.PrivateData.TokenQuotaCharges = []model.TokenQuotaCharge{{
+		Amount:         300,
+		ResetVersion:   1,
+		TotalDeducted:  true,
+		PeriodDeducted: true,
+	}}
+	require.NoError(t, task.Insert())
+
+	RecalculateTaskQuota(context.Background(), task, 100, "partial refund")
+
+	storedToken := loadPeriodicBillingToken(t, token.Id)
+	assert.Equal(t, 900, storedToken.RemainQuota)
+	assert.Equal(t, 500, storedToken.QuotaResetRemaining)
+	assert.Equal(t, 100, storedToken.UsedQuota)
+
+	var storedTask model.Task
+	require.NoError(t, model.DB.First(&storedTask, task.ID).Error)
+	assert.Equal(t, 100, storedTask.Quota)
+	require.Len(t, storedTask.PrivateData.TokenQuotaCharges, 1)
+	assert.Equal(t, 100, storedTask.PrivateData.TokenQuotaCharges[0].Amount)
+}
+
+func TestRecalculateTaskQuotaAppendsPeriodicChargeCredentials(t *testing.T) {
+	truncate(t)
+	seedUser(t, 1, 1000)
+	token := seedPeriodicTaskTokenState(t, "periodic-task-extra-charge", 700, 700, 300, 1)
+	task := makeTask(1, 0, 300, token.Id, BillingSourceWallet, 0)
+	task.PrivateData.TokenQuotaCharges = []model.TokenQuotaCharge{{
+		Amount:         300,
+		ResetVersion:   1,
+		TotalDeducted:  true,
+		PeriodDeducted: true,
+	}}
+	require.NoError(t, task.Insert())
+
+	RecalculateTaskQuota(context.Background(), task, 500, "extra charge")
+
+	storedToken := loadPeriodicBillingToken(t, token.Id)
+	assert.Equal(t, 500, storedToken.RemainQuota)
+	assert.Equal(t, 500, storedToken.QuotaResetRemaining)
+	assert.Equal(t, 500, storedToken.UsedQuota)
+
+	var storedTask model.Task
+	require.NoError(t, model.DB.First(&storedTask, task.ID).Error)
+	assert.Equal(t, 500, storedTask.Quota)
+	require.Len(t, storedTask.PrivateData.TokenQuotaCharges, 2)
+	assert.Equal(t, 200, storedTask.PrivateData.TokenQuotaCharges[1].Amount)
+	assert.Equal(t, int64(1), storedTask.PrivateData.TokenQuotaCharges[1].ResetVersion)
+}
+
+func TestRecalculateTaskQuotaWithZeroPrechargeStillEnforcesPeriodicQuota(t *testing.T) {
+	truncate(t)
+	seedUser(t, 1, 1000)
+	token := seedPeriodicTaskTokenState(t, "periodic-task-zero-precharge", 100, 50, 0, 1)
+	task := makeTask(1, 0, 0, token.Id, BillingSourceWallet, 0)
+	require.NoError(t, task.Insert())
+
+	RecalculateTaskQuota(context.Background(), task, 60, "zero precharge")
+
+	storedToken := loadPeriodicBillingToken(t, token.Id)
+	assert.Equal(t, 100, storedToken.RemainQuota)
+	assert.Equal(t, 50, storedToken.QuotaResetRemaining)
+	assert.Zero(t, storedToken.UsedQuota)
+	assert.Equal(t, 1000, getUserQuota(t, 1))
+
+	var storedTask model.Task
+	require.NoError(t, model.DB.First(&storedTask, task.ID).Error)
+	assert.Zero(t, storedTask.Quota)
+	assert.Empty(t, storedTask.PrivateData.TokenQuotaCharges)
 }
