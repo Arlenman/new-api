@@ -34,7 +34,7 @@ export default function SettingsSensitiveWords(props) {
   const [inputs, setInputs] = useState({
     CheckSensitiveEnabled: false,
     CheckSensitiveOnPromptEnabled: false,
-    LogSensitiveRequestEnabled: false,
+    LogSensitiveRequestEnabled: true,
     SensitiveWords: '',
   });
   const refForm = useRef();

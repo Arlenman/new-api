@@ -4,7 +4,7 @@ import "strings"
 
 var CheckSensitiveEnabled = true
 var CheckSensitiveOnPromptEnabled = true
-var LogSensitiveRequestEnabled = false
+var LogSensitiveRequestEnabled = true
 
 //var CheckSensitiveOnCompletionEnabled = true
 
