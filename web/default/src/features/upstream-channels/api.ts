@@ -70,6 +70,16 @@ export async function updateManagedUpstreamChannel(
   return res.data
 }
 
+export async function deleteManagedUpstreamChannel(
+  id: number
+): Promise<ApiResponse<null>> {
+  const res = await api.delete<ApiResponse<null>>(
+    `/api/upstream-channels/${id}`,
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
 export async function updateManagedUpstreamChannelNote(
   id: number,
   note: string

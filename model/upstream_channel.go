@@ -43,6 +43,7 @@ type UpstreamChannel struct {
 	LastSyncTime        int64   `json:"last_sync_time" gorm:"bigint"`
 	LastError           string  `json:"last_error" gorm:"type:text"`
 	Status              string  `json:"status" gorm:"type:varchar(32);index"`
+	SuppressedAt        *int64  `json:"-" gorm:"index"`
 	SnapshotJSON        string  `json:"-" gorm:"type:text"`
 	CreatedAt           int64   `json:"created_at" gorm:"autoCreateTime"`
 	UpdatedAt           int64   `json:"updated_at" gorm:"autoUpdateTime"`
@@ -122,6 +123,9 @@ func EnsureUpstreamChannels(baseURLs []string) ([]*UpstreamChannel, error) {
 			} else if err != nil {
 				return err
 			} else {
+				if row.SuppressedAt != nil {
+					continue
+				}
 				name := strings.TrimSpace(row.Name)
 				legacyDefaultName := ""
 				previousDefaultName := ""
@@ -185,14 +189,52 @@ func CreateUpstreamChannelConfig(row UpstreamChannel) (*UpstreamChannel, error) 
 	if row.Status == "" {
 		row.Status = UpstreamChannelStatusUnconfigured
 	}
-	var count int64
-	if err := DB.Model(&UpstreamChannel{}).Where("base_url_hash = ?", row.BaseURLHash).Count(&count).Error; err != nil {
-		return nil, err
-	}
-	if count > 0 {
-		return nil, errors.New("upstream channel already exists")
-	}
-	if err := DB.Create(&row).Error; err != nil {
+	row.SuppressedAt = nil
+
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var existing UpstreamChannel
+		err := lockForUpdate(tx).Where("base_url_hash = ?", row.BaseURLHash).First(&existing).Error
+		if err == nil {
+			if existing.SuppressedAt == nil {
+				return errors.New("upstream channel already exists")
+			}
+			result := tx.Model(&existing).Where("suppressed_at IS NOT NULL").Updates(map[string]any{
+				"name":                  row.Name,
+				"base_url":              row.BaseURL,
+				"base_url_hash":         row.BaseURLHash,
+				"provider":              row.Provider,
+				"auth_type":             row.AuthType,
+				"priority":              row.Priority,
+				"selected_group":        row.SelectedGroup,
+				"username":              row.Username,
+				"note":                  row.Note,
+				"password_ciphertext":   row.PasswordCiphertext,
+				"balance":               0,
+				"balance_updated_time":  0,
+				"balance_threshold":     row.BalanceThreshold,
+				"multiplier":            row.Multiplier,
+				"auto_refresh_interval": row.AutoRefreshInterval,
+				"low_balance_notified":  false,
+				"last_sync_time":        0,
+				"last_error":            "",
+				"status":                row.Status,
+				"suppressed_at":         nil,
+				"snapshot_json":         "",
+			})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				return errors.New("upstream channel already exists")
+			}
+			return tx.First(&row, "id = ?", existing.Id).Error
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		return tx.Create(&row).Error
+	})
+	if err != nil {
 		return nil, err
 	}
 	return &row, nil
@@ -204,7 +246,7 @@ func normalizeUpstreamChannelPriorities(db *gorm.DB) error {
 
 func ListUpstreamChannels() ([]*UpstreamChannel, error) {
 	var rows []*UpstreamChannel
-	err := DB.Order("COALESCE(priority, 0) desc").Order("id asc").Find(&rows).Error
+	err := DB.Where("suppressed_at IS NULL").Order("COALESCE(priority, 0) desc").Order("id asc").Find(&rows).Error
 	for _, row := range rows {
 		if row != nil {
 			row.Multiplier = row.EffectiveMultiplier()
@@ -219,7 +261,7 @@ func GetUpstreamChannelByID(id int) (*UpstreamChannel, error) {
 		return nil, errors.New("invalid upstream channel id")
 	}
 	var row UpstreamChannel
-	if err := DB.First(&row, "id = ?", id).Error; err != nil {
+	if err := DB.Where("suppressed_at IS NULL").First(&row, "id = ?", id).Error; err != nil {
 		return nil, err
 	}
 	row.Multiplier = row.EffectiveMultiplier()
@@ -227,10 +269,46 @@ func GetUpstreamChannelByID(id int) (*UpstreamChannel, error) {
 	return &row, nil
 }
 
+func DeleteUpstreamChannel(id int) error {
+	if id <= 0 {
+		return errors.New("invalid upstream channel id")
+	}
+	suppressedAt := common.GetTimestamp()
+	result := DB.Model(&UpstreamChannel{}).
+		Where("id = ?", id).
+		Where("suppressed_at IS NULL").
+		Updates(map[string]any{
+			"auth_type":             UpstreamAuthTypePassword,
+			"priority":              0,
+			"selected_group":        "",
+			"username":              "",
+			"note":                  "",
+			"password_ciphertext":   "",
+			"balance":               0,
+			"balance_updated_time":  0,
+			"balance_threshold":     0,
+			"multiplier":            UpstreamChannelDefaultMultiplier,
+			"auto_refresh_interval": 0,
+			"low_balance_notified":  false,
+			"last_sync_time":        0,
+			"last_error":            "",
+			"status":                UpstreamChannelStatusUnconfigured,
+			"suppressed_at":         suppressedAt,
+			"snapshot_json":         "",
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
 func UpdateUpstreamChannelConfig(id int, name string, provider string, authType string, username string, passwordCiphertext *string, balanceThreshold float64, multiplier float64, autoRefreshInterval int, priority int64) error {
 	return DB.Transaction(func(tx *gorm.DB) error {
 		var row UpstreamChannel
-		if err := tx.First(&row, "id = ?", id).Error; err != nil {
+		if err := tx.Where("suppressed_at IS NULL").First(&row, "id = ?", id).Error; err != nil {
 			return err
 		}
 
@@ -257,7 +335,7 @@ func UpdateUpstreamChannelConfig(id int, name string, provider string, authType 
 			updates["snapshot_json"] = ""
 			updates["status"] = UpstreamChannelStatusUnconfigured
 		}
-		return tx.Model(&UpstreamChannel{}).Where("id = ?", id).Updates(updates).Error
+		return tx.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Updates(updates).Error
 	})
 }
 
@@ -267,18 +345,18 @@ func PinUpstreamChannel(id int) (*UpstreamChannel, error) {
 	}
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var target UpstreamChannel
-		if err := tx.First(&target, "id = ?", id).Error; err != nil {
+		if err := tx.Where("suppressed_at IS NULL").First(&target, "id = ?", id).Error; err != nil {
 			return err
 		}
 
 		var highest UpstreamChannel
-		if err := lockForUpdate(tx).Order("COALESCE(priority, 0) desc").Order("id asc").First(&highest).Error; err != nil {
+		if err := lockForUpdate(tx).Where("suppressed_at IS NULL").Order("COALESCE(priority, 0) desc").Order("id asc").First(&highest).Error; err != nil {
 			return err
 		}
 		if highest.Priority >= math.MaxInt32 {
 			return errors.New("upstream channel priority has reached the maximum")
 		}
-		return tx.Model(&UpstreamChannel{}).Where("id = ?", id).Update("priority", highest.Priority+1).Error
+		return tx.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Update("priority", highest.Priority+1).Error
 	})
 	if err != nil {
 		return nil, err
@@ -304,19 +382,19 @@ func GetChannelKeyStatesByBaseURL(baseURL string) (map[string]bool, error) {
 }
 
 func UpdateUpstreamChannelSnapshot(id int, snapshotJSON string) error {
-	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Update("snapshot_json", snapshotJSON).Error
+	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Update("snapshot_json", snapshotJSON).Error
 }
 
 func UpdateUpstreamChannelNote(id int, note string) error {
-	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Update("note", note).Error
+	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Update("note", note).Error
 }
 
 func UpdateUpstreamChannelSelectedGroup(id int, selectedGroup string) error {
-	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Update("selected_group", selectedGroup).Error
+	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Update("selected_group", selectedGroup).Error
 }
 
 func SaveUpstreamChannelRefresh(id int, provider string, snapshotJSON string, balance float64, refreshedAt int64, lowBalanceNotified bool) error {
-	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Updates(map[string]any{
+	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Updates(map[string]any{
 		"provider":             provider,
 		"snapshot_json":        snapshotJSON,
 		"balance":              balance,
@@ -329,7 +407,7 @@ func SaveUpstreamChannelRefresh(id int, provider string, snapshotJSON string, ba
 }
 
 func SaveUpstreamChannelRefreshError(id int, message string, attemptedAt int64) error {
-	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Updates(map[string]any{
+	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Updates(map[string]any{
 		"last_sync_time": attemptedAt,
 		"last_error":     message,
 		"status":         UpstreamChannelStatusError,
@@ -342,6 +420,7 @@ func ListDueUpstreamChannels(now int64, limit int) ([]*UpstreamChannel, error) {
 	}
 	var rows []*UpstreamChannel
 	err := DB.
+		Where("suppressed_at IS NULL").
 		Where("password_ciphertext <> ''").
 		Where("username <> ''").
 		Where("auto_refresh_interval > 0").

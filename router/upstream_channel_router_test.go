@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -45,6 +46,7 @@ func TestUpstreamChannelRoutesRejectNonRootSessions(t *testing.T) {
 		{method: http.MethodPost, path: "/api/upstream-channels/"},
 		{method: http.MethodPost, path: "/api/upstream-channels/refresh"},
 		{method: http.MethodPut, path: "/api/upstream-channels/1"},
+		{method: http.MethodDelete, path: "/api/upstream-channels/1"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/pin"},
 		{method: http.MethodPatch, path: "/api/upstream-channels/1/note"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/refresh"},
@@ -70,6 +72,112 @@ func TestUpstreamChannelRoutesRejectNonRootSessions(t *testing.T) {
 			assert.False(t, response.Success)
 		})
 	}
+}
+
+func TestDeleteUpstreamChannelRouteAllowsReferencedConfigurations(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	originalDB := model.DB
+	originalLogDB := model.LOG_DB
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "upstream-delete-route.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}))
+	model.DB = db
+	model.LOG_DB = db
+	t.Cleanup(func() {
+		model.DB = originalDB
+		model.LOG_DB = originalLogDB
+	})
+
+	inUseBaseURL := "https://used-upstream.example"
+	localChannel := &model.Channel{
+		Key:     "used-upstream-key",
+		BaseURL: &inUseBaseURL,
+		Status:  common.ChannelStatusEnabled,
+	}
+	require.NoError(t, db.Create(localChannel).Error)
+	inUseChannel := &model.UpstreamChannel{
+		Name:               "used upstream",
+		BaseURL:            inUseBaseURL,
+		BaseURLHash:        model.UpstreamBaseURLHash(inUseBaseURL),
+		Provider:           "new-api",
+		Username:           "root",
+		PasswordCiphertext: "secret",
+		Status:             model.UpstreamChannelStatusReady,
+	}
+	unusedChannel := &model.UpstreamChannel{
+		Name:        "unused upstream",
+		BaseURL:     "https://unused-upstream.example",
+		BaseURLHash: model.UpstreamBaseURLHash("https://unused-upstream.example"),
+		Provider:    "new-api",
+		Status:      model.UpstreamChannelStatusReady,
+	}
+	require.NoError(t, db.Create(inUseChannel).Error)
+	require.NoError(t, db.Create(unusedChannel).Error)
+
+	engine := gin.New()
+	engine.Use(sessions.Sessions("session", cookie.NewStore([]byte("upstream-channel-delete-test"))))
+	engine.GET("/session", func(c *gin.Context) {
+		session := sessions.Default(c)
+		session.Set("id", 1)
+		session.Set("username", "root")
+		session.Set("role", common.RoleRootUser)
+		session.Set("status", common.UserStatusEnabled)
+		session.Set("group", "default")
+		require.NoError(t, session.Save())
+		c.Status(http.StatusNoContent)
+	})
+	registerUpstreamChannelRoutes(engine.Group("/api"))
+
+	setupRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(setupRecorder, httptest.NewRequest(http.MethodGet, "/session", nil))
+	require.Equal(t, http.StatusNoContent, setupRecorder.Code)
+
+	requestWithRootSession := func(method string, path string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, nil)
+		request.Header.Set("New-Api-User", "1")
+		for _, sessionCookie := range setupRecorder.Result().Cookies() {
+			request.AddCookie(sessionCookie)
+		}
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, request)
+		require.Equal(t, http.StatusOK, recorder.Code)
+		return recorder
+	}
+
+	for _, upstreamChannelID := range []int{unusedChannel.Id, inUseChannel.Id} {
+		recorder := requestWithRootSession(http.MethodDelete, "/api/upstream-channels/"+strconv.Itoa(upstreamChannelID))
+		var response struct {
+			Success bool `json:"success"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		require.True(t, response.Success)
+	}
+
+	var storedLocalChannel model.Channel
+	require.NoError(t, db.First(&storedLocalChannel, localChannel.Id).Error)
+	assert.Equal(t, "used-upstream-key", storedLocalChannel.Key)
+	assert.Equal(t, common.ChannelStatusEnabled, storedLocalChannel.Status)
+
+	var suppressed model.UpstreamChannel
+	require.NoError(t, db.First(&suppressed, inUseChannel.Id).Error)
+	require.NotNil(t, suppressed.SuppressedAt)
+	assert.Empty(t, suppressed.PasswordCiphertext)
+
+	listRecorder := requestWithRootSession(http.MethodGet, "/api/upstream-channels/")
+	var listResponse struct {
+		Success bool `json:"success"`
+		Data    []struct {
+			ID int `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(listRecorder.Body.Bytes(), &listResponse))
+	require.True(t, listResponse.Success)
+	assert.Empty(t, listResponse.Data)
+
+	var rowCount int64
+	require.NoError(t, db.Model(&model.UpstreamChannel{}).Where("base_url_hash = ?", model.UpstreamBaseURLHash(inUseBaseURL)).Count(&rowCount).Error)
+	assert.Equal(t, int64(1), rowCount)
 }
 
 func TestUpstreamChannelRoutesAllowRootSession(t *testing.T) {

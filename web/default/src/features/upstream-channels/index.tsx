@@ -24,6 +24,16 @@ import { toast } from 'sonner'
 
 import { SectionPageLayout } from '@/components/layout'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -38,6 +48,7 @@ import {
 import {
   createAlertRule,
   createManagedUpstreamChannel,
+  deleteManagedUpstreamChannel,
   getAlertRuleProviders,
   getAlertRules,
   getManagedUpstreamChannels,
@@ -56,6 +67,7 @@ import {
   filterAndSortUpstreamChannels,
   formatUpstreamBalance,
   getTotalAdjustedUpstreamBalance,
+  getUpstreamChannelDisplayName,
   getUpstreamChannelKeyStats,
   hasUsableUpstreamCredentials,
   isUpstreamTurnstileAccessTokenRequired,
@@ -82,6 +94,8 @@ export function UpstreamChannels() {
     useState<UpstreamChannel | null>(null)
   const [configOpen, setConfigOpen] = useState(false)
   const [alertRulesOpen, setAlertRulesOpen] = useState(false)
+  const [channelToDelete, setChannelToDelete] =
+    useState<UpstreamChannel | null>(null)
   const [accessTokenRequired, setAccessTokenRequired] = useState(false)
   const [refreshingChannelId, setRefreshingChannelId] = useState<number | null>(
     null
@@ -254,6 +268,24 @@ export function UpstreamChannels() {
           ? error.message
           : t('Failed to refresh upstream channels')
       )
+    },
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: async (channel: UpstreamChannel) => {
+      const response = await deleteManagedUpstreamChannel(channel.id)
+      if (!response.success) {
+        throw new Error(t('Failed to delete channel'))
+      }
+      return response
+    },
+    onSuccess: async () => {
+      setChannelToDelete(null)
+      await queryClient.invalidateQueries({ queryKey })
+      toast.success(t('Channel deleted successfully'))
+    },
+    onError: () => {
+      toast.error(t('Failed to delete channel'))
     },
   })
 
@@ -800,9 +832,14 @@ export function UpstreamChannels() {
                     }
                     pinning={pinningChannelId === channel.id}
                     selectingGroup={selectingGroupChannelId === channel.id}
+                    deleting={
+                      deleteMutation.isPending &&
+                      channelToDelete?.id === channel.id
+                    }
                     onConfigure={openConfiguration}
                     onConfigureAccessToken={openAccessTokenConfiguration}
                     onPin={pinChannel}
+                    onDelete={setChannelToDelete}
                     onRefresh={refreshChannel}
                     onToggleAutoRefresh={toggleAutoRefresh}
                     onSaveNote={saveChannelNote}
@@ -835,6 +872,49 @@ export function UpstreamChannels() {
         onOpenChange={handleConfigOpenChange}
         onSave={saveChannel}
       />
+      <AlertDialog
+        open={channelToDelete !== null}
+        onOpenChange={(open) => {
+          if (!open && !deleteMutation.isPending) setChannelToDelete(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('Are you sure?')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(
+                'Are you sure you want to delete channel "{{name}}"? This action cannot be undone.',
+                {
+                  name: channelToDelete
+                    ? getUpstreamChannelDisplayName(
+                        channelToDelete.name,
+                        channelToDelete.base_url
+                      )
+                    : '',
+                }
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteMutation.isPending}>
+              {t('Cancel')}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant='destructive'
+              disabled={deleteMutation.isPending || channelToDelete === null}
+              onClick={(event) => {
+                event.preventDefault()
+                if (channelToDelete) deleteMutation.mutate(channelToDelete)
+              }}
+            >
+              {deleteMutation.isPending && (
+                <LoaderCircle className='animate-spin' />
+              )}
+              {t('Delete')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }

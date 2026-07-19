@@ -24,6 +24,7 @@ import {
   LoaderCircle,
   Pencil,
   RefreshCw,
+  Trash2,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -60,9 +61,11 @@ interface UpstreamChannelCardProps {
   autoRefreshUpdating: boolean
   pinning: boolean
   selectingGroup: boolean
+  deleting: boolean
   onConfigure: (channel: UpstreamChannel) => void
   onConfigureAccessToken: (channel: UpstreamChannel) => void
   onPin: (channel: UpstreamChannel) => void
+  onDelete: (channel: UpstreamChannel) => void
   onRefresh: (channel: UpstreamChannel) => void
   onToggleAutoRefresh: (
     channel: UpstreamChannel,
@@ -82,9 +85,11 @@ export function UpstreamChannelCard({
   autoRefreshUpdating,
   pinning,
   selectingGroup,
+  deleting,
   onConfigure,
   onConfigureAccessToken,
   onPin,
+  onDelete,
   onRefresh,
   onToggleAutoRefresh,
   onSaveNote,
@@ -176,7 +181,9 @@ export function UpstreamChannelCard({
       onEditNote={() => setEditingNote(true)}
       onChangeNote={setNoteDraft}
       onBlurNote={() => void saveNote()}
+      deleting={deleting}
       onCancelNote={cancelNoteEditing}
+      onDelete={() => onDelete(channel)}
     />
   )
 
@@ -493,10 +500,12 @@ interface AccountPanelProps {
   snapshot?: UpstreamSnapshot
   editingNote: boolean
   noteDraft: string
+  deleting: boolean
   onEditNote: () => void
   onChangeNote: (value: string) => void
   onBlurNote: () => void
   onCancelNote: () => void
+  onDelete: () => void
 }
 
 function AccountPanel({
@@ -504,10 +513,12 @@ function AccountPanel({
   snapshot,
   editingNote,
   noteDraft,
+  deleting,
   onEditNote,
   onChangeNote,
   onBlurNote,
   onCancelNote,
+  onDelete,
 }: AccountPanelProps) {
   const { t } = useTranslation()
   const account = snapshot?.account
@@ -530,35 +541,50 @@ function AccountPanel({
           <dd className='truncate'>{account?.email || '-'}</dd>
         </dl>
       </div>
-      <div className='border-t pt-1'>
-        {editingNote ? (
-          <Textarea
-            autoFocus
-            maxLength={2000}
-            className='min-h-14'
-            value={noteDraft}
-            aria-label={t('Note')}
-            placeholder={t('Add a note for this upstream channel')}
-            onChange={(event) => onChangeNote(event.target.value)}
-            onBlur={onBlurNote}
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') onCancelNote()
-            }}
-          />
-        ) : (
-          <button
-            type='button'
-            className={cn(
-              'hover:bg-muted/50 min-h-6 w-full rounded-sm px-1.5 py-0.5 text-left text-sm whitespace-pre-wrap transition-colors',
-              channel.note ? 'text-foreground' : 'text-muted-foreground'
-            )}
-            onClick={onEditNote}
-          >
-            {channel.note
-              ? t('Note: {{note}}', { note: channel.note })
-              : t('Note: (click to edit)')}
-          </button>
-        )}
+      <div className='flex items-end gap-2 border-t pt-1'>
+        <div className='min-w-0 flex-1'>
+          {editingNote ? (
+            <Textarea
+              autoFocus
+              maxLength={2000}
+              className='min-h-14'
+              value={noteDraft}
+              aria-label={t('Note')}
+              placeholder={t('Add a note for this upstream channel')}
+              onChange={(event) => onChangeNote(event.target.value)}
+              onBlur={onBlurNote}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') onCancelNote()
+              }}
+            />
+          ) : (
+            <button
+              type='button'
+              className={cn(
+                'hover:bg-muted/50 min-h-8 w-full rounded-sm px-1.5 py-0.5 text-left text-sm whitespace-pre-wrap transition-colors',
+                channel.note ? 'text-foreground' : 'text-muted-foreground'
+              )}
+              onClick={onEditNote}
+            >
+              {channel.note
+                ? t('Note: {{note}}', { note: channel.note })
+                : t('Note: (click to edit)')}
+            </button>
+          )}
+        </div>
+        <Button
+          type='button'
+          size='sm'
+          variant='destructive'
+          className='shrink-0 border-red-700 bg-red-600 text-white hover:bg-red-700 dark:border-red-500 dark:bg-red-600 dark:hover:bg-red-700'
+          aria-label={t('Delete')}
+          title={t('Delete')}
+          disabled={deleting}
+          onClick={onDelete}
+        >
+          {deleting ? <LoaderCircle className='animate-spin' /> : <Trash2 />}
+          {t('Delete')}
+        </Button>
       </div>
     </div>
   )

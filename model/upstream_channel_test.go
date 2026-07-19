@@ -166,6 +166,83 @@ func TestCreateUpstreamChannelConfigRejectsDuplicateBaseURL(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestDeleteUpstreamChannelSuppressesDiscoveryAndManualCreateRestores(t *testing.T) {
+	db := setupUpstreamChannelTestDB(t)
+	baseURL := "https://used-upstream.example"
+	row := UpstreamChannel{
+		Name:                "Old upstream",
+		BaseURL:             baseURL,
+		BaseURLHash:         UpstreamBaseURLHash(baseURL),
+		Provider:            "new-api",
+		AuthType:            UpstreamAuthTypeAccessToken,
+		Priority:            9,
+		SelectedGroup:       "old-group",
+		Username:            "old-user",
+		Note:                "old note",
+		PasswordCiphertext:  "old-secret",
+		Balance:             42,
+		BalanceUpdatedTime:  100,
+		BalanceThreshold:    10,
+		Multiplier:          1.5,
+		AutoRefreshInterval: 300,
+		LowBalanceNotified:  true,
+		LastSyncTime:        100,
+		LastError:           "old error",
+		Status:              UpstreamChannelStatusReady,
+		SnapshotJSON:        `{"provider":"new-api"}`,
+	}
+	require.NoError(t, db.Create(&row).Error)
+
+	require.NoError(t, DeleteUpstreamChannel(row.Id))
+	_, err := GetUpstreamChannelByID(row.Id)
+	assert.ErrorIs(t, err, gorm.ErrRecordNotFound)
+
+	listed, err := ListUpstreamChannels()
+	require.NoError(t, err)
+	assert.Empty(t, listed)
+
+	discovered, err := EnsureUpstreamChannels([]string{baseURL})
+	require.NoError(t, err)
+	assert.Empty(t, discovered)
+
+	var suppressed UpstreamChannel
+	require.NoError(t, db.First(&suppressed, row.Id).Error)
+	require.NotNil(t, suppressed.SuppressedAt)
+	assert.Empty(t, suppressed.Username)
+	assert.Empty(t, suppressed.PasswordCiphertext)
+	assert.Empty(t, suppressed.SnapshotJSON)
+	assert.Zero(t, suppressed.Balance)
+
+	restored, err := CreateUpstreamChannelConfig(UpstreamChannel{
+		Name:                "Restored upstream",
+		BaseURL:             baseURL,
+		Provider:            "sub2api",
+		AuthType:            UpstreamAuthTypeAccessToken,
+		Username:            "new-user",
+		PasswordCiphertext:  "new-secret",
+		BalanceThreshold:    5,
+		Multiplier:          1.25,
+		AutoRefreshInterval: 600,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, row.Id, restored.Id)
+	assert.Nil(t, restored.SuppressedAt)
+	assert.Equal(t, "Restored upstream", restored.Name)
+	assert.Equal(t, "sub2api", restored.Provider)
+	assert.Equal(t, "new-user", restored.Username)
+	assert.Equal(t, "new-secret", restored.PasswordCiphertext)
+	assert.Equal(t, UpstreamChannelStatusUnconfigured, restored.Status)
+	assert.Empty(t, restored.SnapshotJSON)
+	assert.Zero(t, restored.Balance)
+	assert.Zero(t, restored.LastSyncTime)
+	assert.Empty(t, restored.LastError)
+
+	listed, err = ListUpstreamChannels()
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	assert.Equal(t, row.Id, listed[0].Id)
+}
+
 func TestGetUpstreamChannelByIDUsesDefaultMultiplierForLegacyRows(t *testing.T) {
 	db := setupUpstreamChannelTestDB(t)
 	row := UpstreamChannel{

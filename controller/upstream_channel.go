@@ -200,6 +200,19 @@ func GetUpstreamChannels(c *gin.Context) {
 	common.ApiSuccess(c, views)
 }
 
+func DeleteUpstreamChannel(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		common.ApiError(c, errInvalidUpstreamChannelID)
+		return
+	}
+	if err = service.DeleteUpstreamChannel(id); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, nil)
+}
+
 func UpdateUpstreamChannelConfig(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil || id <= 0 {

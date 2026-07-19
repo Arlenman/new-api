@@ -69,6 +69,10 @@ func CollectExplicitUpstreamBaseURLs(rawURLs []string) []string {
 	return urls
 }
 
+func DeleteUpstreamChannel(id int) error {
+	return model.DeleteUpstreamChannel(id)
+}
+
 func BalanceNotificationTransition(threshold float64, balance float64, notified bool) (bool, bool) {
 	if threshold <= 0 {
 		return false, false

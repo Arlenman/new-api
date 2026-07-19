@@ -14,6 +14,7 @@ func registerUpstreamChannelRoutes(apiRouter *gin.RouterGroup) {
 		upstreamRoute.POST("/", controller.CreateUpstreamChannel)
 		upstreamRoute.POST("/refresh", controller.RefreshAllUpstreamChannels)
 		upstreamRoute.PUT("/:id", controller.UpdateUpstreamChannelConfig)
+		upstreamRoute.DELETE("/:id", controller.DeleteUpstreamChannel)
 		upstreamRoute.POST("/:id/pin", controller.PinUpstreamChannel)
 		upstreamRoute.PATCH("/:id/note", controller.UpdateUpstreamChannelNote)
 		upstreamRoute.PATCH("/:id/selected-group", controller.UpdateUpstreamChannelSelectedGroup)
