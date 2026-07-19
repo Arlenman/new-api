@@ -178,6 +178,7 @@ export function TokenTagsDashboard() {
     includedTags: [] as string[],
     excludedTags: [] as string[],
   })
+  const [refreshTrigger, setRefreshTrigger] = useState(0)
   const [stableRows, setStableRows] = useState<TokenTagQuotaDataItem[]>([])
   const [stableSummary, setStableSummary] =
     useState<TokenTagQuotaSummary>(EMPTY_SUMMARY)
@@ -203,6 +204,7 @@ export function TokenTagsDashboard() {
       appliedFilters.excludedTags,
       isAdmin,
       isRoot,
+      refreshTrigger,
     ],
     queryFn: () =>
       getTokenTagQuotaDates(
@@ -377,6 +379,7 @@ export function TokenTagsDashboard() {
       includedTags: [...includedTagsDraft].sort((a, b) => a.localeCompare(b)),
       excludedTags: [...excludedTagsDraft].sort((a, b) => a.localeCompare(b)),
     })
+    setRefreshTrigger((current) => current + 1)
   }
 
   const handleReset = () => {
@@ -393,6 +396,7 @@ export function TokenTagsDashboard() {
       includedTags: [],
       excludedTags: [],
     })
+    setRefreshTrigger((current) => current + 1)
   }
 
   return (
@@ -438,8 +442,16 @@ export function TokenTagsDashboard() {
               selected={excludedTagsDraft}
               onChange={setExcludedTagsDraft}
             />
-            <Button type='button' onClick={handleApply}>
-              <Search className='size-4' />
+            <Button
+              type='button'
+              disabled={query.isFetching}
+              onClick={handleApply}
+            >
+              {query.isFetching ? (
+                <Loader2 className='size-4 animate-spin' />
+              ) : (
+                <Search className='size-4' />
+              )}
               {t('View')}
             </Button>
             <Button type='button' variant='outline' onClick={handleReset}>
