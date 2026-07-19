@@ -675,14 +675,14 @@ export function aggregateChannelsByTag(
       childCount
 
     // Aggregate priority (same value or null if different)
-    if (tagRow.priority === -1) {
+    if (childCount === 1) {
       tagRow.priority = channel.priority
     } else if (tagRow.priority !== channel.priority) {
       tagRow.priority = null
     }
 
     // Aggregate weight (same value or null if different)
-    if (tagRow.weight === -1) {
+    if (childCount === 1) {
       tagRow.weight = channel.weight
     } else if (tagRow.weight !== channel.weight) {
       tagRow.weight = null

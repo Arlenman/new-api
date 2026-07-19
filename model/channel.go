@@ -103,10 +103,14 @@ func NewChannelSortOptions(sortBy string, sortOrder string, idSort bool) Channel
 
 func (options ChannelSortOptions) Apply(query *gorm.DB) *gorm.DB {
 	if columnName, ok := channelSortColumns[options.SortBy]; ok {
-		return query.Order(clause.OrderByColumn{
+		query = query.Order(clause.OrderByColumn{
 			Column: clause.Column{Name: columnName},
 			Desc:   options.SortOrder != "asc",
 		})
+		if columnName != "id" {
+			query = query.Order(clause.OrderByColumn{Column: clause.Column{Name: "id"}})
+		}
+		return query
 	}
 	if options.IDSort {
 		return query.Order(clause.OrderByColumn{
@@ -114,10 +118,12 @@ func (options ChannelSortOptions) Apply(query *gorm.DB) *gorm.DB {
 			Desc:   true,
 		})
 	}
-	return query.Order(clause.OrderByColumn{
-		Column: clause.Column{Name: "priority"},
-		Desc:   true,
-	})
+	return query.
+		Order(clause.OrderByColumn{
+			Column: clause.Column{Name: "priority"},
+			Desc:   true,
+		}).
+		Order(clause.OrderByColumn{Column: clause.Column{Name: "id"}})
 }
 
 func resolveChannelSortOptions(idSort bool, sortOptions []ChannelSortOptions) ChannelSortOptions {
@@ -884,11 +890,23 @@ func GetPaginatedTags(offset int, limit int) ([]*string, error) {
 	return GetPaginatedChannelTags(DB.Model(&Channel{}), offset, limit)
 }
 
-func GetPaginatedChannelTags(query *gorm.DB, offset int, limit int) ([]*string, error) {
+func GetPaginatedChannelTags(query *gorm.DB, offset int, limit int, sortOptions ...ChannelSortOptions) ([]*string, error) {
 	var tags []*string
+	query = query.
+		Select("tag").
+		Where("tag is not null AND tag != ''")
+
+	if len(sortOptions) > 0 && sortOptions[0].SortBy == "priority" {
+		priorityOrder := "COALESCE(MAX(priority), 0) DESC"
+		if sortOptions[0].SortOrder == "asc" {
+			priorityOrder = "COALESCE(MAX(priority), 0) ASC"
+		}
+		query = query.Group("tag").Order(priorityOrder)
+	} else {
+		query = query.Distinct("tag")
+	}
+
 	err := query.
-		Select("DISTINCT tag").
-		Where("tag is not null AND tag != ''").
 		Order(clause.OrderByColumn{Column: clause.Column{Name: "tag"}}).
 		Offset(offset).
 		Limit(limit).
@@ -896,7 +914,7 @@ func GetPaginatedChannelTags(query *gorm.DB, offset int, limit int) ([]*string, 
 	return tags, err
 }
 
-func SearchTags(keyword string, group string, model string, idSort bool) ([]*string, error) {
+func SearchTags(keyword string, group string, model string, idSort bool, sortOptions ...ChannelSortOptions) ([]*string, error) {
 	var tags []*string
 	modelsCol := "`models`"
 
@@ -923,6 +941,21 @@ func SearchTags(keyword string, group string, model string, idSort bool) ([]*str
 	whereClause := "(id = ? OR name LIKE ? OR " + commonKeyCol + " = ? OR " + baseURLCol + " LIKE ?) AND " + modelsCol + " LIKE ?"
 	args := []any{common.String2Int(keyword), "%" + keyword + "%", keyword, "%" + keyword + "%", "%" + model + "%"}
 	baseQuery = ApplyChannelGroupFilter(baseQuery.Where(whereClause, args...), group)
+
+	if len(sortOptions) > 0 && sortOptions[0].SortBy == "priority" {
+		priorityOrder := "COALESCE(MAX(priority), 0) DESC"
+		if sortOptions[0].SortOrder == "asc" {
+			priorityOrder = "COALESCE(MAX(priority), 0) ASC"
+		}
+		err := baseQuery.
+			Select("tag").
+			Where("tag is not null AND tag != ''").
+			Group("tag").
+			Order(priorityOrder).
+			Order(clause.OrderByColumn{Column: clause.Column{Name: "tag"}}).
+			Find(&tags).Error
+		return tags, err
+	}
 
 	subQuery := baseQuery.
 		Select("tag").
