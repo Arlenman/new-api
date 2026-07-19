@@ -22,11 +22,23 @@ const (
 	UpstreamAuthTypeAccessToken       = "access_token"
 )
 
+const legacyUpstreamChannelBaseURLHashIndex = "idx_upstream_channels_base_url_hash"
+
+func migrateUpstreamChannelBaseURLHashIndex(db *gorm.DB) error {
+	if db == nil || !db.Migrator().HasTable(&UpstreamChannel{}) {
+		return nil
+	}
+	if db.Migrator().HasIndex(&UpstreamChannel{}, legacyUpstreamChannelBaseURLHashIndex) {
+		return db.Migrator().DropIndex(&UpstreamChannel{}, legacyUpstreamChannelBaseURLHashIndex)
+	}
+	return nil
+}
+
 type UpstreamChannel struct {
 	Id                  int     `json:"id"`
 	Name                string  `json:"name" gorm:"type:varchar(255)"`
 	BaseURL             string  `json:"base_url" gorm:"type:text;not null"`
-	BaseURLHash         string  `json:"-" gorm:"type:char(64);uniqueIndex"`
+	BaseURLHash         string  `json:"-" gorm:"type:char(64);index:idx_upstream_channel_base_url_hash"`
 	Provider            string  `json:"provider" gorm:"type:varchar(32);index"`
 	AuthType            string  `json:"auth_type" gorm:"type:varchar(32)"`
 	Priority            int64   `json:"priority" gorm:"index"`
@@ -193,11 +205,12 @@ func CreateUpstreamChannelConfig(row UpstreamChannel) (*UpstreamChannel, error) 
 
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var existing UpstreamChannel
-		err := lockForUpdate(tx).Where("base_url_hash = ?", row.BaseURLHash).First(&existing).Error
+		err := lockForUpdate(tx).
+			Where("base_url_hash = ?", row.BaseURLHash).
+			Where("suppressed_at IS NOT NULL").
+			Order("id asc").
+			First(&existing).Error
 		if err == nil {
-			if existing.SuppressedAt == nil {
-				return errors.New("upstream channel already exists")
-			}
 			result := tx.Model(&existing).Where("suppressed_at IS NOT NULL").Updates(map[string]any{
 				"name":                  row.Name,
 				"base_url":              row.BaseURL,
@@ -225,7 +238,7 @@ func CreateUpstreamChannelConfig(row UpstreamChannel) (*UpstreamChannel, error) 
 				return result.Error
 			}
 			if result.RowsAffected == 0 {
-				return errors.New("upstream channel already exists")
+				return gorm.ErrRecordNotFound
 			}
 			return tx.First(&row, "id = ?", existing.Id).Error
 		}

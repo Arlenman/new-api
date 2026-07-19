@@ -12,6 +12,15 @@ import (
 	"gorm.io/gorm"
 )
 
+type legacyUpstreamChannelForMigration struct {
+	ID          int    `gorm:"primaryKey"`
+	BaseURLHash string `gorm:"type:char(64);uniqueIndex"`
+}
+
+func (legacyUpstreamChannelForMigration) TableName() string {
+	return "upstream_channels"
+}
+
 func setupUpstreamChannelTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	originalDB := DB
@@ -21,6 +30,31 @@ func setupUpstreamChannelTestDB(t *testing.T) *gorm.DB {
 	DB = db
 	t.Cleanup(func() { DB = originalDB })
 	return db
+}
+
+func TestMigrateUpstreamChannelBaseURLHashIndexAllowsDuplicateBaseURLs(t *testing.T) {
+	originalDB := DB
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "upstream-channel-migration.db")), &gorm.Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { DB = originalDB })
+
+	require.NoError(t, db.AutoMigrate(&legacyUpstreamChannelForMigration{}))
+	require.True(t, db.Migrator().HasIndex(&legacyUpstreamChannelForMigration{}, legacyUpstreamChannelBaseURLHashIndex))
+	require.NoError(t, db.AutoMigrate(&UpstreamChannel{}))
+	require.NoError(t, migrateUpstreamChannelBaseURLHashIndex(db))
+
+	assert.False(t, db.Migrator().HasIndex(&UpstreamChannel{}, legacyUpstreamChannelBaseURLHashIndex))
+	assert.True(t, db.Migrator().HasIndex(&UpstreamChannel{}, "idx_upstream_channel_base_url_hash"))
+	require.NoError(t, db.Create(&UpstreamChannel{
+		BaseURL:     "https://migration.example",
+		BaseURLHash: UpstreamBaseURLHash("https://migration.example"),
+		Username:    "first@example.com",
+	}).Error)
+	require.NoError(t, db.Create(&UpstreamChannel{
+		BaseURL:     "https://migration.example",
+		BaseURLHash: UpstreamBaseURLHash("https://migration.example"),
+		Username:    "second@example.com",
+	}).Error)
 }
 
 func TestEnsureUpstreamChannelsCreatesDefaultsAndPreservesConfiguration(t *testing.T) {
@@ -156,14 +190,33 @@ func TestCreateAndListUpstreamChannelPreservesManualConfiguration(t *testing.T) 
 	assert.Equal(t, row.Id, rows[0].Id)
 }
 
-func TestCreateUpstreamChannelConfigRejectsDuplicateBaseURL(t *testing.T) {
+func TestCreateUpstreamChannelConfigAllowsMultipleAccountsForSameBaseURL(t *testing.T) {
 	setupUpstreamChannelTestDB(t)
 	baseURL := "https://manual.example"
 
-	_, err := CreateUpstreamChannelConfig(UpstreamChannel{BaseURL: baseURL, Name: "First"})
+	first, err := CreateUpstreamChannelConfig(UpstreamChannel{
+		BaseURL:            baseURL,
+		Name:               "First account",
+		Provider:           "sub2api",
+		Username:           "first@example.com",
+		PasswordCiphertext: "first-secret",
+	})
 	require.NoError(t, err)
-	_, err = CreateUpstreamChannelConfig(UpstreamChannel{BaseURL: baseURL, Name: "Second"})
-	require.Error(t, err)
+	second, err := CreateUpstreamChannelConfig(UpstreamChannel{
+		BaseURL:            baseURL,
+		Name:               "Second account",
+		Provider:           "sub2api",
+		Username:           "second@example.com",
+		PasswordCiphertext: "second-secret",
+	})
+	require.NoError(t, err)
+	assert.NotEqual(t, first.Id, second.Id)
+
+	rows, err := ListUpstreamChannels()
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "first@example.com", rows[0].Username)
+	assert.Equal(t, "second@example.com", rows[1].Username)
 }
 
 func TestDeleteUpstreamChannelSuppressesDiscoveryAndManualCreateRestores(t *testing.T) {

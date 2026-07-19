@@ -323,6 +323,9 @@ func migrateDB() error {
 	if err := normalizeUpstreamChannelPriorities(DB); err != nil {
 		return err
 	}
+	if err := migrateUpstreamChannelBaseURLHashIndex(DB); err != nil {
+		return err
+	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		if err := ensureSubscriptionPlanTableSQLite(); err != nil {
 			return err
@@ -413,6 +416,9 @@ func migrateDBFast() error {
 		}
 	}
 	if err := normalizeUpstreamChannelPriorities(DB); err != nil {
+		return err
+	}
+	if err := migrateUpstreamChannelBaseURLHashIndex(DB); err != nil {
 		return err
 	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {

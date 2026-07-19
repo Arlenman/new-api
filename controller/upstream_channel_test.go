@@ -255,6 +255,67 @@ func TestCreateUpstreamChannelNormalizesBaseURLAndDefaultsName(t *testing.T) {
 	assert.Equal(t, "plain-text-password", password)
 }
 
+func TestCreateUpstreamChannelAllowsMultipleAccountsForSameBaseURL(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "persistent-session-secret")
+	engine, _ := setupUpstreamChannelControllerTest(t)
+	baseURL := "https://multi-account.example"
+	payloads := []string{
+		`{"base_url":"` + baseURL + `","name":"Account one","provider":"sub2api","auth_type":"password","username":"one@example.com","password":"password-one"}`,
+		`{"base_url":"` + baseURL + `","name":"Account two","provider":"sub2api","auth_type":"password","username":"two@example.com","password":"password-two"}`,
+	}
+
+	ids := make([]int, 0, len(payloads))
+	for _, payload := range payloads {
+		request := httptest.NewRequest(http.MethodPost, "/api/upstream-channels/", strings.NewReader(payload))
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, request)
+
+		require.Equal(t, http.StatusOK, recorder.Code)
+		var response struct {
+			Success bool `json:"success"`
+			Data    struct {
+				ID int `json:"id"`
+			} `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		require.True(t, response.Success)
+		ids = append(ids, response.Data.ID)
+	}
+
+	assert.NotEqual(t, ids[0], ids[1])
+	var rows []model.UpstreamChannel
+	require.NoError(t, model.DB.Where("base_url = ?", baseURL).Order("id asc").Find(&rows).Error)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "one@example.com", rows[0].Username)
+	assert.Equal(t, "two@example.com", rows[1].Username)
+
+	listRequest := httptest.NewRequest(http.MethodGet, "/api/upstream-channels/", nil)
+	listRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(listRecorder, listRequest)
+	require.Equal(t, http.StatusOK, listRecorder.Code)
+	var listResponse struct {
+		Success bool `json:"success"`
+		Data    []struct {
+			ID       int    `json:"id"`
+			BaseURL  string `json:"base_url"`
+			Username string `json:"username"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(listRecorder.Body.Bytes(), &listResponse))
+	require.True(t, listResponse.Success)
+	listedAccounts := make(map[string]int)
+	for _, row := range listResponse.Data {
+		if row.BaseURL == baseURL {
+			listedAccounts[row.Username] = row.ID
+		}
+	}
+	assert.Equal(t, map[string]int{
+		"one@example.com": ids[0],
+		"two@example.com": ids[1],
+	}, listedAccounts)
+}
+
 func TestCreateUpstreamChannelRejectsInvalidConfiguration(t *testing.T) {
 	engine, _ := setupUpstreamChannelControllerTest(t)
 	tests := []struct {
