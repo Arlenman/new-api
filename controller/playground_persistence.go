@@ -520,22 +520,55 @@ func writeCapturedPlaygroundImageResponse(c *gin.Context, writer *playgroundImag
 		contentType = gin.MIMEJSON
 	}
 
-	if status >= 200 && status < 300 && len(body) > 0 && !strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {
-		rewritten, err := rewritePlaygroundImageResponse(c, body)
-		if err != nil {
-			c.Writer.Header().Del("Content-Length")
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": gin.H{
-					"message": fmt.Sprintf("failed to persist playground image: %s", err.Error()),
-				},
-			})
-			return
+	if status >= 200 && status < 300 && len(body) > 0 {
+		if strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {
+			streamResponse, err := playgroundImageResponseFromStream(body)
+			if err != nil {
+				c.Writer.Header().Del("Content-Length")
+				c.Writer.Header().Del("Transfer-Encoding")
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": gin.H{
+						"message": fmt.Sprintf("failed to parse playground image stream: %s", err.Error()),
+					},
+				})
+				return
+			}
+			body, err = common.Marshal(streamResponse)
+			if err != nil {
+				c.Writer.Header().Del("Content-Length")
+				c.Writer.Header().Del("Transfer-Encoding")
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": gin.H{
+						"message": "failed to encode playground image stream",
+					},
+				})
+				return
+			}
+			contentType = gin.MIMEJSON
 		}
-		body = rewritten
+
+		sessionID := strings.TrimSpace(c.GetHeader(playgroundSessionHeader))
+		messageKey := strings.TrimSpace(c.GetHeader(playgroundMessageKeyHeader))
+		if sessionID != "" && messageKey != "" {
+			rewritten, err := rewritePlaygroundImageResponse(c, body)
+			if err != nil {
+				c.Writer.Header().Del("Content-Length")
+				c.Writer.Header().Del("Transfer-Encoding")
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": gin.H{
+						"message": fmt.Sprintf("failed to persist playground image: %s", err.Error()),
+					},
+				})
+				return
+			}
+			body = rewritten
+		}
 	}
 
 	for key, values := range writer.Header() {
-		if strings.EqualFold(key, "Content-Length") {
+		if strings.EqualFold(key, "Content-Length") ||
+			strings.EqualFold(key, "Content-Type") ||
+			strings.EqualFold(key, "Transfer-Encoding") {
 			continue
 		}
 		c.Writer.Header().Del(key)
@@ -543,6 +576,8 @@ func writeCapturedPlaygroundImageResponse(c *gin.Context, writer *playgroundImag
 			c.Writer.Header().Add(key, value)
 		}
 	}
+	c.Writer.Header().Del("Content-Type")
+	c.Writer.Header().Del("Transfer-Encoding")
 	c.Writer.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	c.Data(status, contentType, body)
 }
@@ -775,6 +810,6 @@ func toPlaygroundSessionResponse(session model.PlaygroundSession) playgroundSess
 
 func decodePlaygroundSessionResponse(raw json.RawMessage) (playgroundSessionResponse, error) {
 	var response playgroundSessionResponse
-	err := json.Unmarshal(raw, &response)
+	err := common.Unmarshal(raw, &response)
 	return response, err
 }

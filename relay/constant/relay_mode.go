@@ -66,12 +66,14 @@ func Path2RelayMode(path string) int {
 		relayMode = RelayModeEmbeddings
 	} else if strings.HasPrefix(path, "/v1/moderations") {
 		relayMode = RelayModeModerations
-	} else if strings.HasPrefix(path, "/v1/images/generations") || strings.HasPrefix(path, "/pg/images/generations") {
+	} else if strings.HasPrefix(path, "/v1/images/generations") || IsPlaygroundImageGenerationPath(path) {
 		relayMode = RelayModeImagesGenerations
-	} else if strings.HasPrefix(path, "/v1/images/edits") || strings.HasPrefix(path, "/pg/images/edits") {
+	} else if strings.HasPrefix(path, "/v1/images/edits") || IsPlaygroundImageEditPath(path) {
 		relayMode = RelayModeImagesEdits
 	} else if strings.HasPrefix(path, "/v1/edits") {
 		relayMode = RelayModeEdits
+	} else if IsPlaygroundResponsesPath(path) {
+		relayMode = RelayModeResponses
 	} else if strings.HasPrefix(path, "/v1/responses/compact") {
 		relayMode = RelayModeResponsesCompact
 	} else if strings.HasPrefix(path, "/v1/responses") {
@@ -92,6 +94,29 @@ func Path2RelayMode(path string) int {
 		relayMode = Path2RelayModeMidjourney(path)
 	}
 	return relayMode
+}
+
+func IsPlaygroundImageGenerationPath(path string) bool {
+	return strings.HasPrefix(path, "/pg/images/generations") ||
+		strings.HasPrefix(path, "/pg/v1/images/generations")
+}
+
+func IsPlaygroundImageEditPath(path string) bool {
+	return strings.HasPrefix(path, "/pg/images/edits") ||
+		strings.HasPrefix(path, "/pg/v1/images/edits")
+}
+
+func IsPlaygroundImagePath(path string) bool {
+	return IsPlaygroundImageGenerationPath(path) || IsPlaygroundImageEditPath(path)
+}
+
+func IsPlaygroundResponsesPath(path string) bool {
+	return strings.HasPrefix(path, "/pg/responses") ||
+		strings.HasPrefix(path, "/pg/v1/responses")
+}
+
+func IsPlaygroundRelayPath(path string) bool {
+	return IsPlaygroundImagePath(path) || IsPlaygroundResponsesPath(path)
 }
 
 func Path2RelayModeMidjourney(path string) int {

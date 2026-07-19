@@ -1,3 +1,25 @@
+ARG GPT_IMAGE_PLAYGROUND_REF=a10477581b3d43ac98d39777e4445625a9db113d
+
+FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS image-playground-builder
+
+ARG GPT_IMAGE_PLAYGROUND_REF
+RUN apk add --no-cache git
+WORKDIR /build
+RUN git init -q source \
+    && git -C source remote add origin https://github.com/CookSleep/gpt_image_playground.git \
+    && for attempt in 1 2 3; do \
+        if git -C source fetch --depth 1 origin "${GPT_IMAGE_PLAYGROUND_REF}"; then break; fi; \
+        if [ "${attempt}" = 3 ]; then exit 1; fi; \
+        sleep $((attempt * 5)); \
+    done \
+    && git -C source checkout --detach FETCH_HEAD
+COPY tools/gpt-image-playground /build/integration
+RUN node /build/integration/patch-upstream.mjs /build/source \
+    && cd /build/source \
+    && npm ci \
+    && npm run build \
+    && node /build/integration/write-build-info.mjs /build/source /build/source/dist
+
 FROM oven/bun:1@sha256:0733e50325078969732ebe3b15ce4c4be5082f18c4ac1a0f0ca4839c2e4e42a7 AS builder
 
 WORKDIR /build/web
@@ -47,6 +69,9 @@ RUN apt-get update \
 
 COPY --from=builder2 /build/new-api /
 COPY LICENSE NOTICE THIRD-PARTY-LICENSES.md /licenses/
+COPY --from=image-playground-builder /build/source/LICENSE /licenses/gpt-image-playground-LICENSE
+COPY --from=image-playground-builder /build/source/dist /opt/new-api/tools/gpt-image-playground
+ENV GPT_IMAGE_PLAYGROUND_DIST=/opt/new-api/tools/gpt-image-playground
 EXPOSE 3000
 WORKDIR /data
 ENTRYPOINT ["/new-api"]

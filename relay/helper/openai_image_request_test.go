@@ -75,16 +75,20 @@ func TestGetAndValidOpenAIImageRequestMultipartStream(t *testing.T) {
 func TestGetAndValidOpenAIImageRequestForcesPlaygroundGPTImageStream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	body := bytes.NewBufferString(`{"model":"gpt-image-2","prompt":"draw a cat"}`)
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest(http.MethodPost, "/pg/images/generations", body)
-	c.Request.Header.Set("Content-Type", "application/json")
+	for _, path := range []string{"/pg/images/generations", "/pg/v1/images/generations"} {
+		t.Run(path, func(t *testing.T) {
+			body := bytes.NewBufferString(`{"model":"gpt-image-2","prompt":"draw a cat"}`)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, path, body)
+			c.Request.Header.Set("Content-Type", "application/json")
 
-	req, err := GetAndValidOpenAIImageRequest(c, relayconstant.RelayModeImagesGenerations)
-	require.NoError(t, err)
-	require.NotNil(t, req.Stream)
-	require.True(t, *req.Stream)
-	require.True(t, req.IsStream(c))
+			req, err := GetAndValidOpenAIImageRequest(c, relayconstant.RelayModeImagesGenerations)
+			require.NoError(t, err)
+			require.NotNil(t, req.Stream)
+			require.True(t, *req.Stream)
+			require.True(t, req.IsStream(c))
+		})
+	}
 }
 
 // TestGetAndValidOpenAIImageRequestNBounds guards the billing invariant that

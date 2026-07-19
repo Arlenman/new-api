@@ -86,7 +86,15 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 	var err error
 	selectGroup := param.TokenGroup
 	userGroup := common.GetContextKeyString(param.Ctx, constant.ContextKeyUserGroup)
-	excludedChannelIds, _ := common.GetContextKeyType[map[int]struct{}](param.Ctx, constant.ContextKeyModelCapacityExcludedChannelIds)
+	capacityExcludedChannelIds, _ := common.GetContextKeyType[map[int]struct{}](param.Ctx, constant.ContextKeyModelCapacityExcludedChannelIds)
+	playgroundRelayExcludedChannelIds, _ := common.GetContextKeyType[map[int]struct{}](param.Ctx, constant.ContextKeyPlaygroundRelayExcludedChannelIds)
+	excludedChannelIds := make(map[int]struct{}, len(capacityExcludedChannelIds)+len(playgroundRelayExcludedChannelIds))
+	for channelID := range capacityExcludedChannelIds {
+		excludedChannelIds[channelID] = struct{}{}
+	}
+	for channelID := range playgroundRelayExcludedChannelIds {
+		excludedChannelIds[channelID] = struct{}{}
+	}
 	priorityRetry := param.GetRetry() - len(excludedChannelIds)
 	if priorityRetry < 0 {
 		priorityRetry = 0

@@ -204,14 +204,17 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
-			if isModelCapacityError(relayInfo.LastError) {
+			if relayInfo.LastError != nil && (isModelCapacityError(relayInfo.LastError) ||
+				isPlaygroundImageQuotaExhaustedError(c, relayInfo.LastError) ||
+				isPlaygroundRelayTransportFailure(c, relayInfo.LastError) ||
+				isPlaygroundRelayGatewayTimeout(c, relayInfo.LastError.StatusCode)) {
 				newAPIError = relayInfo.LastError
 			} else {
 				newAPIError = channelErr
 			}
 			break
 		}
-		if shouldStopPlaygroundImageGatewayTimeoutRetry(c, channel.Id, relayInfo.LastError, retryParam.GetRetry()) {
+		if shouldStopPlaygroundRelayGatewayTimeoutRetry(c, channel.Id, relayInfo.LastError, retryParam.GetRetry()) {
 			newAPIError = relayInfo.LastError
 			break
 		}
@@ -271,7 +274,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			maxRetryTimes = 3
 		}
 
-		if !shouldRetry(c, newAPIError, maxRetryTimes-retryParam.GetRetry()) {
+		willRetry := shouldRetry(c, newAPIError, maxRetryTimes-retryParam.GetRetry())
+		handlePlaygroundRelayChannelFailure(c, channel.Id, newAPIError, willRetry)
+		if !willRetry {
 			break
 		}
 	}
@@ -311,7 +316,7 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-const playgroundImageGatewayTimeoutSameChannelRetryLimit = 1
+const playgroundRelayGatewayTimeoutSameChannelRetryLimit = 1
 
 func addUsedChannel(c *gin.Context, channelId int) {
 	useChannel := c.GetStringSlice("use_channel")
@@ -416,10 +421,7 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 		}
 		return true
 	}
-	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
-		return false
-	}
-	if isPlaygroundImageTransportFailure(c, openaiErr) {
+	if isPlaygroundImageQuotaExhaustedError(c, openaiErr) {
 		if retryTimes <= 0 {
 			return false
 		}
@@ -432,7 +434,40 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 		if _, ok := c.Get(string(constant.ContextKeyTokenSpecificChannelId)); ok {
 			return false
 		}
-		return true
+		return !isSinglePlaygroundRelayCandidateChannel(c)
+	}
+	if isPlaygroundRelayGatewayTimeout(c, openaiErr.StatusCode) {
+		if retryTimes <= 0 {
+			return false
+		}
+		if c.Writer != nil && c.Writer.Written() {
+			return false
+		}
+		if _, ok := c.Get("specific_channel_id"); ok {
+			return false
+		}
+		if _, ok := c.Get(string(constant.ContextKeyTokenSpecificChannelId)); ok {
+			return false
+		}
+		return !isSinglePlaygroundRelayCandidateChannel(c)
+	}
+	if isPlaygroundRelayTransportFailure(c, openaiErr) {
+		if retryTimes <= 0 {
+			return false
+		}
+		if c.Writer != nil && c.Writer.Written() {
+			return false
+		}
+		if _, ok := c.Get("specific_channel_id"); ok {
+			return false
+		}
+		if _, ok := c.Get(string(constant.ContextKeyTokenSpecificChannelId)); ok {
+			return false
+		}
+		return !isSinglePlaygroundRelayCandidateChannel(c)
+	}
+	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+		return false
 	}
 	if types.IsChannelError(openaiErr) {
 		return true
@@ -453,8 +488,8 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if code < 100 || code > 599 {
 		return true
 	}
-	if isPlaygroundImageGatewayTimeout(c, code) {
-		if isSinglePlaygroundImageCandidateChannel(c) {
+	if isPlaygroundRelayGatewayTimeout(c, code) {
+		if isSinglePlaygroundRelayCandidateChannel(c) {
 			return false
 		}
 		return true
@@ -472,10 +507,13 @@ func shouldIncreaseRelayRetryBudget(c *gin.Context, openaiErr *types.NewAPIError
 	if isModelCapacityError(openaiErr) {
 		return true
 	}
-	if isPlaygroundImageGatewayTimeout(c, openaiErr.StatusCode) {
+	if isPlaygroundImageQuotaExhaustedError(c, openaiErr) {
 		return true
 	}
-	if isPlaygroundImageTransportFailure(c, openaiErr) {
+	if isPlaygroundRelayGatewayTimeout(c, openaiErr.StatusCode) {
+		return true
+	}
+	if isPlaygroundRelayTransportFailure(c, openaiErr) {
 		return true
 	}
 	return shouldRetryByAutomaticDisableStatusCode(openaiErr)
@@ -488,7 +526,10 @@ func shouldAutoDisableChannel(c *gin.Context, err *types.NewAPIError) bool {
 	if isModelCapacityError(err) {
 		return false
 	}
-	if isPlaygroundImageGatewayTimeout(c, err.StatusCode) {
+	if isPlaygroundImageQuotaExhaustedError(c, err) {
+		return false
+	}
+	if isPlaygroundRelayGatewayTimeout(c, err.StatusCode) {
 		return false
 	}
 	return service.ShouldDisableChannel(err)
@@ -501,38 +542,70 @@ func isModelCapacityError(err *types.NewAPIError) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "selected model is at capacity. please try a different model.")
 }
 
-func isPlaygroundImageGatewayTimeout(c *gin.Context, code int) bool {
+func isPlaygroundImageQuotaExhaustedError(c *gin.Context, err *types.NewAPIError) bool {
+	if err == nil || err.StatusCode != http.StatusTooManyRequests || c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	if !relayconstant.IsPlaygroundImagePath(c.Request.URL.Path) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "no available image quota")
+}
+
+func isPlaygroundRelayGatewayTimeout(c *gin.Context, code int) bool {
 	if code != http.StatusGatewayTimeout && code != 524 {
 		return false
 	}
-	return isPlaygroundImageRequest(c)
+	return isPlaygroundRelayRequest(c)
 }
 
-func isPlaygroundImageTransportFailure(c *gin.Context, err *types.NewAPIError) bool {
+func isPlaygroundRelayTransportFailure(c *gin.Context, err *types.NewAPIError) bool {
 	if err == nil || err.GetErrorCode() != types.ErrorCodeDoRequestFailed {
 		return false
 	}
-	return isPlaygroundImageRequest(c)
+	return isPlaygroundRelayRequest(c)
 }
 
-func isPlaygroundImageRequest(c *gin.Context) bool {
+func isPlaygroundRelayRequest(c *gin.Context) bool {
 	if c == nil || c.Request == nil || c.Request.URL == nil {
 		return false
 	}
-	path := c.Request.URL.Path
-	return strings.HasPrefix(path, "/pg/images/generations") || strings.HasPrefix(path, "/pg/images/edits")
+	return relayconstant.IsPlaygroundRelayPath(c.Request.URL.Path)
 }
 
-func isSinglePlaygroundImageCandidateChannel(c *gin.Context) bool {
+func isSinglePlaygroundRelayCandidateChannel(c *gin.Context) bool {
 	usedChannels := c.GetStringSlice("use_channel")
 	if len(usedChannels) != 1 {
 		return false
 	}
-	return common.GetContextKeyInt(c, constant.ContextKeyPlaygroundImageCandidateChannelCount) == 1
+	return common.GetContextKeyInt(c, constant.ContextKeyPlaygroundRelayCandidateChannelCount) == 1
 }
 
-func shouldStopPlaygroundImageGatewayTimeoutRetry(c *gin.Context, channelID int, lastErr *types.NewAPIError, retry int) bool {
-	if retry <= 0 || lastErr == nil || !isPlaygroundImageGatewayTimeout(c, lastErr.StatusCode) {
+func handlePlaygroundRelayChannelFailure(c *gin.Context, channelID int, err *types.NewAPIError, willRetry bool) {
+	if channelID <= 0 || err == nil {
+		return
+	}
+	if !isPlaygroundImageQuotaExhaustedError(c, err) &&
+		!isPlaygroundRelayTransportFailure(c, err) &&
+		!isPlaygroundRelayGatewayTimeout(c, err.StatusCode) {
+		return
+	}
+
+	service.ClearCurrentChannelAffinityCache(c)
+	if !willRetry {
+		return
+	}
+
+	excludedChannelIDs, _ := common.GetContextKeyType[map[int]struct{}](c, constant.ContextKeyPlaygroundRelayExcludedChannelIds)
+	if excludedChannelIDs == nil {
+		excludedChannelIDs = make(map[int]struct{})
+	}
+	excludedChannelIDs[channelID] = struct{}{}
+	common.SetContextKey(c, constant.ContextKeyPlaygroundRelayExcludedChannelIds, excludedChannelIDs)
+}
+
+func shouldStopPlaygroundRelayGatewayTimeoutRetry(c *gin.Context, channelID int, lastErr *types.NewAPIError, retry int) bool {
+	if retry <= 0 || lastErr == nil || !isPlaygroundRelayGatewayTimeout(c, lastErr.StatusCode) {
 		return false
 	}
 	usedCount := 0
@@ -541,7 +614,7 @@ func shouldStopPlaygroundImageGatewayTimeoutRetry(c *gin.Context, channelID int,
 			usedCount++
 		}
 	}
-	return usedCount > playgroundImageGatewayTimeoutSameChannelRetryLimit
+	return usedCount > playgroundRelayGatewayTimeoutSameChannelRetryLimit
 }
 
 func buildChannelErrorLogOther(c *gin.Context, err *types.NewAPIError, autoDisableTriggered bool) map[string]interface{} {

@@ -24,6 +24,8 @@ import {
   type ReactNode,
 } from 'react'
 
+import { cn } from '@/lib/utils'
+
 import { Main } from './main'
 import { PageFooterProvider } from './page-footer'
 
@@ -53,6 +55,7 @@ export type SectionPageLayoutProps = {
   children: ReactNode
   fixedContent?: boolean
   actionsBelowTitle?: boolean
+  immersive?: boolean
 }
 
 export function SectionPageLayout(props: SectionPageLayoutProps) {
@@ -79,10 +82,23 @@ export function SectionPageLayout(props: SectionPageLayoutProps) {
     }
   })
 
+  const headerClassName = props.immersive
+    ? 'bg-background shrink-0 border-b px-3 py-2'
+    : 'shrink-0 px-3 pt-3 pb-2.5 sm:px-4 sm:pt-5 sm:pb-3'
+
+  let contentClassName =
+    'min-h-0 flex-1 overflow-auto px-3 pt-1 pb-3 sm:px-4 sm:pt-1.5 sm:pb-4'
+  if (props.immersive) {
+    contentClassName = 'min-h-0 flex-1 overflow-hidden p-0'
+  } else if (props.fixedContent) {
+    contentClassName =
+      'min-h-0 flex-1 overflow-hidden px-3 pt-1 pb-3 sm:px-4 sm:pt-1.5 sm:pb-4'
+  }
+
   return (
     <PageFooterProvider container={footerContainer}>
       <Main>
-        <div className='shrink-0 px-3 pt-3 pb-2.5 sm:px-4 sm:pt-5 sm:pb-3'>
+        <div className={headerClassName}>
           {breadcrumb != null && (
             <div className='mb-2 sm:mb-3'>{breadcrumb}</div>
           )}
@@ -114,19 +130,14 @@ export function SectionPageLayout(props: SectionPageLayoutProps) {
           </div>
         </div>
 
-        <div
-          className={
-            props.fixedContent
-              ? 'min-h-0 flex-1 overflow-hidden px-3 pt-1 pb-3 sm:px-4 sm:pt-1.5 sm:pb-4'
-              : 'min-h-0 flex-1 overflow-auto px-3 pt-1 pb-3 sm:px-4 sm:pt-1.5 sm:pb-4'
-          }
-        >
-          {content}
-        </div>
+        <div className={contentClassName}>{content}</div>
 
         <div
           ref={setFooterContainer}
-          className='bg-background shrink-0 border-t px-3 py-2.5 empty:hidden sm:px-4 sm:py-3'
+          className={cn(
+            'bg-background shrink-0 border-t px-3 py-2.5 empty:hidden sm:px-4 sm:py-3',
+            props.immersive && 'hidden'
+          )}
         />
       </Main>
     </PageFooterProvider>

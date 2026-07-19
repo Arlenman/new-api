@@ -16,11 +16,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useRouterState } from '@tanstack/react-router'
+import { useEffect, useState } from 'react'
+
 import { AnimatedOutlet } from '@/components/page-transition'
 import { SkipToMain } from '@/components/skip-to-main'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { LayoutProvider } from '@/context/layout-provider'
 import { SearchProvider } from '@/context/search-provider'
+import { isImagePlaygroundPath } from '@/features/image-playground/lib/persistent-mount'
+import { PersistentImagePlayground } from '@/features/image-playground/persistent-image-playground'
 import { getCookie } from '@/lib/cookies'
 import { cn } from '@/lib/utils'
 
@@ -33,24 +38,57 @@ type AuthenticatedLayoutProps = {
 
 export function AuthenticatedLayout(props: AuthenticatedLayoutProps) {
   const defaultOpen = getCookie('sidebar_state') !== 'false'
+  const activeTool = useRouterState({
+    select: (state) => {
+      const pathname = state.location.pathname
+      if (isImagePlaygroundPath(pathname)) return 'image-playground'
+      return null
+    },
+  })
+  const [imagePlaygroundImmersive, setImagePlaygroundImmersive] =
+    useState(false)
+
+  useEffect(() => {
+    if (activeTool === 'image-playground') return
+
+    setImagePlaygroundImmersive(false)
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => undefined)
+    }
+  }, [activeTool])
 
   return (
     <LayoutProvider>
       <SearchProvider>
         <SidebarProvider defaultOpen={defaultOpen} className='flex-col'>
-          <SkipToMain />
-          <AppHeader />
-          <div className='flex min-h-0 w-full flex-1'>
-            <AppSidebar />
+          {!imagePlaygroundImmersive && <SkipToMain />}
+          {!imagePlaygroundImmersive && <AppHeader />}
+          <div
+            className={cn(
+              'flex min-h-0 w-full flex-1',
+              imagePlaygroundImmersive && 'h-svh'
+            )}
+          >
+            {!imagePlaygroundImmersive && <AppSidebar />}
             <SidebarInset
               className={cn(
-                '@container/content',
-                'h-[calc(100svh-var(--app-header-height,0px))]',
-                'min-h-0 overflow-hidden',
-                'peer-data-[variant=inset]:h-[calc(100svh-var(--app-header-height,0px)-(var(--spacing)*4))]'
+                '@container/content min-h-0 overflow-hidden',
+                imagePlaygroundImmersive
+                  ? 'h-svh w-full'
+                  : [
+                      'h-[calc(100svh-var(--app-header-height,0px))]',
+                      'peer-data-[variant=inset]:h-[calc(100svh-var(--app-header-height,0px)-(var(--spacing)*4))]',
+                    ]
               )}
             >
-              {props.children ?? <AnimatedOutlet />}
+              <div className={activeTool ? 'hidden' : 'contents'}>
+                {props.children ?? <AnimatedOutlet />}
+              </div>
+              <PersistentImagePlayground
+                active={activeTool === 'image-playground'}
+                immersive={imagePlaygroundImmersive}
+                onImmersiveChange={setImagePlaygroundImmersive}
+              />
             </SidebarInset>
           </div>
         </SidebarProvider>

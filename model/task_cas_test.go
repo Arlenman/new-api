@@ -57,6 +57,13 @@ func TestMain(m *testing.M) {
 		&PlaygroundSession{},
 		&PlaygroundMessage{},
 		&PlaygroundFile{},
+		&UserToolItem{},
+		&UserToolAsset{},
+		&UserToolItemAsset{},
+		&UserToolPreference{},
+		&UserToolChange{},
+		&UserToolMutationReceipt{},
+		&UserToolRuntimeSession{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
 	}
@@ -89,6 +96,13 @@ func truncateTables(t *testing.T) {
 		DB.Exec("DELETE FROM playground_files")
 		DB.Exec("DELETE FROM playground_messages")
 		DB.Exec("DELETE FROM playground_sessions")
+		DB.Exec("DELETE FROM user_tool_item_assets")
+		DB.Exec("DELETE FROM user_tool_changes")
+		DB.Exec("DELETE FROM user_tool_mutation_receipts")
+		DB.Exec("DELETE FROM user_tool_runtime_sessions")
+		DB.Exec("DELETE FROM user_tool_preferences")
+		DB.Exec("DELETE FROM user_tool_assets")
+		DB.Exec("DELETE FROM user_tool_items")
 	})
 }
 

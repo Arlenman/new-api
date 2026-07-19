@@ -49,9 +49,14 @@ func GetStatus(c *gin.Context) {
 
 	passkeySetting := system_setting.GetPasskeySettings()
 	legalSetting := system_setting.GetLegalSettings()
+	imagePlaygroundStatus := common.GetImagePlaygroundStatus()
 
 	data := gin.H{
 		"version":                     common.Version,
+		"image_playground_available":  imagePlaygroundStatus.Available,
+		"image_playground_version":    imagePlaygroundStatus.Version,
+		"image_playground_commit":     imagePlaygroundStatus.Commit,
+		"image_playground_built_at":   imagePlaygroundStatus.BuiltAt,
 		"start_time":                  common.StartTime,
 		"email_verification":          common.EmailVerificationEnabled,
 		"github_oauth":                common.GitHubOAuthEnabled,

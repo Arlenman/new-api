@@ -20,6 +20,7 @@ const (
 	ContextKeyTokenModelLimitEnabled ContextKey = "token_model_limit_enabled"
 	ContextKeyTokenModelLimit        ContextKey = "token_model_limit"
 	ContextKeyTokenCrossGroupRetry   ContextKey = "token_cross_group_retry"
+	ContextKeyUserTool               ContextKey = "user_tool"
 
 	/* channel related keys */
 	ContextKeyChannelId                ContextKey = "channel_id"
@@ -43,7 +44,8 @@ const (
 	ContextKeyAutoGroupIndex      ContextKey = "auto_group_index"
 	ContextKeyAutoGroupRetryIndex ContextKey = "auto_group_retry_index"
 
-	ContextKeyPlaygroundImageCandidateChannelCount ContextKey = "playground_image_candidate_channel_count"
+	ContextKeyPlaygroundRelayCandidateChannelCount ContextKey = "playground_relay_candidate_channel_count"
+	ContextKeyPlaygroundRelayExcludedChannelIds    ContextKey = "playground_relay_excluded_channel_ids"
 
 	/* user related keys */
 	ContextKeyUserId      ContextKey = "id"

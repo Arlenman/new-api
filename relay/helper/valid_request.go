@@ -278,8 +278,7 @@ func shouldForcePlaygroundImageStream(c *gin.Context, model string) bool {
 	if c == nil || c.Request == nil || c.Request.URL == nil {
 		return false
 	}
-	path := c.Request.URL.Path
-	if !strings.HasPrefix(path, "/pg/images/generations") && !strings.HasPrefix(path, "/pg/images/edits") {
+	if !relayconstant.IsPlaygroundImagePath(c.Request.URL.Path) {
 		return false
 	}
 	return isPlaygroundImageStreamModel(model)

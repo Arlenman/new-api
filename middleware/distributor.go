@@ -101,7 +101,7 @@ func Distribute() func(c *gin.Context) {
 						common.SetContextKey(c, constant.ContextKeyUsingGroup, usingGroup)
 					}
 				}
-				recordPlaygroundImageCandidateChannelCount(c, usingGroup, modelRequest.Model)
+				recordPlaygroundRelayCandidateChannelCount(c, usingGroup, modelRequest.Model)
 
 				if preferredChannelID, found := service.GetPreferredChannelByAffinity(c, modelRequest.Model, usingGroup); found {
 					affinityUsable := false
@@ -161,7 +161,7 @@ func Distribute() func(c *gin.Context) {
 					}
 				}
 				if originalUsingGroup == "auto" && selectGroup != "" {
-					recordPlaygroundImageCandidateChannelCount(c, selectGroup, modelRequest.Model)
+					recordPlaygroundRelayCandidateChannelCount(c, selectGroup, modelRequest.Model)
 				}
 			}
 		}
@@ -174,12 +174,12 @@ func Distribute() func(c *gin.Context) {
 	}
 }
 
-func recordPlaygroundImageCandidateChannelCount(c *gin.Context, group string, modelName string) {
+func recordPlaygroundRelayCandidateChannelCount(c *gin.Context, group string, modelName string) {
 	if c == nil || c.Request == nil || c.Request.URL == nil {
 		return
 	}
 	path := c.Request.URL.Path
-	if !strings.HasPrefix(path, "/pg/images/generations") && !strings.HasPrefix(path, "/pg/images/edits") {
+	if !relayconstant.IsPlaygroundRelayPath(path) {
 		return
 	}
 	if group == "auto" {
@@ -189,10 +189,10 @@ func recordPlaygroundImageCandidateChannelCount(c *gin.Context, group string, mo
 		for _, autoGroup := range autoGroups {
 			candidateCount += model.CountEnabledChannelsForGroupModel(autoGroup, modelName, path)
 		}
-		common.SetContextKey(c, constant.ContextKeyPlaygroundImageCandidateChannelCount, candidateCount)
+		common.SetContextKey(c, constant.ContextKeyPlaygroundRelayCandidateChannelCount, candidateCount)
 		return
 	}
-	common.SetContextKey(c, constant.ContextKeyPlaygroundImageCandidateChannelCount, model.CountEnabledChannelsForGroupModel(group, modelName, path))
+	common.SetContextKey(c, constant.ContextKeyPlaygroundRelayCandidateChannelCount, model.CountEnabledChannelsForGroupModel(group, modelName, path))
 }
 
 // channelSupportsRequestPath reports whether a channel can serve the request path.
@@ -390,9 +390,9 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			modelRequest.Model = c.Param("model")
 		}
 	}
-	if strings.HasPrefix(c.Request.URL.Path, "/v1/images/generations") || strings.HasPrefix(c.Request.URL.Path, "/pg/images/generations") {
+	if strings.HasPrefix(c.Request.URL.Path, "/v1/images/generations") || relayconstant.IsPlaygroundImageGenerationPath(c.Request.URL.Path) {
 		modelRequest.Model = common.GetStringIfEmpty(modelRequest.Model, "dall-e")
-	} else if strings.HasPrefix(c.Request.URL.Path, "/v1/images/edits") || strings.HasPrefix(c.Request.URL.Path, "/pg/images/edits") {
+	} else if strings.HasPrefix(c.Request.URL.Path, "/v1/images/edits") || relayconstant.IsPlaygroundImageEditPath(c.Request.URL.Path) {
 		//modelRequest.Model = common.GetStringIfEmpty(c.PostForm("model"), "gpt-image-1")
 		contentType := c.ContentType()
 		if slices.Contains([]string{gin.MIMEPOSTForm, gin.MIMEMultipartPOSTForm}, contentType) {

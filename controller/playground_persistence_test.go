@@ -255,6 +255,46 @@ func TestWriteCapturedPlaygroundImageResponseUpdatesContentLengthAfterRewrite(t 
 	require.Contains(t, recorder.Body.String(), "/api/playground/files/")
 }
 
+func TestWriteCapturedPlaygroundImageResponseConvertsStreamToJSON(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	originalWriter := ctx.Writer
+	ctx.Set("id", 1)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/v1/images/generations", nil)
+
+	captureWriter := newPlaygroundImageCaptureWriter(ctx.Writer)
+	ctx.Writer = captureWriter
+	ctx.Writer.Header().Set("Content-Type", "text/event-stream")
+	ctx.Writer.Header().Set("Transfer-Encoding", "chunked")
+
+	rawStream := strings.Join([]string{
+		`event: image_generation.completed`,
+		`data: {"type":"image_generation.completed","b64_json":"` + base64.StdEncoding.EncodeToString([]byte("final-image")) + `","revised_prompt":"stream revised","created_at":1234}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	_, err := ctx.Writer.Write([]byte(rawStream))
+	require.NoError(t, err)
+
+	ctx.Writer = originalWriter
+	writeCapturedPlaygroundImageResponse(ctx, captureWriter)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, gin.MIMEJSON, recorder.Header().Get("Content-Type"))
+	require.Empty(t, recorder.Header().Get("Transfer-Encoding"))
+	require.Equal(t, strconv.Itoa(recorder.Body.Len()), recorder.Header().Get("Content-Length"))
+	require.NotContains(t, recorder.Body.String(), "event:")
+
+	var response dto.ImageResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.Equal(t, int64(1234), response.Created)
+	require.Len(t, response.Data, 1)
+	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("final-image")), response.Data[0].B64Json)
+	require.Empty(t, response.Data[0].Url)
+	require.Equal(t, "stream revised", response.Data[0].RevisedPrompt)
+}
+
 func TestPlaygroundImageCaptureWriterDoesNotFlushOriginalResponse(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)

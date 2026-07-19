@@ -16,6 +16,10 @@ func Playground(c *gin.Context) {
 	PlaygroundRelay(c, types.RelayFormatOpenAI)
 }
 
+func PlaygroundResponses(c *gin.Context) {
+	PlaygroundRelay(c, types.RelayFormatOpenAIResponses)
+}
+
 func PlaygroundImage(c *gin.Context) {
 	if shouldRunPlaygroundImageAsync(c) {
 		startAsyncPlaygroundImage(c)
@@ -65,12 +69,20 @@ func PlaygroundRelay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	userCache.WriteContext(c)
 
-	tempToken := &model.Token{
-		UserId: userId,
-		Name:   fmt.Sprintf("playground-%s", relayInfo.UsingGroup),
-		Group:  relayInfo.UsingGroup,
-	}
-	_ = middleware.SetupContextForToken(c, tempToken)
+	setupPlaygroundTokenContext(c, userId, relayInfo.UsingGroup)
 
 	Relay(c, relayFormat)
+}
+
+func setupPlaygroundTokenContext(c *gin.Context, userID int, usingGroup string) {
+	if c.GetInt("token_id") > 0 {
+		return
+	}
+
+	tempToken := &model.Token{
+		UserId: userID,
+		Name:   fmt.Sprintf("playground-%s", usingGroup),
+		Group:  usingGroup,
+	}
+	_ = middleware.SetupContextForToken(c, tempToken)
 }

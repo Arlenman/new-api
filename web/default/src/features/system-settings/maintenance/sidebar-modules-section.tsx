@@ -92,6 +92,10 @@ export function SidebarModulesSection({
         title: t('Quick Chat'),
         description: t('Experiment with prompts and models in real time.'),
       },
+      imagePlayground: {
+        title: t('Image Playground'),
+        description: t('Generate images with account or custom API keys.'),
+      },
       chat: {
         title: t('Chat'),
         description: t('Access previous conversations and start new ones.'),

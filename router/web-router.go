@@ -3,6 +3,7 @@ package router
 import (
 	"embed"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -29,10 +30,30 @@ func SetWebRouter(router *gin.Engine, assets ThemeAssets) {
 	router.Use(gzip.Gzip(gzip.DefaultCompression))
 	router.Use(middleware.GlobalWebRateLimit())
 	router.Use(middleware.Cache())
+
+	common.SetImagePlaygroundStatus(common.ImagePlaygroundStatus{})
+	if dist := strings.TrimSpace(os.Getenv("GPT_IMAGE_PLAYGROUND_DIST")); dist != "" {
+		tool, err := loadImagePlayground(dist)
+		if err != nil {
+			common.SysError("image playground disabled: " + err.Error())
+		} else {
+			common.SetImagePlaygroundStatus(common.ImagePlaygroundStatus{
+				Available: true,
+				Version:   tool.buildInfo.Version,
+				Commit:    tool.buildInfo.Commit,
+				BuiltAt:   tool.buildInfo.BuiltAt,
+			})
+			router.GET(imagePlaygroundRoute, middleware.DisableCache(), middleware.TokenOrUserAuth(), func(c *gin.Context) {
+				c.Redirect(http.StatusTemporaryRedirect, imagePlaygroundRoute+"/")
+			})
+			router.GET(imagePlaygroundRoute+"/*filepath", middleware.DisableCache(), middleware.TokenOrUserAuth(), tool.serve)
+		}
+	}
+
 	router.Use(static.Serve("/", themeFS))
 	router.NoRoute(func(c *gin.Context) {
 		c.Set(middleware.RouteTagKey, "web")
-		if strings.HasPrefix(c.Request.RequestURI, "/v1") || strings.HasPrefix(c.Request.RequestURI, "/api") || strings.HasPrefix(c.Request.RequestURI, "/assets") {
+		if strings.HasPrefix(c.Request.RequestURI, "/v1") || strings.HasPrefix(c.Request.RequestURI, "/api") || strings.HasPrefix(c.Request.RequestURI, "/assets") || strings.HasPrefix(c.Request.RequestURI, imagePlaygroundRoute) {
 			controller.RelayNotFound(c)
 			return
 		}

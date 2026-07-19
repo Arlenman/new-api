@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
@@ -56,6 +57,32 @@ func TestShouldRetryByAutomaticDisableStatusCode(t *testing.T) {
 	require.False(t, shouldRetryByAutomaticDisableStatusCode(alwaysSkipErr))
 }
 
+func TestIsPlaygroundRelayRequestRecognizesCompatibilityPaths(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "/pg/images/generations", want: true},
+		{path: "/pg/v1/images/generations", want: true},
+		{path: "/pg/images/edits", want: true},
+		{path: "/pg/v1/images/edits", want: true},
+		{path: "/pg/responses", want: true},
+		{path: "/pg/v1/responses", want: true},
+		{path: "/v1/images/generations", want: false},
+		{path: "/v1/responses", want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, test.path, nil)
+			require.Equal(t, test.want, isPlaygroundRelayRequest(ctx))
+		})
+	}
+}
+
 func TestShouldRetryAllowsPlaygroundImageGatewayTimeouts(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -77,6 +104,44 @@ func TestShouldIncreaseRetryBudgetForPlaygroundImageGatewayTimeouts(t *testing.T
 	require.True(t, shouldIncreaseRelayRetryBudget(ctx, err))
 }
 
+func TestShouldRetryAllowsPlaygroundResponsesTransportFailures(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/v1/responses", nil)
+	ctx.Set("use_channel", []string{"101"})
+	common.SetContextKey(ctx, constant.ContextKeyPlaygroundRelayCandidateChannelCount, 2)
+
+	err := types.NewErrorWithStatusCode(errors.New("socks connect failed: EOF"), types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+	require.True(t, shouldIncreaseRelayRetryBudget(ctx, err))
+	require.True(t, shouldRetry(ctx, err, 1))
+}
+
+func TestShouldRetryAllowsPlaygroundResponsesGatewayTimeouts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/responses", nil)
+	ctx.Set("use_channel", []string{"101"})
+	common.SetContextKey(ctx, constant.ContextKeyPlaygroundRelayCandidateChannelCount, 2)
+
+	for _, statusCode := range []int{http.StatusGatewayTimeout, 524} {
+		err := types.NewErrorWithStatusCode(errors.New("gateway timeout"), types.ErrorCodeBadResponseStatusCode, statusCode)
+		require.True(t, shouldIncreaseRelayRetryBudget(ctx, err))
+		require.True(t, shouldRetry(ctx, err, 1))
+	}
+}
+
+func TestPlaygroundResponsesFailureDoesNotRetryAfterStreamOutput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/v1/responses", nil)
+	ctx.Set("use_channel", []string{"101"})
+	common.SetContextKey(ctx, constant.ContextKeyPlaygroundRelayCandidateChannelCount, 2)
+	ctx.Writer.WriteHeaderNow()
+
+	err := types.NewErrorWithStatusCode(errors.New("socks connect failed: EOF"), types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+	require.False(t, shouldRetry(ctx, err, 1))
+}
+
 func TestPlaygroundImageTransportFailureGetsLimitedRetryBudget(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -95,6 +160,63 @@ func TestPlaygroundImageTransportFailureGetsLimitedRetryBudget(t *testing.T) {
 
 	require.True(t, shouldIncreaseRelayRetryBudget(ctx, err))
 	require.True(t, shouldRetry(ctx, err, 1))
+}
+
+func TestPlaygroundImageFailuresRetryDespiteChannelAffinitySkip(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newContext := func() *gin.Context {
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/v1/images/generations", nil)
+		ctx.Set("channel_affinity_skip_retry_on_failure", true)
+		require.True(t, service.ShouldSkipRetryAfterChannelAffinityFailure(ctx))
+		return ctx
+	}
+
+	transportContext := newContext()
+	transportErr := types.NewErrorWithStatusCode(errors.New("socks connect failed: EOF"), types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+	require.True(t, shouldRetry(transportContext, transportErr, 1))
+
+	timeoutContext := newContext()
+	common.SetContextKey(timeoutContext, constant.ContextKeyPlaygroundRelayCandidateChannelCount, 2)
+	timeoutErr := types.NewErrorWithStatusCode(errors.New("cloudflare timeout"), types.ErrorCodeBadResponseStatusCode, 524)
+	require.True(t, shouldRetry(timeoutContext, timeoutErr, 1))
+}
+
+func TestPlaygroundImageTransportFailureSkipsRetryWithSingleCandidate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/v1/images/generations", nil)
+	ctx.Set("use_channel", []string{"101"})
+	common.SetContextKey(ctx, constant.ContextKeyPlaygroundRelayCandidateChannelCount, 1)
+
+	err := types.NewErrorWithStatusCode(errors.New("socks connect failed: EOF"), types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+	require.False(t, shouldRetry(ctx, err, 1))
+}
+
+func TestHandlePlaygroundImageChannelFailureExcludesFailedChannelForRetry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/v1/images/generations", nil)
+
+	err := types.NewErrorWithStatusCode(errors.New("socks connect failed: EOF"), types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+	handlePlaygroundRelayChannelFailure(ctx, 101, err, true)
+
+	excludedChannelIDs, ok := common.GetContextKeyType[map[int]struct{}](ctx, constant.ContextKeyPlaygroundRelayExcludedChannelIds)
+	require.True(t, ok)
+	require.Contains(t, excludedChannelIDs, 101)
+}
+
+func TestHandlePlaygroundImageChannelFailureDoesNotExcludeWithoutRetry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/v1/images/generations", nil)
+
+	err := types.NewErrorWithStatusCode(errors.New("socks connect failed: EOF"), types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+	handlePlaygroundRelayChannelFailure(ctx, 101, err, false)
+
+	_, ok := common.GetContextKeyType[map[int]struct{}](ctx, constant.ContextKeyPlaygroundRelayExcludedChannelIds)
+	require.False(t, ok)
 }
 
 func TestPlaygroundImageTransportFailureRetryDoesNotAffectRegularRelay(t *testing.T) {
@@ -158,15 +280,15 @@ func TestShouldStopPlaygroundImageGatewayTimeoutRetryAfterSameChannelRetryLimit(
 	ctx.Set("use_channel", []string{"106"})
 
 	err := types.NewErrorWithStatusCode(errors.New("cloudflare timeout"), types.ErrorCodeBadResponseStatusCode, 524)
-	require.False(t, shouldStopPlaygroundImageGatewayTimeoutRetry(ctx, 106, err, 1))
-	require.False(t, shouldStopPlaygroundImageGatewayTimeoutRetry(ctx, 107, err, 1))
-	require.False(t, shouldStopPlaygroundImageGatewayTimeoutRetry(ctx, 106, err, 0))
+	require.False(t, shouldStopPlaygroundRelayGatewayTimeoutRetry(ctx, 106, err, 1))
+	require.False(t, shouldStopPlaygroundRelayGatewayTimeoutRetry(ctx, 107, err, 1))
+	require.False(t, shouldStopPlaygroundRelayGatewayTimeoutRetry(ctx, 106, err, 0))
 
 	ctx.Set("use_channel", []string{"106", "106"})
-	require.True(t, shouldStopPlaygroundImageGatewayTimeoutRetry(ctx, 106, err, 2))
+	require.True(t, shouldStopPlaygroundRelayGatewayTimeoutRetry(ctx, 106, err, 2))
 
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
-	require.False(t, shouldStopPlaygroundImageGatewayTimeoutRetry(ctx, 106, err, 1))
+	require.False(t, shouldStopPlaygroundRelayGatewayTimeoutRetry(ctx, 106, err, 1))
 }
 
 func TestShouldRetrySkipsPlaygroundImageGatewayTimeoutWhenOnlySameChannelAvailable(t *testing.T) {
@@ -174,13 +296,13 @@ func TestShouldRetrySkipsPlaygroundImageGatewayTimeoutWhenOnlySameChannelAvailab
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/images/generations", nil)
 	ctx.Set("use_channel", []string{"106"})
-	common.SetContextKey(ctx, constant.ContextKeyPlaygroundImageCandidateChannelCount, 1)
+	common.SetContextKey(ctx, constant.ContextKeyPlaygroundRelayCandidateChannelCount, 1)
 
 	err := types.NewErrorWithStatusCode(errors.New("cloudflare timeout"), types.ErrorCodeBadResponseStatusCode, 524)
 	require.False(t, shouldRetry(ctx, err, 1))
 
 	ctx.Set("use_channel", []string{"106", "107"})
-	common.SetContextKey(ctx, constant.ContextKeyPlaygroundImageCandidateChannelCount, 2)
+	common.SetContextKey(ctx, constant.ContextKeyPlaygroundRelayCandidateChannelCount, 2)
 	require.True(t, shouldRetry(ctx, err, 1))
 }
 
@@ -301,4 +423,75 @@ func TestShouldAutoDisableChannelSkipsModelCapacityError(t *testing.T) {
 		http.StatusTooManyRequests,
 	)
 	require.False(t, shouldAutoDisableChannel(ctx, err))
+}
+
+func TestPlaygroundImageQuotaExhaustionRetriesWithoutDisablingChannel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	origDisableEnabled := common.AutomaticDisableChannelEnabled
+	origRetryRanges := operation_setting.AutomaticRetryStatusCodeRanges
+	origDisableRanges := operation_setting.AutomaticDisableStatusCodeRanges
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled = origDisableEnabled
+		operation_setting.AutomaticRetryStatusCodeRanges = origRetryRanges
+		operation_setting.AutomaticDisableStatusCodeRanges = origDisableRanges
+	})
+	common.AutomaticDisableChannelEnabled = true
+	operation_setting.AutomaticRetryStatusCodeRanges = nil
+	operation_setting.AutomaticDisableStatusCodeRanges = nil
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/v1/images/generations", nil)
+	ctx.Set("use_channel", []string{"101"})
+	common.SetContextKey(ctx, constant.ContextKeyPlaygroundRelayCandidateChannelCount, 2)
+
+	err := types.NewErrorWithStatusCode(
+		errors.New("no available image quota"),
+		types.ErrorCodeBadResponseStatusCode,
+		http.StatusTooManyRequests,
+	)
+
+	require.True(t, shouldRetry(ctx, err, 1))
+	require.True(t, shouldIncreaseRelayRetryBudget(ctx, err))
+	require.False(t, shouldAutoDisableChannel(ctx, err))
+
+	singleCandidateCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	singleCandidateCtx.Request = httptest.NewRequest(http.MethodPost, "/pg/v1/images/generations", nil)
+	singleCandidateCtx.Set("use_channel", []string{"101"})
+	common.SetContextKey(singleCandidateCtx, constant.ContextKeyPlaygroundRelayCandidateChannelCount, 1)
+	require.False(t, shouldRetry(singleCandidateCtx, err, 1))
+
+	handlePlaygroundRelayChannelFailure(ctx, 101, err, true)
+	excludedChannelIDs, ok := common.GetContextKeyType[map[int]struct{}](ctx, constant.ContextKeyPlaygroundRelayExcludedChannelIds)
+	require.True(t, ok)
+	require.Contains(t, excludedChannelIDs, 101)
+}
+
+func TestImageQuotaExhaustionRemainsAutoDisableEligibleOutsidePlaygroundImages(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	origDisableEnabled := common.AutomaticDisableChannelEnabled
+	origDisableRanges := operation_setting.AutomaticDisableStatusCodeRanges
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled = origDisableEnabled
+		operation_setting.AutomaticDisableStatusCodeRanges = origDisableRanges
+	})
+	common.AutomaticDisableChannelEnabled = true
+	operation_setting.AutomaticDisableStatusCodeRanges = []operation_setting.StatusCodeRange{
+		{Start: http.StatusTooManyRequests, End: http.StatusTooManyRequests},
+	}
+
+	err := types.NewErrorWithStatusCode(
+		errors.New("no available image quota"),
+		types.ErrorCodeBadResponseStatusCode,
+		http.StatusTooManyRequests,
+	)
+
+	regularImageCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	regularImageCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+	require.True(t, shouldAutoDisableChannel(regularImageCtx, err))
+
+	playgroundResponsesCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	playgroundResponsesCtx.Request = httptest.NewRequest(http.MethodPost, "/pg/v1/responses", nil)
+	require.True(t, shouldAutoDisableChannel(playgroundResponsesCtx, err))
 }

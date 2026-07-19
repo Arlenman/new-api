@@ -24,6 +24,7 @@ import {
   FileText,
   FlaskConical,
   Gauge,
+  Image,
   Key,
   LayoutDashboard,
   ListTodo,
@@ -61,13 +62,22 @@ export function useSidebarData(): SidebarData {
   const navGroups: SidebarData['navGroups'] = [
     {
       id: 'chat',
-      title: t('Chat'),
+      title: t('Tools'),
       items: [
         {
           title: t('Quick Chat'),
           url: '/playground',
           icon: FlaskConical,
         },
+        ...(status?.image_playground_available === true
+          ? [
+              {
+                title: t('Image Playground'),
+                url: '/image-playground',
+                icon: Image,
+              },
+            ]
+          : []),
         {
           title: t('Chat'),
           icon: MessageSquare,

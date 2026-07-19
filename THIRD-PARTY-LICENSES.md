@@ -195,6 +195,8 @@ Transitive dependencies should be audited before a final external release.
 | electron    | development | npm       | `electron`                                            | `39.8.5`                             | MIT                                                |
 | electron    | development | npm       | `electron-builder`                                    | `26.7.0`                             | MIT                                                |
 
+| bundled tool | production  | source    | `CookSleep/gpt_image_playground`                     | `0.7.0` (default; build-selected)      | MIT                                                |
+
 ## License Texts
 
 ### Apache-2.0

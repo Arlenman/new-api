@@ -185,6 +185,19 @@ func UserAuth() func(c *gin.Context) {
 	}
 }
 
+// PlaygroundAuth prefers an explicitly supplied API token so embedded tools can
+// use the selected token's group and limits, while preserving session auth for
+// the dashboard playground.
+func PlaygroundAuth() func(c *gin.Context) {
+	return func(c *gin.Context) {
+		if strings.TrimSpace(c.GetHeader("Authorization")) != "" {
+			TokenAuth()(c)
+			return
+		}
+		UserAuth()(c)
+	}
+}
+
 func AdminAuth() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		authHelper(c, common.RoleAdminUser)
@@ -366,6 +379,8 @@ func TokenAuth() func(c *gin.Context) {
 		if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
 			key = strings.TrimSpace(key[7:])
 		}
+		var token *model.Token
+		var err error
 		if key == "" || key == "midjourney-proxy" {
 			key = c.Request.Header.Get("mj-api-secret")
 			if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
@@ -376,10 +391,20 @@ func TokenAuth() func(c *gin.Context) {
 			key = parts[0]
 		} else {
 			key = strings.TrimPrefix(key, "sk-")
-			parts = strings.Split(key, "-")
-			key = parts[0]
+			if strings.HasPrefix(key, "utrs_") {
+				var session *model.UserToolRuntimeSession
+				session, token, err = model.ResolveUserToolRuntimeToken(key)
+				if session != nil {
+					common.SetContextKey(c, constant.ContextKeyUserTool, session.Tool)
+				}
+			} else {
+				parts = strings.Split(key, "-")
+				key = parts[0]
+			}
 		}
-		token, err := model.ValidateUserToken(key)
+		if token == nil && err == nil {
+			token, err = model.ValidateUserToken(key)
+		}
 		if token != nil {
 			recordTokenRequestIP(token.Id, c.ClientIP())
 			id := c.GetInt("id")

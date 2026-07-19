@@ -88,3 +88,73 @@ func TestCacheGetRandomSatisfiedChannelExcludesCapacityFailedChannel(t *testing.
 	require.NotNil(t, channel)
 	require.Equal(t, mediumPriorityChannelID, channel.Id)
 }
+
+func TestCacheGetRandomSatisfiedChannelExcludesFailedPlaygroundRelayChannelAtSamePriority(t *testing.T) {
+	require.NoError(t, model.DB.AutoMigrate(&model.Ability{}))
+
+	originalMemoryCacheEnabled := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = true
+	t.Cleanup(func() {
+		common.MemoryCacheEnabled = originalMemoryCacheEnabled
+		model.InitChannelCache()
+	})
+
+	modelName := "playground-image-fallback-memory-cache"
+	failedChannelID := 9211
+	fallbackChannelID := 9212
+	channelIDs := []int{failedChannelID, fallbackChannelID}
+	require.NoError(t, model.DB.Where("channel_id IN ?", channelIDs).Delete(&model.Ability{}).Error)
+	require.NoError(t, model.DB.Where("id IN ?", channelIDs).Delete(&model.Channel{}).Error)
+	t.Cleanup(func() {
+		require.NoError(t, model.DB.Where("channel_id IN ?", channelIDs).Delete(&model.Ability{}).Error)
+		require.NoError(t, model.DB.Where("id IN ?", channelIDs).Delete(&model.Channel{}).Error)
+	})
+
+	priority := int64(100)
+	for _, channel := range []*model.Channel{
+		{
+			Id:       failedChannelID,
+			Type:     1,
+			Key:      "failed-playground-key",
+			Status:   common.ChannelStatusEnabled,
+			Name:     "failed-playground-channel",
+			Models:   modelName,
+			Group:    "default",
+			Priority: &priority,
+		},
+		{
+			Id:       fallbackChannelID,
+			Type:     1,
+			Key:      "fallback-playground-key",
+			Status:   common.ChannelStatusEnabled,
+			Name:     "fallback-playground-channel",
+			Models:   modelName,
+			Group:    "default",
+			Priority: &priority,
+		},
+	} {
+		require.NoError(t, channel.Insert())
+	}
+	model.InitChannelCache()
+
+	for _, requestPath := range []string{"/pg/v1/images/generations", "/pg/v1/responses"} {
+		t.Run(requestPath, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			common.SetContextKey(ctx, constant.ContextKeyPlaygroundRelayExcludedChannelIds, map[int]struct{}{
+				failedChannelID: {},
+			})
+			channel, selectedGroup, err := CacheGetRandomSatisfiedChannel(&RetryParam{
+				Ctx:         ctx,
+				TokenGroup:  "default",
+				ModelName:   modelName,
+				RequestPath: requestPath,
+				Retry:       common.GetPointer(1),
+			})
+
+			require.NoError(t, err)
+			require.Equal(t, "default", selectedGroup)
+			require.NotNil(t, channel)
+			require.Equal(t, fallbackChannelID, channel.Id)
+		})
+	}
+}
