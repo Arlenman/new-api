@@ -757,3 +757,357 @@ test("remote blob deletions remove image and media blobs without evicting the us
     "video-bytes",
   );
 });
+
+test("restores a locally evicted blob from its server asset without uploading a tombstone", async () => {
+  const imageKey = "image:evicted-image";
+  const imageAssetId = "asset-restored-after-local-eviction";
+  const imageBlob = new Blob(["image-bytes"], { type: "image/png" });
+  const descriptor = await sync.makeBlobItem(imageKey, imageBlob);
+  const metadataKey = "new-api:test-sync:7";
+  const localStorageValues = new Map([
+    [
+      metadataKey,
+      JSON.stringify({
+        cursor: 20,
+        entries: {
+          [`blob\u0000${imageKey}`]: {
+            revision: 3,
+            hash: descriptor.hash,
+            deleted: false,
+            asset_id: imageAssetId,
+            size_bytes: imageBlob.size,
+            content_type: imageBlob.type,
+            content_sha256: descriptor.asset.sha256,
+          },
+        },
+      }),
+    ],
+  ]);
+  const localStorage = {
+    getItem: (key) => localStorageValues.get(key) ?? null,
+    setItem: (key, value) => localStorageValues.set(key, String(value)),
+    removeItem: (key) => localStorageValues.delete(key),
+  };
+  const stores = new Map();
+  const storeFor = (storeName) => {
+    const values = stores.get(storeName) ?? new Map();
+    stores.set(storeName, values);
+    return {
+      getItem: async (key) => values.get(key) ?? null,
+      setItem: async (key, value) => values.set(key, value),
+      removeItem: async (key) => values.delete(key),
+      iterate: async (callback) => {
+        for (const [key, value] of values) callback(value, key);
+      },
+    };
+  };
+  const syncBodies = [];
+  const fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.includes(`/assets/${imageAssetId}/content`))
+      return new Response(imageBlob);
+    if (url.includes("/sync")) {
+      syncBodies.push(JSON.parse(init.body));
+      return Response.json({
+        success: true,
+        data: { results: [], cursor: 20 },
+      });
+    }
+    if (url.includes("/changes?cursor=20")) {
+      return Response.json({
+        success: true,
+        data: { items: [], assets: [], next_cursor: 20, has_more: false },
+      });
+    }
+    throw new Error(`Unexpected sync request: ${url}`);
+  };
+  const hydratedStore = (state) => ({
+    getState: () => state,
+    persist: {
+      hasHydrated: () => true,
+      onFinishHydration: () => () => undefined,
+    },
+  });
+  const window = {
+    localStorage,
+    clearTimeout,
+    setTimeout,
+    setInterval: () => 1,
+    addEventListener: () => undefined,
+    dispatchEvent: () => true,
+  };
+  const document = {
+    visibilityState: "visible",
+    addEventListener: () => undefined,
+  };
+  class TestRequest extends Request {
+    constructor(input, init) {
+      super(
+        typeof input === "string"
+          ? new URL(input, "http://new-api.test").href
+          : input,
+        init,
+      );
+    }
+  }
+  const canvasState = { hydrated: true, projects: [], replaceProjects() {} };
+  const assetState = { hydrated: true, assets: [], replaceAssets() {} };
+  const syncModule = loadSyncExports({
+    modules: {
+      localforage: { createInstance: ({ storeName }) => storeFor(storeName) },
+      nanoid: { nanoid: () => "conflict-copy" },
+      "@/lib/canvas/canvas-generation-helpers": {
+        hydrateAssistantImages: async (sessions) => sessions,
+        hydrateCanvasImages: async (nodes) => nodes,
+      },
+      "@/lib/new-api-storage": {
+        ensureLegacyInfiniteCanvasStorageMigration: async () => undefined,
+        getNewApiInfiniteCanvasAssetCacheName: () => "new-api:test-assets:7",
+        getNewApiInfiniteCanvasMetadataKey: () => metadataKey,
+        getNewApiInfiniteCanvasPluginDatabaseName: () => "plugins:7",
+        getNewApiInfiniteCanvasUserId: () => "7",
+        listNewApiInfiniteCanvasPluginStoreNames: async () => [],
+        namespacedLocalForageName: (name) => `${name}:7`,
+        namespacedStorageKey: (key) => `${key}:7`,
+        NEW_API_INFINITE_CANVAS_REMOTE_LOGS_CHANGED_EVENT: "remote-logs",
+        NEW_API_INFINITE_CANVAS_STORAGE_CHANGED_EVENT: "storage-changed",
+        runWithoutNewApiInfiniteCanvasSyncNotifications: async (fn) => fn(),
+      },
+      "@/services/file-storage": {
+        getMediaBlob: async (key) => storeFor("media_files").getItem(key),
+        resolveMediaUrl: async (value) => value,
+        setMediaBlob: async (key, blob) => storeFor("media_files").setItem(key, blob),
+      },
+      "@/services/image-storage": {
+        getImageBlob: async (key) => storeFor("image_files").getItem(key),
+        resolveImageUrl: async (value) => value,
+        setImageBlob: async (key, blob) => storeFor("image_files").setItem(key, blob),
+      },
+      "@/stores/canvas/use-canvas-store": {
+        useCanvasStore: hydratedStore(canvasState),
+      },
+      "@/stores/canvas/use-plugin-store": { usePluginStore: {} },
+      "@/stores/use-agent-store": { useAgentStore: {} },
+      "@/stores/use-asset-store": { useAssetStore: hydratedStore(assetState) },
+      "@/stores/use-canvas-side-panel-store": {
+        CANVAS_SIDE_PANEL_DEFAULT_WIDTH: 360,
+        CANVAS_SIDE_PANEL_MAX_WIDTH: 600,
+        CANVAS_SIDE_PANEL_MIN_WIDTH: 280,
+        useCanvasSidePanelStore: {},
+      },
+      "@/stores/use-config-store": { useConfigStore: {} },
+      "@/stores/use-prompt-source-store": { usePromptSourceStore: {} },
+      "@/stores/use-theme-store": { useThemeStore: {} },
+    },
+    globals: { fetch, window, document, Request: TestRequest },
+  });
+
+  await syncModule.initializeNewApiInfiniteCanvasSync();
+
+  assert.equal(await storeFor("image_files").getItem(imageKey) instanceof Blob, true);
+  assert.deepEqual(syncBodies, []);
+  assert.equal(
+    JSON.parse(localStorage.getItem(metadataKey)).entries[`blob\u0000${imageKey}`].deleted,
+    false,
+  );
+});
+
+test("checkpoints successful blob uploads so a later 429 retry does not re-upload earlier blobs", async () => {
+  const metadataKey = "new-api:test-sync:7";
+  const localStorageValues = new Map();
+  const localStorage = {
+    getItem: (key) => localStorageValues.get(key) ?? null,
+    setItem: (key, value) => localStorageValues.set(key, String(value)),
+    removeItem: (key) => localStorageValues.delete(key),
+  };
+  const stores = new Map();
+  const storeFor = (storeName) => {
+    const values = stores.get(storeName) ?? new Map();
+    stores.set(storeName, values);
+    return {
+      getItem: async (key) => values.get(key) ?? null,
+      setItem: async (key, value) => values.set(key, value),
+      removeItem: async (key) => values.delete(key),
+      iterate: async (callback) => {
+        for (const [key, value] of values) callback(value, key);
+      },
+    };
+  };
+  await storeFor("image_files").setItem(
+    "image:a",
+    new Blob(["a"], { type: "image/png" }),
+  );
+  await storeFor("image_files").setItem(
+    "image:b",
+    new Blob(["b"], { type: "image/png" }),
+  );
+  const hydratedStore = (state) => ({
+    getState: () => state,
+    persist: {
+      hasHydrated: () => true,
+      onFinishHydration: () => () => undefined,
+    },
+  });
+  const canvasState = { hydrated: true, projects: [], replaceProjects() {} };
+  const assetState = { hydrated: true, assets: [], replaceAssets() {} };
+  const baseModules = {
+    localforage: { createInstance: ({ storeName }) => storeFor(storeName) },
+    nanoid: { nanoid: () => "conflict-copy" },
+    "@/lib/canvas/canvas-generation-helpers": {
+      hydrateAssistantImages: async (sessions) => sessions,
+      hydrateCanvasImages: async (nodes) => nodes,
+    },
+    "@/lib/new-api-storage": {
+      ensureLegacyInfiniteCanvasStorageMigration: async () => undefined,
+      getNewApiInfiniteCanvasAssetCacheName: () => "new-api:test-assets:7",
+      getNewApiInfiniteCanvasMetadataKey: () => metadataKey,
+      getNewApiInfiniteCanvasPluginDatabaseName: () => "plugins:7",
+      getNewApiInfiniteCanvasUserId: () => "7",
+      listNewApiInfiniteCanvasPluginStoreNames: async () => [],
+      namespacedLocalForageName: (name) => `${name}:7`,
+      namespacedStorageKey: (key) => `${key}:7`,
+      NEW_API_INFINITE_CANVAS_REMOTE_LOGS_CHANGED_EVENT: "remote-logs",
+      NEW_API_INFINITE_CANVAS_STORAGE_CHANGED_EVENT: "storage-changed",
+      runWithoutNewApiInfiniteCanvasSyncNotifications: async (fn) => fn(),
+    },
+    "@/services/file-storage": {
+      getMediaBlob: async (key) => storeFor("media_files").getItem(key),
+      resolveMediaUrl: async (value) => value,
+      setMediaBlob: async (key, blob) => storeFor("media_files").setItem(key, blob),
+    },
+    "@/services/image-storage": {
+      getImageBlob: async (key) => storeFor("image_files").getItem(key),
+      resolveImageUrl: async (value) => value,
+      setImageBlob: async (key, blob) => storeFor("image_files").setItem(key, blob),
+    },
+    "@/stores/canvas/use-canvas-store": {
+      useCanvasStore: hydratedStore(canvasState),
+    },
+    "@/stores/canvas/use-plugin-store": { usePluginStore: {} },
+    "@/stores/use-agent-store": { useAgentStore: {} },
+    "@/stores/use-asset-store": { useAssetStore: hydratedStore(assetState) },
+    "@/stores/use-canvas-side-panel-store": {
+      CANVAS_SIDE_PANEL_DEFAULT_WIDTH: 360,
+      CANVAS_SIDE_PANEL_MAX_WIDTH: 600,
+      CANVAS_SIDE_PANEL_MIN_WIDTH: 280,
+      useCanvasSidePanelStore: {},
+    },
+    "@/stores/use-config-store": { useConfigStore: {} },
+    "@/stores/use-prompt-source-store": { usePromptSourceStore: {} },
+    "@/stores/use-theme-store": { useThemeStore: {} },
+  };
+  const window = {
+    localStorage,
+    clearTimeout,
+    setTimeout,
+    setInterval: () => 1,
+    addEventListener: () => undefined,
+    dispatchEvent: () => true,
+  };
+  const document = { visibilityState: "visible", addEventListener: () => undefined };
+  const firstUploadNames = [];
+  const firstFetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url === "/api/user-tools/assets/uploads") {
+      firstUploadNames.push(new Headers(init.headers).get("X-File-Name"));
+      if (firstUploadNames.length === 2) return new Response("", { status: 429 });
+      const headers = new Headers(init.headers);
+      return Response.json({
+        success: true,
+        data: {
+          id: "asset-a",
+          sha256: headers.get("X-Content-SHA256"),
+          filename: headers.get("X-File-Name"),
+          content_type: headers.get("Content-Type"),
+          size_bytes: init.body.size,
+          created_at: 1,
+          updated_at: 1,
+        },
+      });
+    }
+    throw new Error(`Unexpected request during first sync: ${url}`);
+  };
+  const first = loadSyncExports({ modules: baseModules, globals: { fetch: firstFetch, window, document } });
+
+  await first.initializeNewApiInfiniteCanvasSync();
+
+  assert.equal(firstUploadNames.length, 2);
+  const checkpoint = JSON.parse(localStorage.getItem(metadataKey)).entries["blob\u0000image:a"];
+  assert.equal(checkpoint.pending_asset_id, "asset-a");
+
+  const secondUploadNames = [];
+  const syncBodies = [];
+  const secondFetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url === "/api/user-tools/assets/uploads") {
+      const headers = new Headers(init.headers);
+      secondUploadNames.push(headers.get("X-File-Name"));
+      return Response.json({
+        success: true,
+        data: {
+          id: "asset-b",
+          sha256: headers.get("X-Content-SHA256"),
+          filename: headers.get("X-File-Name"),
+          content_type: headers.get("Content-Type"),
+          size_bytes: init.body.size,
+          created_at: 2,
+          updated_at: 2,
+        },
+      });
+    }
+    if (url === "/api/user-tools/infinite-canvas/sync") {
+      const body = JSON.parse(init.body);
+      syncBodies.push(body);
+      return Response.json({
+        success: true,
+        data: {
+          results: body.mutations.map((mutation) => ({
+            client_mutation_id: mutation.client_mutation_id,
+            kind: mutation.kind,
+            key: mutation.key,
+            result: "applied",
+            item: {
+              id: `item-${mutation.key}`,
+              kind: mutation.kind,
+              key: mutation.key,
+              schema_version: 1,
+              revision: 1,
+              status: mutation.status,
+              payload: mutation.payload,
+              asset_ids: mutation.asset_ids,
+              created_at: 0,
+              updated_at: 1,
+              deleted: mutation.deleted,
+            },
+          })),
+          cursor: 20,
+        },
+      });
+    }
+    if (url.includes("/bootstrap?")) {
+      return Response.json({
+        success: true,
+        data: { items: [], assets: [], cursor: 20, next_after_id: "", has_more: false },
+      });
+    }
+    if (url.includes("/changes?cursor=20")) {
+      return Response.json({
+        success: true,
+        data: { items: [], assets: [], next_cursor: 20, has_more: false },
+      });
+    }
+    throw new Error(`Unexpected request during resumed sync: ${url}`);
+  };
+  const second = loadSyncExports({ modules: baseModules, globals: { fetch: secondFetch, window, document } });
+
+  await second.initializeNewApiInfiniteCanvasSync();
+
+  assert.equal(secondUploadNames.length, 1);
+  assert.equal(syncBodies.length, 1);
+  const blobMutations = syncBodies[0].mutations.filter((mutation) => mutation.kind === "blob");
+  assert.deepEqual(blobMutations.map((mutation) => mutation.asset_ids[0]), ["asset-a", "asset-b"]);
+  const entries = JSON.parse(localStorage.getItem(metadataKey)).entries;
+  assert.equal(entries["blob\u0000image:a"].pending_asset_id, undefined);
+  assert.equal(entries["blob\u0000image:a"].asset_id, "asset-a");
+  assert.equal(entries["blob\u0000image:b"].asset_id, "asset-b");
+});

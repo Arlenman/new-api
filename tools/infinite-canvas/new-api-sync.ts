@@ -166,6 +166,10 @@ interface SyncEntry {
   hash: string;
   deleted: boolean;
   asset_id?: string;
+  pending_asset_id?: string;
+  pending_content_sha256?: string;
+  pending_size_bytes?: number;
+  pending_content_type?: string;
   size_bytes?: number;
   content_type?: string;
   content_sha256?: string;
@@ -1004,6 +1008,10 @@ async function uploadAsset(
   });
 }
 
+function isAssetBackedKind(kind: string): boolean {
+  return kind === "blob" || kind === PLUGIN_RECORD_KIND;
+}
+
 async function buildMutations(
   localItems: Map<string, LocalItem>,
   metadata: SyncMetadata,
@@ -1011,12 +1019,38 @@ async function buildMutations(
   const mutations: Mutation[] = [];
   for (const [metadataKey, item] of localItems) {
     const previous = metadata.entries[metadataKey];
-    if (previous && !previous.deleted && previous.hash === item.hash) continue;
+    if (
+      previous &&
+      !previous.deleted &&
+      !previous.pending_asset_id &&
+      previous.hash === item.hash
+    )
+      continue;
 
     let payload = item.payload;
     let assetIds: string[] = [];
     if (item.asset) {
-      const asset = await uploadAsset(item.asset);
+      const pendingAsset =
+        previous &&
+        previous.pending_asset_id &&
+        previous.pending_content_sha256 === item.asset.sha256 &&
+        previous.pending_size_bytes === item.asset.blob.size &&
+        previous.pending_content_type ===
+          (item.asset.blob.type || "application/octet-stream")
+          ? { id: previous.pending_asset_id }
+          : null;
+      const asset = pendingAsset || (await uploadAsset(item.asset));
+      if (!pendingAsset) {
+        metadata.entries[metadataKey] = {
+          ...(previous || { revision: 0, hash: "", deleted: false }),
+          pending_asset_id: asset.id,
+          pending_content_sha256: item.asset.sha256,
+          pending_size_bytes: item.asset.blob.size,
+          pending_content_type:
+            item.asset.blob.type || "application/octet-stream",
+        };
+        writeMetadata(metadata);
+      }
       payload = { ...(isRecord(payload) ? payload : {}), asset_id: asset.id };
       assetIds = [asset.id];
     }
@@ -1041,6 +1075,11 @@ async function buildMutations(
     if (separator < 0) continue;
     const kind = metadataKey.slice(0, separator);
     const key = metadataKey.slice(separator + 1);
+    if (
+      isAssetBackedKind(kind) &&
+      (previous.asset_id || previous.pending_asset_id)
+    )
+      continue;
     const payload =
       kind === PLUGIN_RECORD_KIND && previous.plugin_id && previous.record_key
         ? { plugin_id: previous.plugin_id, record_key: previous.record_key }
@@ -1137,6 +1176,55 @@ async function downloadAsset(assetId: string): Promise<Blob> {
     throw new Error(`New API asset download failed (${response.status})`);
   if (cache) await cache.put(request, response.clone());
   return response.blob();
+}
+
+async function restoreMissingLocalAssets(metadata: SyncMetadata): Promise<void> {
+  for (const [metadataKey, entry] of Object.entries(metadata.entries)) {
+    if (entry.deleted) continue;
+    const separator = metadataKey.indexOf("\u0000");
+    if (separator < 0) continue;
+    const kind = metadataKey.slice(0, separator);
+    if (!isAssetBackedKind(kind)) continue;
+    const key = metadataKey.slice(separator + 1);
+
+    let existing: unknown = null;
+    if (kind === "blob") {
+      existing = key.startsWith("image:")
+        ? await getImageBlob(key)
+        : await getMediaBlob(key);
+    } else {
+      if (!entry.plugin_id || !entry.record_key) continue;
+      existing = await localforage
+        .createInstance({
+          name: getNewApiInfiniteCanvasPluginDatabaseName(),
+          storeName: entry.plugin_id,
+        })
+        .getItem(entry.record_key);
+    }
+    if (existing instanceof Blob) continue;
+
+    const assetId = entry.pending_asset_id || entry.asset_id;
+    if (!assetId) continue;
+    try {
+      const blob = await downloadAsset(assetId);
+      if (kind === "blob") {
+        if (key.startsWith("image:")) await setImageBlob(key, blob);
+        else await setMediaBlob(key, blob);
+      } else if (entry.plugin_id && entry.record_key) {
+        await localforage
+          .createInstance({
+            name: getNewApiInfiniteCanvasPluginDatabaseName(),
+            storeName: entry.plugin_id,
+          })
+          .setItem(entry.record_key, blob);
+      }
+    } catch (error) {
+      console.warn(
+        `New API Infinite Canvas asset recovery deferred (${kind}/${key}):`,
+        error,
+      );
+    }
+  }
 }
 
 async function hydrateAsset(asset: Asset): Promise<Asset> {
@@ -1488,6 +1576,7 @@ async function performSync(): Promise<InfiniteCanvasSyncResult> {
   await waitForPersistedStores();
 
   const metadata = readMetadata();
+  await restoreMissingLocalAssets(metadata);
   const localItems = await collectLocalItems(metadata);
   const mutations = await buildMutations(localItems, metadata);
   let conflictCopies = 0;
