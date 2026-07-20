@@ -132,6 +132,7 @@ import type {
 const alertRulesQueryKey = ['alert-rules'] as const
 const alertRuleProvidersQueryKey = ['alert-rule-providers'] as const
 const apiNoticeConfigQueryKey = ['api-notice-config'] as const
+const providerCatalogRetryFeedbackDelayMs = 500
 const emptyRules: AlertRule[] = []
 const emptyProviders: ApiNoticeProvider[] = []
 
@@ -202,6 +203,9 @@ export function AlertRuleDialog({
   const [previewing, setPreviewing] = useState(false)
   const [testingConnection, setTestingConnection] = useState(false)
   const [testingSend, setTestingSend] = useState(false)
+  const [retryingProviderCatalog, setRetryingProviderCatalog] = useState(false)
+  const [providerCatalogRetryFailed, setProviderCatalogRetryFailed] =
+    useState(false)
   const [showValidation, setShowValidation] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [togglingRuleID, setTogglingRuleID] = useState<number | null>(null)
@@ -288,6 +292,8 @@ export function AlertRuleDialog({
     setApiNoticeBaseURL('')
     setApiNoticeAPIKey('')
     setTestSendResult(null)
+    setRetryingProviderCatalog(false)
+    setProviderCatalogRetryFailed(false)
     setShowValidation(false)
   }, [open])
 
@@ -459,6 +465,46 @@ export function AlertRuleDialog({
     }
   }
 
+  async function handleRetryProviderCatalog() {
+    if (retryingProviderCatalog || providersQuery.isFetching) return
+
+    setRetryingProviderCatalog(true)
+    setProviderCatalogRetryFailed(false)
+    const toastID = toast.loading(t('Refreshing...'))
+
+    try {
+      const [result] = await Promise.all([
+        providersQuery.refetch(),
+        new Promise((resolve) =>
+          setTimeout(resolve, providerCatalogRetryFeedbackDelayMs)
+        ),
+      ])
+      const response = result.data
+      if (!response?.success || !response.data) {
+        setProviderCatalogRetryFailed(true)
+        const message =
+          response?.message ||
+          (result.error instanceof Error ? result.error.message : '')
+        toast.error(
+          message ? `${t('Refresh failed')}: ${message}` : t('Refresh failed'),
+          { id: toastID }
+        )
+        return
+      }
+
+      toast.success(t('Updated successfully'), { id: toastID })
+    } catch (error) {
+      setProviderCatalogRetryFailed(true)
+      const message = error instanceof Error ? error.message : ''
+      toast.error(
+        message ? `${t('Refresh failed')}: ${message}` : t('Refresh failed'),
+        { id: toastID }
+      )
+    } finally {
+      setRetryingProviderCatalog(false)
+    }
+  }
+
   async function handleTestConnection() {
     setTestingConnection(true)
     try {
@@ -530,7 +576,8 @@ export function AlertRuleDialog({
       testingConnection ||
       testingSend ||
       apiNoticeConfigMutation.isPending ||
-      toggleRuleMutation.isPending
+      toggleRuleMutation.isPending ||
+      retryingProviderCatalog
     ) {
       return
     }
@@ -578,6 +625,8 @@ export function AlertRuleDialog({
   const loading = rulesQuery.isLoading || configQuery.isLoading
   const loadError = rulesLoadError || configLoadError
   const providerCatalogLoaded = Boolean(providerCatalog)
+  const providerCatalogRefreshing =
+    retryingProviderCatalog || providersQuery.isFetching
   const apiKeyConfigured = Boolean(
     providerCatalog?.api_key_configured || apiNoticeConfig?.api_key_configured
   )
@@ -609,26 +658,44 @@ export function AlertRuleDialog({
             <AlertTitle>
               {t('api-notice provider catalog unavailable')}
             </AlertTitle>
-            <AlertDescription className='flex flex-wrap items-center gap-3'>
+            <AlertDescription
+              className='flex flex-wrap items-center gap-3'
+              aria-busy={providerCatalogRefreshing}
+            >
               <span>
-                {t(
-                  'Check the api-notice provider catalog and readiness status.'
-                )}
+                {providerCatalogRefreshing
+                  ? t('Refreshing...')
+                  : t(
+                      'Check the api-notice provider catalog and readiness status.'
+                    )}
               </span>
               <Button
                 type='button'
                 variant='outline'
                 size='sm'
-                disabled={providersQuery.isFetching}
-                onClick={() => void providersQuery.refetch()}
+                disabled={providerCatalogRefreshing}
+                onClick={() => void handleRetryProviderCatalog()}
               >
-                {providersQuery.isFetching ? (
-                  <LoaderCircle className='animate-spin' />
+                {providerCatalogRefreshing ? (
+                  <LoaderCircle
+                    data-icon='inline-start'
+                    className='animate-spin'
+                    aria-hidden='true'
+                  />
                 ) : (
-                  <RefreshCw />
+                  <RefreshCw data-icon='inline-start' aria-hidden='true' />
                 )}
-                {t('Retry')}
+                {providerCatalogRefreshing ? t('Refreshing...') : t('Retry')}
               </Button>
+              {providerCatalogRetryFailed && !providerCatalogRefreshing && (
+                <span
+                  className='w-full text-xs font-medium'
+                  role='status'
+                  aria-live='polite'
+                >
+                  {t('Refresh failed')}
+                </span>
+              )}
             </AlertDescription>
           </Alert>
         )}

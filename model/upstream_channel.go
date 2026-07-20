@@ -45,6 +45,7 @@ type UpstreamChannel struct {
 	SelectedGroup       string  `json:"selected_group" gorm:"type:varchar(255)"`
 	Username            string  `json:"username" gorm:"type:varchar(255)"`
 	Note                string  `json:"note" gorm:"type:text"`
+	DefaultTestModel    string  `json:"default_test_model" gorm:"type:varchar(255)"`
 	PasswordCiphertext  string  `json:"-" gorm:"type:text"`
 	Balance             float64 `json:"balance"`
 	BalanceUpdatedTime  int64   `json:"balance_updated_time" gorm:"bigint"`
@@ -296,6 +297,7 @@ func DeleteUpstreamChannel(id int) error {
 			"selected_group":        "",
 			"username":              "",
 			"note":                  "",
+			"default_test_model":    "",
 			"password_ciphertext":   "",
 			"balance":               0,
 			"balance_updated_time":  0,
@@ -346,6 +348,7 @@ func UpdateUpstreamChannelConfig(id int, name string, provider string, authType 
 			updates["last_sync_time"] = 0
 			updates["last_error"] = ""
 			updates["snapshot_json"] = ""
+			updates["default_test_model"] = ""
 			updates["status"] = UpstreamChannelStatusUnconfigured
 		}
 		return tx.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Updates(updates).Error
@@ -406,6 +409,27 @@ func UpdateUpstreamChannelSelectedGroup(id int, selectedGroup string) error {
 	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Update("selected_group", selectedGroup).Error
 }
 
+func UpdateUpstreamChannelDefaultTestModel(id int, defaultTestModel string) error {
+	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Update("default_test_model", defaultTestModel).Error
+}
+
+func UpdateUpstreamChannelPriorities(priorities map[int]int64) error {
+	if len(priorities) == 0 {
+		return nil
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		for id, priority := range priorities {
+			if id <= 0 {
+				continue
+			}
+			if err := tx.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Update("priority", priority).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func SaveUpstreamChannelRefresh(id int, provider string, snapshotJSON string, balance float64, refreshedAt int64, lowBalanceNotified bool) error {
 	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Updates(map[string]any{
 		"provider":             provider,
@@ -417,6 +441,28 @@ func SaveUpstreamChannelRefresh(id int, provider string, snapshotJSON string, ba
 		"last_error":           "",
 		"status":               UpstreamChannelStatusReady,
 	}).Error
+}
+
+func SaveUpstreamChannelPartialRefresh(id int, provider string, snapshotJSON string, refreshedAt int64, unavailableDefaultTestModel string) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Updates(map[string]any{
+			"provider":       provider,
+			"snapshot_json":  snapshotJSON,
+			"last_sync_time": refreshedAt,
+			"last_error":     "",
+			"status":         UpstreamChannelStatusReady,
+		}).Error; err != nil {
+			return err
+		}
+		if unavailableDefaultTestModel == "" {
+			return nil
+		}
+		return tx.Model(&UpstreamChannel{}).
+			Where("id = ?", id).
+			Where("suppressed_at IS NULL").
+			Where("default_test_model = ?", unavailableDefaultTestModel).
+			Update("default_test_model", "").Error
+	})
 }
 
 func SaveUpstreamChannelRefreshError(id int, message string, attemptedAt int64) error {
@@ -435,7 +481,7 @@ func ListDueUpstreamChannels(now int64, limit int) ([]*UpstreamChannel, error) {
 	err := DB.
 		Where("suppressed_at IS NULL").
 		Where("password_ciphertext <> ''").
-		Where("username <> ''").
+		Where("username <> '' OR (provider = ? AND auth_type = ?)", "sub2api", UpstreamAuthTypeAccessToken).
 		Where("auto_refresh_interval > 0").
 		Where("last_sync_time = 0 OR last_sync_time + auto_refresh_interval <= ?", now).
 		Order("id asc").
@@ -453,6 +499,7 @@ func GetExplicitChannelBaseURLs() ([]string, error) {
 }
 
 type ExplicitChannelSource struct {
+	ID      int    `gorm:"column:id"`
 	BaseURL string `gorm:"column:base_url"`
 	Status  int    `gorm:"column:status"`
 }
@@ -460,7 +507,7 @@ type ExplicitChannelSource struct {
 func ListExplicitChannelSources() ([]ExplicitChannelSource, error) {
 	var sources []ExplicitChannelSource
 	err := DB.Model(&Channel{}).
-		Select("base_url", "status").
+		Select("id", "base_url", "status").
 		Where("base_url IS NOT NULL AND base_url <> ''").
 		Scan(&sources).Error
 	return sources, err

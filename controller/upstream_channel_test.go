@@ -54,6 +54,7 @@ func setupUpstreamChannelControllerTest(t *testing.T) (*gin.Engine, *model.Upstr
 	engine.POST("/api/upstream-channels/:id/refresh", RefreshUpstreamChannel)
 	engine.PATCH("/api/upstream-channels/:id/note", UpdateUpstreamChannelNote)
 	engine.PATCH("/api/upstream-channels/:id/selected-group", UpdateUpstreamChannelSelectedGroup)
+	engine.PATCH("/api/upstream-channels/:id/default-test-model", UpdateUpstreamChannelDefaultTestModel)
 	engine.POST("/api/upstream-channels/:id/keys/import", ImportUpstreamChannelKeys)
 	engine.POST("/api/upstream-channels/:id/keys/models", FetchUpstreamChannelKeyModels)
 	return engine, row
@@ -211,6 +212,107 @@ func TestUpdateUpstreamChannelSelectedGroupRejectsUnavailableGroup(t *testing.T)
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	assert.False(t, response.Success)
 	assert.Equal(t, "selected upstream group is unavailable", response.Message)
+}
+
+func TestUpdateUpstreamChannelDefaultTestModelPersistsAvailableModel(t *testing.T) {
+	engine, row := setupUpstreamChannelControllerTest(t)
+	row.SnapshotJSON = `{"provider":"new-api","models":[{"id":"gpt-4o-mini","pricing":[]},{"id":"claude-3-5-sonnet","pricing":[]}]}`
+	require.NoError(t, model.DB.Save(row).Error)
+
+	request := httptest.NewRequest(http.MethodPatch, "/api/upstream-channels/"+strconv.Itoa(row.Id)+"/default-test-model", bytes.NewBufferString(`{"default_test_model":"  gpt-4o-mini  "}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			DefaultTestModel string `json:"default_test_model"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	assert.Equal(t, "gpt-4o-mini", response.Data.DefaultTestModel)
+
+	updated, err := model.GetUpstreamChannelByID(row.Id)
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4o-mini", updated.DefaultTestModel)
+
+	listRequest := httptest.NewRequest(http.MethodGet, "/api/upstream-channels/", nil)
+	listRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(listRecorder, listRequest)
+	require.Equal(t, http.StatusOK, listRecorder.Code)
+	var listResponse struct {
+		Success bool `json:"success"`
+		Data    []struct {
+			DefaultTestModel string `json:"default_test_model"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(listRecorder.Body.Bytes(), &listResponse))
+	require.True(t, listResponse.Success)
+	require.Len(t, listResponse.Data, 1)
+	assert.Equal(t, "gpt-4o-mini", listResponse.Data[0].DefaultTestModel)
+}
+
+func TestUpdateUpstreamChannelDefaultTestModelRejectsUnavailableModel(t *testing.T) {
+	engine, row := setupUpstreamChannelControllerTest(t)
+	row.SnapshotJSON = `{"provider":"new-api","models":[{"id":"gpt-4o-mini","pricing":[]}]}`
+	require.NoError(t, model.DB.Save(row).Error)
+
+	request := httptest.NewRequest(http.MethodPatch, "/api/upstream-channels/"+strconv.Itoa(row.Id)+"/default-test-model", bytes.NewBufferString(`{"default_test_model":"missing-model"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.False(t, response.Success)
+	assert.Equal(t, "default test model is unavailable", response.Message)
+}
+
+func TestUpdateUpstreamChannelDefaultTestModelCanClearSelection(t *testing.T) {
+	engine, row := setupUpstreamChannelControllerTest(t)
+	row.DefaultTestModel = "gpt-4o-mini"
+	require.NoError(t, model.DB.Save(row).Error)
+
+	request := httptest.NewRequest(http.MethodPatch, "/api/upstream-channels/"+strconv.Itoa(row.Id)+"/default-test-model", bytes.NewBufferString(`{"default_test_model":""}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			DefaultTestModel string `json:"default_test_model"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	assert.Empty(t, response.Data.DefaultTestModel)
+}
+
+func TestUpdateUpstreamChannelDefaultTestModelRejectsOversizedValue(t *testing.T) {
+	engine, row := setupUpstreamChannelControllerTest(t)
+	payload := `{"default_test_model":"` + strings.Repeat("x", upstreamChannelNameMaxLength+1) + `"}`
+	request := httptest.NewRequest(http.MethodPatch, "/api/upstream-channels/"+strconv.Itoa(row.Id)+"/default-test-model", bytes.NewBufferString(payload))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.False(t, response.Success)
+	assert.Equal(t, errInvalidUpstreamDefaultTestModel.Error(), response.Message)
 }
 
 func TestCreateUpstreamChannelNormalizesBaseURLAndDefaultsName(t *testing.T) {
@@ -378,6 +480,42 @@ func TestCreateUpstreamChannelStoresManagementAccessTokenWithoutExposingIt(t *te
 	assert.Equal(t, managementToken, storedToken)
 }
 
+func TestCreateUpstreamChannelStoresSub2APIAccessTokenWithoutExposingIt(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "persistent-session-secret")
+	engine, _ := setupUpstreamChannelControllerTest(t)
+	const accessToken = "sub2-access-secret"
+	payload := `{"base_url":"https://sub2-token.example","provider":"sub2api","auth_type":"access_token","username":"owner@example.com","password":"` + accessToken + `","balance_threshold":0,"multiplier":1,"auto_refresh_interval":300}`
+	request := httptest.NewRequest(http.MethodPost, "/api/upstream-channels/", bytes.NewBufferString(payload))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.NotContains(t, recorder.Body.String(), accessToken)
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			ID          int    `json:"id"`
+			Provider    string `json:"provider"`
+			AuthType    string `json:"auth_type"`
+			Username    string `json:"username"`
+			HasPassword bool   `json:"has_password"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	assert.Equal(t, service.UpstreamProviderSub2API, response.Data.Provider)
+	assert.Equal(t, model.UpstreamAuthTypeAccessToken, response.Data.AuthType)
+	assert.Equal(t, "owner@example.com", response.Data.Username)
+	assert.True(t, response.Data.HasPassword)
+
+	created, err := model.GetUpstreamChannelByID(response.Data.ID)
+	require.NoError(t, err)
+	storedToken, err := created.DecryptPassword()
+	require.NoError(t, err)
+	assert.Equal(t, accessToken, storedToken)
+}
+
 func TestCreateUpstreamChannelRejectsInvalidManagementAccessTokenConfiguration(t *testing.T) {
 	engine, _ := setupUpstreamChannelControllerTest(t)
 	tests := []struct {
@@ -387,8 +525,8 @@ func TestCreateUpstreamChannelRejectsInvalidManagementAccessTokenConfiguration(t
 	}{
 		{
 			name:    "provider",
-			payload: `{"base_url":"https://sub2-token.example","provider":"sub2api","auth_type":"access_token","username":"42","password":"token","balance_threshold":0,"multiplier":1,"auto_refresh_interval":300}`,
-			message: "management access token authentication is only supported for new-api upstream channels",
+			payload: `{"base_url":"https://auto-token.example","provider":"auto","auth_type":"access_token","username":"42","password":"token","balance_threshold":0,"multiplier":1,"auto_refresh_interval":300}`,
+			message: "access token authentication is only supported for new-api and sub2api upstream channels",
 		},
 		{
 			name:    "numeric user id",
@@ -398,7 +536,7 @@ func TestCreateUpstreamChannelRejectsInvalidManagementAccessTokenConfiguration(t
 		{
 			name:    "token",
 			payload: `{"base_url":"https://missing-token.example","provider":"new-api","auth_type":"access_token","username":"42","password":"","balance_threshold":0,"multiplier":1,"auto_refresh_interval":300}`,
-			message: "enter a new password or management access token when changing the authentication method",
+			message: "enter a new password or access token when changing the authentication method",
 		},
 	}
 
@@ -443,7 +581,7 @@ func TestUpdateUpstreamChannelRequiresNewSecretWhenAuthenticationMethodChanges(t
 	}
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	assert.False(t, response.Success)
-	assert.Equal(t, "enter a new password or management access token when changing the authentication method", response.Message)
+	assert.Equal(t, "enter a new password or access token when changing the authentication method", response.Message)
 }
 
 func TestCreateUpstreamChannelAllowsSavingWithoutCredentialsOrPersistentCryptoSecret(t *testing.T) {

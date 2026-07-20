@@ -17,6 +17,16 @@ const (
 	UpstreamProviderOther   = "other"
 )
 
+func UpstreamCredentialRequiresUsername(provider string, authType string) bool {
+	return strings.TrimSpace(provider) != UpstreamProviderSub2API ||
+		model.NormalizeUpstreamAuthType(authType) != model.UpstreamAuthTypeAccessToken
+}
+
+type UpstreamChannelLogMetrics struct {
+	Availability24h            *float64
+	AverageFirstTokenLatencyMs *float64
+}
+
 func NormalizeUpstreamBaseURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -69,6 +79,65 @@ func CollectExplicitUpstreamBaseURLs(rawURLs []string) []string {
 	return urls
 }
 
+func GetUpstreamChannelLogMetricsSince(startTimestamp int64) (map[string]UpstreamChannelLogMetrics, error) {
+	sources, err := model.ListExplicitChannelSources()
+	if err != nil {
+		return nil, err
+	}
+	channelIDs := make([]int, 0, len(sources))
+	baseURLByChannelID := make(map[int]string, len(sources))
+	for _, source := range sources {
+		if source.ID <= 0 {
+			continue
+		}
+		normalized, normalizeErr := NormalizeUpstreamBaseURL(source.BaseURL)
+		if normalizeErr != nil {
+			continue
+		}
+		channelIDs = append(channelIDs, source.ID)
+		baseURLByChannelID[source.ID] = normalized
+	}
+
+	channelMetrics, err := model.GetChannelLogMetricsSince(channelIDs, startTimestamp)
+	if err != nil {
+		return nil, err
+	}
+	type aggregate struct {
+		requestCount                 int64
+		successCount                 int64
+		firstTokenLatencyTotalMs     float64
+		firstTokenLatencySampleCount int64
+	}
+	aggregates := make(map[string]aggregate)
+	for channelID, metric := range channelMetrics {
+		baseURL, ok := baseURLByChannelID[channelID]
+		if !ok {
+			continue
+		}
+		current := aggregates[baseURL]
+		current.requestCount += metric.RequestCount
+		current.successCount += metric.SuccessCount
+		current.firstTokenLatencyTotalMs += metric.FirstTokenLatencyTotalMs
+		current.firstTokenLatencySampleCount += metric.FirstTokenLatencySampleCount
+		aggregates[baseURL] = current
+	}
+
+	result := make(map[string]UpstreamChannelLogMetrics, len(aggregates))
+	for baseURL, current := range aggregates {
+		metrics := UpstreamChannelLogMetrics{}
+		if current.requestCount > 0 {
+			availability := float64(current.successCount) / float64(current.requestCount) * 100
+			metrics.Availability24h = &availability
+		}
+		if current.firstTokenLatencySampleCount > 0 {
+			average := current.firstTokenLatencyTotalMs / float64(current.firstTokenLatencySampleCount)
+			metrics.AverageFirstTokenLatencyMs = &average
+		}
+		result[baseURL] = metrics
+	}
+	return result, nil
+}
+
 func DeleteUpstreamChannel(id int) error {
 	return model.DeleteUpstreamChannel(id)
 }
@@ -106,6 +175,34 @@ func UpdateUpstreamChannelSelectedGroup(id int, selectedGroup string) (*model.Up
 		}
 	}
 	if err = model.UpdateUpstreamChannelSelectedGroup(id, selectedGroup); err != nil {
+		return nil, err
+	}
+	return model.GetUpstreamChannelByID(id)
+}
+
+func UpdateUpstreamChannelDefaultTestModel(id int, defaultTestModel string) (*model.UpstreamChannel, error) {
+	defaultTestModel = strings.TrimSpace(defaultTestModel)
+	row, err := model.GetUpstreamChannelByID(id)
+	if err != nil {
+		return nil, err
+	}
+	if defaultTestModel != "" {
+		var snapshot UpstreamSnapshot
+		if strings.TrimSpace(row.SnapshotJSON) == "" || common.UnmarshalJsonStr(row.SnapshotJSON, &snapshot) != nil {
+			return nil, errors.New("default test model is unavailable")
+		}
+		available := false
+		for _, upstreamModel := range snapshot.Models {
+			if strings.TrimSpace(upstreamModel.ID) == defaultTestModel {
+				available = true
+				break
+			}
+		}
+		if !available {
+			return nil, errors.New("default test model is unavailable")
+		}
+	}
+	if err = model.UpdateUpstreamChannelDefaultTestModel(id, defaultTestModel); err != nil {
 		return nil, err
 	}
 	return model.GetUpstreamChannelByID(id)

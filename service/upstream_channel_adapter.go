@@ -25,12 +25,17 @@ const (
 	UpstreamErrorCodeTurnstileRequiresAccessToken = "upstream_turnstile_requires_access_token"
 )
 
-var ErrNewAPITurnstileRequiresAccessToken = errors.New(
-	"new-api has Turnstile enabled; use the numeric upstream user ID and a management access token",
+var (
+	ErrNewAPITurnstileRequiresAccessToken = errors.New(
+		"new-api has Turnstile enabled; use the numeric upstream user ID and a management access token",
+	)
+	ErrSub2APITurnstileRequiresAccessToken = errors.New(
+		"Sub2API has Turnstile enabled; use a browser-issued access token instead of background account login",
+	)
 )
 
 func UpstreamErrorCode(err error) string {
-	if errors.Is(err, ErrNewAPITurnstileRequiresAccessToken) {
+	if errors.Is(err, ErrNewAPITurnstileRequiresAccessToken) || errors.Is(err, ErrSub2APITurnstileRequiresAccessToken) {
 		return UpstreamErrorCodeTurnstileRequiresAccessToken
 	}
 	return ""
@@ -39,7 +44,8 @@ func UpstreamErrorCode(err error) string {
 func UpstreamErrorCodeFromMessage(message string) string {
 	normalized := strings.ToLower(strings.TrimSpace(message))
 	if normalized == strings.ToLower(ErrNewAPITurnstileRequiresAccessToken.Error()) ||
-		(strings.Contains(normalized, "turnstile") && strings.Contains(normalized, "management access token")) {
+		normalized == strings.ToLower(ErrSub2APITurnstileRequiresAccessToken.Error()) ||
+		(strings.Contains(normalized, "turnstile") && strings.Contains(normalized, "access token")) {
 		return UpstreamErrorCodeTurnstileRequiresAccessToken
 	}
 	return ""
@@ -83,6 +89,42 @@ type UpstreamGroup struct {
 	Ratio       float64 `json:"ratio"`
 }
 
+type UpstreamModelPricingInterval struct {
+	MinTokens       int      `json:"min_tokens"`
+	MaxTokens       *int     `json:"max_tokens,omitempty"`
+	TierLabel       string   `json:"tier_label,omitempty"`
+	InputPrice      *float64 `json:"input_price,omitempty"`
+	OutputPrice     *float64 `json:"output_price,omitempty"`
+	CacheWritePrice *float64 `json:"cache_write_price,omitempty"`
+	CacheReadPrice  *float64 `json:"cache_read_price,omitempty"`
+	PerRequestPrice *float64 `json:"per_request_price,omitempty"`
+}
+
+type UpstreamModelPricing struct {
+	Source           string                         `json:"source"`
+	ChannelName      string                         `json:"channel_name,omitempty"`
+	Platform         string                         `json:"platform,omitempty"`
+	BillingMode      string                         `json:"billing_mode,omitempty"`
+	ModelRatio       *float64                       `json:"model_ratio,omitempty"`
+	CompletionRatio  *float64                       `json:"completion_ratio,omitempty"`
+	CacheRatio       *float64                       `json:"cache_ratio,omitempty"`
+	CreateCacheRatio *float64                       `json:"create_cache_ratio,omitempty"`
+	ModelPrice       *float64                       `json:"model_price,omitempty"`
+	InputPrice       *float64                       `json:"input_price,omitempty"`
+	OutputPrice      *float64                       `json:"output_price,omitempty"`
+	CacheWritePrice  *float64                       `json:"cache_write_price,omitempty"`
+	CacheReadPrice   *float64                       `json:"cache_read_price,omitempty"`
+	ImageInputPrice  *float64                       `json:"image_input_price,omitempty"`
+	ImageOutputPrice *float64                       `json:"image_output_price,omitempty"`
+	PerRequestPrice  *float64                       `json:"per_request_price,omitempty"`
+	Intervals        []UpstreamModelPricingInterval `json:"intervals,omitempty"`
+}
+
+type UpstreamModel struct {
+	ID      string                 `json:"id"`
+	Pricing []UpstreamModelPricing `json:"pricing"`
+}
+
 type UpstreamSnapshot struct {
 	Provider    string             `json:"provider"`
 	Balance     float64            `json:"balance"`
@@ -90,6 +132,7 @@ type UpstreamSnapshot struct {
 	Keys        []UpstreamKey      `json:"keys"`
 	Groups      []UpstreamGroup    `json:"groups"`
 	Ratios      map[string]float64 `json:"ratios"`
+	Models      []UpstreamModel    `json:"models"`
 	RetrievedAt int64              `json:"retrieved_at"`
 }
 
@@ -120,7 +163,12 @@ type newAPIEnvelope struct {
 type sub2APIEnvelope struct {
 	Code    int             `json:"code"`
 	Message string          `json:"message"`
+	Reason  string          `json:"reason"`
 	Data    json.RawMessage `json:"data"`
+}
+
+func supportsUpstreamAccessToken(provider string) bool {
+	return provider == UpstreamProviderNewAPI || provider == UpstreamProviderSub2API
 }
 
 func FetchUpstreamSnapshot(ctx context.Context, client *http.Client, baseURL string, provider string, credential UpstreamCredential) (UpstreamSnapshot, error) {
@@ -139,8 +187,8 @@ func FetchUpstreamSnapshot(ctx context.Context, client *http.Client, baseURL str
 	if authType != model.UpstreamAuthTypePassword && authType != model.UpstreamAuthTypeAccessToken {
 		return UpstreamSnapshot{}, fmt.Errorf("unsupported upstream authentication method %q", authType)
 	}
-	if authType == model.UpstreamAuthTypeAccessToken && provider != UpstreamProviderNewAPI {
-		return UpstreamSnapshot{}, errors.New("management access token authentication is only supported for new-api upstream channels")
+	if authType == model.UpstreamAuthTypeAccessToken && !supportsUpstreamAccessToken(provider) {
+		return UpstreamSnapshot{}, errors.New("access token authentication is only supported for new-api and sub2api upstream channels")
 	}
 	switch provider {
 	case UpstreamProviderNewAPI:
@@ -174,6 +222,658 @@ func DetectUpstreamProvider(ctx context.Context, client *http.Client, baseURL st
 		}
 	}
 	return UpstreamProviderNewAPI
+}
+
+// FetchUpstreamBalance authenticates with an upstream and retrieves only its account balance.
+func FetchUpstreamBalance(ctx context.Context, client *http.Client, baseURL string, provider string, credential UpstreamCredential) (UpstreamSnapshot, error) {
+	normalized, resolvedProvider, err := prepareUpstreamProvider(ctx, client, baseURL, provider, credential)
+	if err != nil {
+		return UpstreamSnapshot{}, err
+	}
+	if resolvedProvider == UpstreamProviderNewAPI {
+		sessionClient, headers, err := authenticateNewAPI(ctx, client, normalized, credential)
+		if err != nil {
+			return UpstreamSnapshot{}, err
+		}
+		quotaPerUnit, err := fetchNewAPIQuotaPerUnit(ctx, sessionClient, normalized)
+		if err != nil {
+			return UpstreamSnapshot{}, err
+		}
+		account, err := fetchNewAPIAccount(ctx, sessionClient, normalized, headers, quotaPerUnit)
+		if err != nil {
+			return UpstreamSnapshot{}, err
+		}
+		return UpstreamSnapshot{Provider: resolvedProvider, Balance: account.Balance, Account: account, RetrievedAt: time.Now().Unix()}, nil
+	}
+
+	sessionClient, headers, err := authenticateSub2API(ctx, client, normalized, credential)
+	if err != nil {
+		return UpstreamSnapshot{}, err
+	}
+	account, err := fetchSub2APIAccount(ctx, sessionClient, normalized, headers)
+	if err != nil {
+		return UpstreamSnapshot{}, err
+	}
+	return UpstreamSnapshot{Provider: resolvedProvider, Balance: account.Balance, Account: account, RetrievedAt: time.Now().Unix()}, nil
+}
+
+// FetchUpstreamKeys authenticates with an upstream and retrieves only its key list.
+func FetchUpstreamKeys(ctx context.Context, client *http.Client, baseURL string, provider string, credential UpstreamCredential) (UpstreamSnapshot, error) {
+	normalized, resolvedProvider, err := prepareUpstreamProvider(ctx, client, baseURL, provider, credential)
+	if err != nil {
+		return UpstreamSnapshot{}, err
+	}
+	if resolvedProvider == UpstreamProviderNewAPI {
+		sessionClient, headers, err := authenticateNewAPI(ctx, client, normalized, credential)
+		if err != nil {
+			return UpstreamSnapshot{}, err
+		}
+		quotaPerUnit, err := fetchNewAPIQuotaPerUnit(ctx, sessionClient, normalized)
+		if err != nil {
+			return UpstreamSnapshot{}, err
+		}
+		keys, err := fetchNewAPIKeys(ctx, sessionClient, normalized, headers, quotaPerUnit)
+		if err != nil {
+			return UpstreamSnapshot{}, err
+		}
+		for i := range keys {
+			if keys[i].KeyFingerprint != "" {
+				continue
+			}
+			fullKey, fetchErr := fetchNewAPIFullKeyWithSession(ctx, sessionClient, normalized, headers, keys[i].ID)
+			if fetchErr != nil {
+				return UpstreamSnapshot{}, fmt.Errorf("fetch new-api key %d for import status: %w", keys[i].ID, fetchErr)
+			}
+			keys[i].KeyFingerprint = upstreamKeyFingerprint(fullKey)
+		}
+		return UpstreamSnapshot{Provider: resolvedProvider, Keys: keys, RetrievedAt: time.Now().Unix()}, nil
+	}
+
+	sessionClient, headers, err := authenticateSub2API(ctx, client, normalized, credential)
+	if err != nil {
+		return UpstreamSnapshot{}, err
+	}
+	keys, err := fetchSub2APIKeys(ctx, sessionClient, normalized, headers)
+	if err != nil {
+		return UpstreamSnapshot{}, err
+	}
+	for i := range keys {
+		if keys[i].KeyFingerprint != "" {
+			continue
+		}
+		fullKey, fetchErr := fetchSub2APIFullKeyWithToken(ctx, sessionClient, normalized, headers, keys[i].ID)
+		if fetchErr != nil {
+			return UpstreamSnapshot{}, fmt.Errorf("fetch sub2api key %d for import status: %w", keys[i].ID, fetchErr)
+		}
+		keys[i].KeyFingerprint = upstreamKeyFingerprint(fullKey)
+	}
+	return UpstreamSnapshot{Provider: resolvedProvider, Keys: keys, RetrievedAt: time.Now().Unix()}, nil
+}
+
+// FetchUpstreamGroups authenticates with an upstream and retrieves only its groups and ratios.
+func FetchUpstreamGroups(ctx context.Context, client *http.Client, baseURL string, provider string, credential UpstreamCredential) (UpstreamSnapshot, error) {
+	normalized, resolvedProvider, err := prepareUpstreamProvider(ctx, client, baseURL, provider, credential)
+	if err != nil {
+		return UpstreamSnapshot{}, err
+	}
+	if resolvedProvider == UpstreamProviderNewAPI {
+		sessionClient, headers, err := authenticateNewAPI(ctx, client, normalized, credential)
+		if err != nil {
+			return UpstreamSnapshot{}, err
+		}
+		groups, ratios, err := fetchNewAPIGroups(ctx, sessionClient, normalized, headers)
+		if err != nil {
+			return UpstreamSnapshot{}, err
+		}
+		return UpstreamSnapshot{Provider: resolvedProvider, Groups: groups, Ratios: ratios, RetrievedAt: time.Now().Unix()}, nil
+	}
+
+	sessionClient, headers, err := authenticateSub2API(ctx, client, normalized, credential)
+	if err != nil {
+		return UpstreamSnapshot{}, err
+	}
+	groups, err := fetchSub2APIGroups(ctx, sessionClient, normalized, headers)
+	if err != nil {
+		return UpstreamSnapshot{}, err
+	}
+	ratios, err := fetchSub2APIRatios(ctx, sessionClient, normalized, headers)
+	if err != nil {
+		return UpstreamSnapshot{}, err
+	}
+	for i := range groups {
+		if ratio, ok := ratios[strconv.FormatInt(groups[i].ID, 10)]; ok {
+			groups[i].Ratio = ratio
+		}
+	}
+	return UpstreamSnapshot{Provider: resolvedProvider, Groups: groups, Ratios: ratios, RetrievedAt: time.Now().Unix()}, nil
+}
+
+// upstreamModelDiscoveryResult keeps pricing discovery failures separate from model discovery failures.
+// A pricing endpoint can be unavailable while the upstream model list is still usable.
+type upstreamModelDiscoveryResult struct {
+	Models       []UpstreamModel
+	PricingError error
+}
+
+// FetchUpstreamModels retrieves the union exposed by every eligible upstream key.
+// Pricing discovery is best-effort: a provider without a pricing endpoint still returns its model list.
+func FetchUpstreamModels(ctx context.Context, client *http.Client, baseURL string, provider string, credential UpstreamCredential, keys []UpstreamKey, selectedGroup string) ([]UpstreamModel, error) {
+	result, err := fetchUpstreamModelsWithPricingStatus(ctx, client, baseURL, provider, credential, keys, selectedGroup)
+	if err != nil {
+		return nil, err
+	}
+	return result.Models, nil
+}
+
+func fetchUpstreamModelsWithPricingStatus(ctx context.Context, client *http.Client, baseURL string, provider string, credential UpstreamCredential, keys []UpstreamKey, selectedGroup string) (upstreamModelDiscoveryResult, error) {
+	normalized, resolvedProvider, err := prepareUpstreamProvider(ctx, client, baseURL, provider, credential)
+	if err != nil {
+		return upstreamModelDiscoveryResult{}, err
+	}
+	probeKeys := selectUpstreamModelProbeKeys(keys, selectedGroup)
+	if len(probeKeys) == 0 {
+		return upstreamModelDiscoveryResult{}, errors.New("no upstream keys are available for model discovery")
+	}
+
+	var sessionClient *http.Client
+	var headers map[string]string
+	if resolvedProvider == UpstreamProviderNewAPI {
+		sessionClient, headers, err = authenticateNewAPI(ctx, client, normalized, credential)
+	} else {
+		sessionClient, headers, err = authenticateSub2API(ctx, client, normalized, credential)
+	}
+	if err != nil {
+		return upstreamModelDiscoveryResult{}, err
+	}
+
+	modelSet := make(map[string]struct{})
+	probeErrors := make([]string, 0)
+	for _, key := range probeKeys {
+		var fullKey string
+		if resolvedProvider == UpstreamProviderNewAPI {
+			fullKey, err = fetchNewAPIFullKeyWithSession(ctx, sessionClient, normalized, headers, key.ID)
+		} else {
+			fullKey, err = fetchSub2APIFullKeyWithToken(ctx, sessionClient, normalized, headers, key.ID)
+		}
+		if err != nil {
+			probeErrors = append(probeErrors, fmt.Sprintf("key %d: fetch key: %v", key.ID, err))
+			continue
+		}
+		keyModels, fetchErr := fetchUpstreamKeyModelsAllowEmpty(ctx, sessionClient, normalized, fullKey)
+		if fetchErr != nil {
+			probeErrors = append(probeErrors, fmt.Sprintf("key %d: fetch models: %v", key.ID, fetchErr))
+			continue
+		}
+		for _, modelID := range keyModels {
+			modelSet[modelID] = struct{}{}
+		}
+	}
+
+	modelIDs := make([]string, 0, len(modelSet))
+	for modelID := range modelSet {
+		modelIDs = append(modelIDs, modelID)
+	}
+	sort.Strings(modelIDs)
+	models := make([]UpstreamModel, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		models = append(models, UpstreamModel{ID: modelID, Pricing: []UpstreamModelPricing{}})
+	}
+	if len(models) == 0 {
+		if len(probeErrors) > 0 {
+			return upstreamModelDiscoveryResult{}, fmt.Errorf("upstream model discovery failed: %s", strings.Join(probeErrors, "; "))
+		}
+		return upstreamModelDiscoveryResult{Models: models}, nil
+	}
+
+	var pricingByModel map[string][]UpstreamModelPricing
+	if resolvedProvider == UpstreamProviderNewAPI {
+		pricingByModel, err = fetchNewAPIModelPricing(ctx, sessionClient, normalized, headers, modelSet)
+	} else {
+		pricingByModel, err = fetchSub2APIModelPricing(ctx, sessionClient, normalized, headers, modelSet)
+	}
+	result := upstreamModelDiscoveryResult{Models: models, PricingError: err}
+	if err != nil {
+		return result, nil
+	}
+	for i := range result.Models {
+		if pricing, ok := pricingByModel[result.Models[i].ID]; ok {
+			result.Models[i].Pricing = pricing
+		}
+	}
+	return result, nil
+}
+
+func selectUpstreamModelProbeKeys(keys []UpstreamKey, selectedGroup string) []UpstreamKey {
+	selectedGroup = strings.TrimSpace(selectedGroup)
+	candidates := make([]UpstreamKey, 0, len(keys))
+	seenIDs := make(map[int64]struct{}, len(keys))
+	for _, key := range keys {
+		if key.ID <= 0 || !isUpstreamModelProbeEligible(key) {
+			continue
+		}
+		if _, exists := seenIDs[key.ID]; exists {
+			continue
+		}
+		seenIDs[key.ID] = struct{}{}
+		candidates = append(candidates, key)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		leftSelected := selectedGroup != "" && strings.TrimSpace(candidates[i].Group) == selectedGroup
+		rightSelected := selectedGroup != "" && strings.TrimSpace(candidates[j].Group) == selectedGroup
+		if leftSelected != rightSelected {
+			return leftSelected
+		}
+		leftStatus := upstreamModelProbeStatusPriority(candidates[i].Status)
+		rightStatus := upstreamModelProbeStatusPriority(candidates[j].Status)
+		if leftStatus != rightStatus {
+			return leftStatus < rightStatus
+		}
+		leftGroup := upstreamModelProbeGroup(candidates[i])
+		rightGroup := upstreamModelProbeGroup(candidates[j])
+		if leftGroup != rightGroup {
+			return leftGroup < rightGroup
+		}
+		return candidates[i].ID < candidates[j].ID
+	})
+	return candidates
+}
+
+func isUpstreamModelProbeEligible(key UpstreamKey) bool {
+	switch strings.ToLower(strings.TrimSpace(key.Status)) {
+	case "0", "disabled", "inactive", "revoked", "banned", "expired", "deactivated":
+		return false
+	default:
+		return true
+	}
+}
+
+func IsUpstreamKeyEligible(key UpstreamKey) bool {
+	return isUpstreamModelProbeEligible(key)
+}
+
+func upstreamModelProbeGroup(key UpstreamKey) string {
+	if key.GroupID != nil {
+		return "id:" + strconv.FormatInt(*key.GroupID, 10)
+	}
+	if group := strings.TrimSpace(key.Group); group != "" {
+		return "name:" + group
+	}
+	return "ungrouped"
+}
+
+func upstreamModelProbeStatusPriority(status string) int {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "1", "active", "enabled":
+		return 0
+	case "":
+		return 1
+	default:
+		return 2
+	}
+}
+
+func fetchNewAPIModelPricing(ctx context.Context, client *http.Client, baseURL string, headers map[string]string, modelSet map[string]struct{}) (map[string][]UpstreamModelPricing, error) {
+	var envelope newAPIEnvelope
+	if err := doUpstreamJSON(ctx, client, http.MethodGet, upstreamURL(baseURL, "/api/ratio_config"), nil, headers, &envelope); err != nil {
+		return nil, err
+	}
+	if !envelope.Success {
+		return nil, upstreamEnvelopeError("fetch new-api model pricing", envelope.Message)
+	}
+	var data struct {
+		ModelRatio       map[string]float64 `json:"model_ratio"`
+		CompletionRatio  map[string]float64 `json:"completion_ratio"`
+		CacheRatio       map[string]float64 `json:"cache_ratio"`
+		CreateCacheRatio map[string]float64 `json:"create_cache_ratio"`
+		ModelPrice       map[string]float64 `json:"model_price"`
+	}
+	if err := common.Unmarshal(envelope.Data, &data); err != nil {
+		return nil, fmt.Errorf("decode new-api model pricing response: %w", err)
+	}
+
+	pricingByModel := make(map[string][]UpstreamModelPricing, len(modelSet))
+	for modelID := range modelSet {
+		pricing := UpstreamModelPricing{Source: UpstreamProviderNewAPI}
+		hasPricing := false
+		if value, ok := data.ModelRatio[modelID]; ok {
+			pricing.ModelRatio = &value
+			hasPricing = true
+		}
+		if value, ok := data.CompletionRatio[modelID]; ok {
+			pricing.CompletionRatio = &value
+			hasPricing = true
+		}
+		if value, ok := data.CacheRatio[modelID]; ok {
+			pricing.CacheRatio = &value
+			hasPricing = true
+		}
+		if value, ok := data.CreateCacheRatio[modelID]; ok {
+			pricing.CreateCacheRatio = &value
+			hasPricing = true
+		}
+		if value, ok := data.ModelPrice[modelID]; ok {
+			pricing.ModelPrice = &value
+			hasPricing = true
+		}
+		if hasPricing {
+			pricingByModel[modelID] = []UpstreamModelPricing{pricing}
+		}
+	}
+	return pricingByModel, nil
+}
+
+type sub2APIChannelPricing struct {
+	Name      string                   `json:"name"`
+	Platforms []sub2APIPlatformPricing `json:"platforms"`
+}
+
+type sub2APIPlatformPricing struct {
+	Platform        string            `json:"platform"`
+	SupportedModels []json.RawMessage `json:"supported_models"`
+}
+
+type sub2APIModelPricingPayload struct {
+	BillingMode      string                         `json:"billing_mode"`
+	InputPrice       *float64                       `json:"input_price"`
+	OutputPrice      *float64                       `json:"output_price"`
+	CacheWritePrice  *float64                       `json:"cache_write_price"`
+	CacheReadPrice   *float64                       `json:"cache_read_price"`
+	ImageInputPrice  *float64                       `json:"image_input_price"`
+	ImageOutputPrice *float64                       `json:"image_output_price"`
+	PerRequestPrice  *float64                       `json:"per_request_price"`
+	Intervals        []UpstreamModelPricingInterval `json:"intervals"`
+}
+
+type sub2APISupportedModelPayload struct {
+	Name             string                         `json:"name"`
+	Model            string                         `json:"model"`
+	Platform         string                         `json:"platform"`
+	Pricing          json.RawMessage                `json:"pricing"`
+	BillingMode      string                         `json:"billing_mode"`
+	InputPrice       *float64                       `json:"input_price"`
+	OutputPrice      *float64                       `json:"output_price"`
+	CacheWritePrice  *float64                       `json:"cache_write_price"`
+	CacheReadPrice   *float64                       `json:"cache_read_price"`
+	ImageInputPrice  *float64                       `json:"image_input_price"`
+	ImageOutputPrice *float64                       `json:"image_output_price"`
+	PerRequestPrice  *float64                       `json:"per_request_price"`
+	Intervals        []UpstreamModelPricingInterval `json:"intervals"`
+}
+
+func fetchSub2APIModelPricing(ctx context.Context, client *http.Client, baseURL string, headers map[string]string, modelSet map[string]struct{}) (map[string][]UpstreamModelPricing, error) {
+	var envelope sub2APIEnvelope
+	if err := doUpstreamJSON(ctx, client, http.MethodGet, upstreamURL(baseURL, "/api/v1/channels/available"), nil, headers, &envelope); err != nil {
+		return nil, err
+	}
+	if envelope.Code != 0 {
+		return nil, upstreamEnvelopeError("fetch sub2api model pricing", envelope.Message)
+	}
+	channels, err := decodeSub2APIChannels(envelope.Data)
+	if err != nil {
+		return nil, fmt.Errorf("decode sub2api model pricing response: %w", err)
+	}
+
+	pricingByModel := make(map[string][]UpstreamModelPricing, len(modelSet))
+	for _, channel := range channels {
+		for _, platformSection := range channel.Platforms {
+			for _, rawModel := range platformSection.SupportedModels {
+				modelID, supportedModel, ok := decodeSub2APISupportedModel(rawModel)
+				if !ok {
+					continue
+				}
+				if _, ok := modelSet[modelID]; !ok {
+					continue
+				}
+				platform := strings.TrimSpace(supportedModel.Platform)
+				if platform == "" {
+					platform = strings.TrimSpace(platformSection.Platform)
+				}
+				pricing := UpstreamModelPricing{
+					Source:      UpstreamProviderSub2API,
+					ChannelName: strings.TrimSpace(channel.Name),
+					Platform:    platform,
+				}
+				applySub2APIPricing(&pricing, supportedModel)
+				if len(supportedModel.Pricing) > 0 && string(supportedModel.Pricing) != "null" {
+					var nested sub2APIModelPricingPayload
+					if err := common.Unmarshal(supportedModel.Pricing, &nested); err == nil {
+						applySub2APINestedPricing(&pricing, nested)
+					}
+				}
+				pricingByModel[modelID] = append(pricingByModel[modelID], pricing)
+			}
+		}
+	}
+	for modelID := range pricingByModel {
+		sort.SliceStable(pricingByModel[modelID], func(i, j int) bool {
+			left := pricingByModel[modelID][i]
+			right := pricingByModel[modelID][j]
+			if left.ChannelName != right.ChannelName {
+				return left.ChannelName < right.ChannelName
+			}
+			if left.Platform != right.Platform {
+				return left.Platform < right.Platform
+			}
+			return left.BillingMode < right.BillingMode
+		})
+	}
+	return pricingByModel, nil
+}
+
+func decodeSub2APIChannels(data json.RawMessage) ([]sub2APIChannelPricing, error) {
+	var channels []sub2APIChannelPricing
+	if err := common.Unmarshal(data, &channels); err == nil {
+		return channels, nil
+	}
+	var wrapper struct {
+		Channels []sub2APIChannelPricing `json:"channels"`
+		Items    []sub2APIChannelPricing `json:"items"`
+		Data     []sub2APIChannelPricing `json:"data"`
+	}
+	if err := common.Unmarshal(data, &wrapper); err != nil {
+		return nil, err
+	}
+	if wrapper.Channels != nil {
+		return wrapper.Channels, nil
+	}
+	if wrapper.Items != nil {
+		return wrapper.Items, nil
+	}
+	return wrapper.Data, nil
+}
+
+func decodeSub2APISupportedModel(raw json.RawMessage) (string, sub2APISupportedModelPayload, bool) {
+	var modelName string
+	if err := common.Unmarshal(raw, &modelName); err == nil {
+		modelName = strings.TrimSpace(modelName)
+		return modelName, sub2APISupportedModelPayload{Name: modelName}, modelName != ""
+	}
+	var supportedModel sub2APISupportedModelPayload
+	if err := common.Unmarshal(raw, &supportedModel); err != nil {
+		return "", sub2APISupportedModelPayload{}, false
+	}
+	modelID := strings.TrimSpace(supportedModel.Name)
+	if modelID == "" {
+		modelID = strings.TrimSpace(supportedModel.Model)
+	}
+	return modelID, supportedModel, modelID != ""
+}
+
+func applySub2APIPricing(pricing *UpstreamModelPricing, payload sub2APISupportedModelPayload) {
+	pricing.BillingMode = strings.TrimSpace(payload.BillingMode)
+	pricing.InputPrice = payload.InputPrice
+	pricing.OutputPrice = payload.OutputPrice
+	pricing.CacheWritePrice = payload.CacheWritePrice
+	pricing.CacheReadPrice = payload.CacheReadPrice
+	pricing.ImageInputPrice = payload.ImageInputPrice
+	pricing.ImageOutputPrice = payload.ImageOutputPrice
+	pricing.PerRequestPrice = payload.PerRequestPrice
+	pricing.Intervals = payload.Intervals
+}
+
+func applySub2APINestedPricing(pricing *UpstreamModelPricing, payload sub2APIModelPricingPayload) {
+	if strings.TrimSpace(payload.BillingMode) != "" {
+		pricing.BillingMode = strings.TrimSpace(payload.BillingMode)
+	}
+	if payload.InputPrice != nil {
+		pricing.InputPrice = payload.InputPrice
+	}
+	if payload.OutputPrice != nil {
+		pricing.OutputPrice = payload.OutputPrice
+	}
+	if payload.CacheWritePrice != nil {
+		pricing.CacheWritePrice = payload.CacheWritePrice
+	}
+	if payload.CacheReadPrice != nil {
+		pricing.CacheReadPrice = payload.CacheReadPrice
+	}
+	if payload.ImageInputPrice != nil {
+		pricing.ImageInputPrice = payload.ImageInputPrice
+	}
+	if payload.ImageOutputPrice != nil {
+		pricing.ImageOutputPrice = payload.ImageOutputPrice
+	}
+	if payload.PerRequestPrice != nil {
+		pricing.PerRequestPrice = payload.PerRequestPrice
+	}
+	if payload.Intervals != nil {
+		pricing.Intervals = payload.Intervals
+	}
+}
+
+func prepareUpstreamProvider(ctx context.Context, client *http.Client, baseURL string, provider string, credential UpstreamCredential) (string, string, error) {
+	normalized, err := NormalizeUpstreamBaseURL(baseURL)
+	if err != nil {
+		return "", "", err
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resolvedProvider := strings.TrimSpace(strings.ToLower(provider))
+	if resolvedProvider == "" || resolvedProvider == UpstreamProviderAuto {
+		resolvedProvider = DetectUpstreamProvider(ctx, client, normalized)
+	}
+	authType := model.NormalizeUpstreamAuthType(credential.AuthType)
+	if authType != model.UpstreamAuthTypePassword && authType != model.UpstreamAuthTypeAccessToken {
+		return "", "", fmt.Errorf("unsupported upstream authentication method %q", authType)
+	}
+	if authType == model.UpstreamAuthTypeAccessToken && !supportsUpstreamAccessToken(resolvedProvider) {
+		return "", "", errors.New("access token authentication is only supported for new-api and sub2api upstream channels")
+	}
+	if resolvedProvider != UpstreamProviderNewAPI && resolvedProvider != UpstreamProviderSub2API {
+		return "", "", fmt.Errorf("unsupported upstream provider %q", resolvedProvider)
+	}
+	return normalized, resolvedProvider, nil
+}
+
+func fetchNewAPIQuotaPerUnit(ctx context.Context, client *http.Client, baseURL string) (float64, error) {
+	quotaPerUnit := common.QuotaPerUnit
+	var statusEnvelope newAPIEnvelope
+	if err := doUpstreamJSON(ctx, client, http.MethodGet, upstreamURL(baseURL, "/api/status"), nil, nil, &statusEnvelope); err != nil {
+		return 0, fmt.Errorf("fetch new-api status failed: %w", err)
+	}
+	if !statusEnvelope.Success {
+		return 0, upstreamEnvelopeError("fetch new-api status", statusEnvelope.Message)
+	}
+	var statusData struct {
+		QuotaPerUnit float64 `json:"quota_per_unit"`
+	}
+	if err := common.Unmarshal(statusEnvelope.Data, &statusData); err != nil {
+		return 0, fmt.Errorf("decode new-api status response: %w", err)
+	}
+	if statusData.QuotaPerUnit > 0 {
+		quotaPerUnit = statusData.QuotaPerUnit
+	}
+	return quotaPerUnit, nil
+}
+
+func fetchNewAPIAccount(ctx context.Context, client *http.Client, baseURL string, headers map[string]string, quotaPerUnit float64) (UpstreamAccount, error) {
+	var selfEnvelope newAPIEnvelope
+	if err := doUpstreamJSON(ctx, client, http.MethodGet, upstreamURL(baseURL, "/api/user/self"), nil, headers, &selfEnvelope); err != nil {
+		return UpstreamAccount{}, fmt.Errorf("fetch new-api account failed: %w", err)
+	}
+	if !selfEnvelope.Success {
+		return UpstreamAccount{}, upstreamEnvelopeError("fetch new-api account", selfEnvelope.Message)
+	}
+	var accountData struct {
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
+		Role     int    `json:"role"`
+		Group    string `json:"group"`
+		Quota    int64  `json:"quota"`
+	}
+	if err := common.Unmarshal(selfEnvelope.Data, &accountData); err != nil {
+		return UpstreamAccount{}, fmt.Errorf("decode new-api account response: %w", err)
+	}
+	balance := 0.0
+	if quotaPerUnit > 0 {
+		balance = float64(accountData.Quota) / quotaPerUnit
+	}
+	return UpstreamAccount{ID: accountData.ID, Username: accountData.Username, Role: strconv.Itoa(accountData.Role), Group: accountData.Group, Balance: balance}, nil
+}
+
+func authenticateSub2API(ctx context.Context, client *http.Client, baseURL string, credential UpstreamCredential) (*http.Client, map[string]string, error) {
+	authType := model.NormalizeUpstreamAuthType(credential.AuthType)
+	if authType == model.UpstreamAuthTypeAccessToken {
+		accessToken := strings.TrimSpace(credential.Password)
+		if accessToken == "" {
+			return nil, nil, errors.New("sub2api access token is required")
+		}
+		return client, map[string]string{"Authorization": "Bearer " + accessToken}, nil
+	}
+	if authType != model.UpstreamAuthTypePassword {
+		return nil, nil, fmt.Errorf("unsupported sub2api authentication method %q", authType)
+	}
+
+	loginPayload := map[string]string{"email": credential.Username, "password": credential.Password}
+	var loginEnvelope sub2APIEnvelope
+	if err := doUpstreamJSON(ctx, client, http.MethodPost, upstreamURL(baseURL, "/api/v1/auth/login"), loginPayload, nil, &loginEnvelope); err != nil {
+		if strings.EqualFold(strings.TrimSpace(loginEnvelope.Reason), "TURNSTILE_VERIFICATION_FAILED") || strings.Contains(strings.ToLower(loginEnvelope.Message), "turnstile") {
+			return nil, nil, ErrSub2APITurnstileRequiresAccessToken
+		}
+		return nil, nil, fmt.Errorf("sub2api login failed: %w", err)
+	}
+	if loginEnvelope.Code != 0 {
+		if strings.EqualFold(strings.TrimSpace(loginEnvelope.Reason), "TURNSTILE_VERIFICATION_FAILED") || strings.Contains(strings.ToLower(loginEnvelope.Message), "turnstile") {
+			return nil, nil, ErrSub2APITurnstileRequiresAccessToken
+		}
+		return nil, nil, upstreamEnvelopeError("sub2api login", loginEnvelope.Message)
+	}
+	var loginData struct {
+		AccessToken string `json:"access_token"`
+		Requires2FA bool   `json:"requires_2fa"`
+	}
+	if err := common.Unmarshal(loginEnvelope.Data, &loginData); err != nil {
+		return nil, nil, fmt.Errorf("decode sub2api login response: %w", err)
+	}
+	if loginData.Requires2FA {
+		return nil, nil, errors.New("sub2api account requires two-factor authentication")
+	}
+	if loginData.AccessToken == "" {
+		return nil, nil, errors.New("sub2api login response did not include an access token")
+	}
+	return client, map[string]string{"Authorization": "Bearer " + loginData.AccessToken}, nil
+}
+
+func fetchSub2APIAccount(ctx context.Context, client *http.Client, baseURL string, headers map[string]string) (UpstreamAccount, error) {
+	var profileEnvelope sub2APIEnvelope
+	if err := doUpstreamJSON(ctx, client, http.MethodGet, upstreamURL(baseURL, "/api/v1/user/profile"), nil, headers, &profileEnvelope); err != nil {
+		return UpstreamAccount{}, fmt.Errorf("fetch sub2api account failed: %w", err)
+	}
+	if profileEnvelope.Code != 0 {
+		return UpstreamAccount{}, upstreamEnvelopeError("fetch sub2api account", profileEnvelope.Message)
+	}
+	var accountData struct {
+		ID       int64   `json:"id"`
+		Email    string  `json:"email"`
+		Username string  `json:"username"`
+		Role     string  `json:"role"`
+		Balance  float64 `json:"balance"`
+	}
+	if err := common.Unmarshal(profileEnvelope.Data, &accountData); err != nil {
+		return UpstreamAccount{}, fmt.Errorf("decode sub2api account response: %w", err)
+	}
+	return UpstreamAccount{ID: accountData.ID, Username: accountData.Username, Email: accountData.Email, Role: accountData.Role, Balance: accountData.Balance}, nil
 }
 
 func fetchNewAPIUpstreamSnapshot(ctx context.Context, client *http.Client, baseURL string, credential UpstreamCredential) (UpstreamSnapshot, error) {
@@ -350,48 +1050,16 @@ func fetchNewAPIKeys(ctx context.Context, client *http.Client, baseURL string, h
 }
 
 func fetchSub2APIUpstreamSnapshot(ctx context.Context, client *http.Client, baseURL string, credential UpstreamCredential) (UpstreamSnapshot, error) {
-	loginPayload := map[string]string{"email": credential.Username, "password": credential.Password}
-	var loginEnvelope sub2APIEnvelope
-	if err := doUpstreamJSON(ctx, client, http.MethodPost, upstreamURL(baseURL, "/api/v1/auth/login"), loginPayload, nil, &loginEnvelope); err != nil {
-		return UpstreamSnapshot{}, fmt.Errorf("sub2api login failed: %w", err)
+	sessionClient, headers, err := authenticateSub2API(ctx, client, baseURL, credential)
+	if err != nil {
+		return UpstreamSnapshot{}, err
 	}
-	if loginEnvelope.Code != 0 {
-		return UpstreamSnapshot{}, upstreamEnvelopeError("sub2api login", loginEnvelope.Message)
-	}
-	var loginData struct {
-		AccessToken string `json:"access_token"`
-		Requires2FA bool   `json:"requires_2fa"`
-	}
-	if err := common.Unmarshal(loginEnvelope.Data, &loginData); err != nil {
-		return UpstreamSnapshot{}, fmt.Errorf("decode sub2api login response: %w", err)
-	}
-	if loginData.Requires2FA {
-		return UpstreamSnapshot{}, errors.New("sub2api account requires two-factor authentication")
-	}
-	if loginData.AccessToken == "" {
-		return UpstreamSnapshot{}, errors.New("sub2api login response did not include an access token")
-	}
-	headers := map[string]string{"Authorization": "Bearer " + loginData.AccessToken}
-
-	var profileEnvelope sub2APIEnvelope
-	if err := doUpstreamJSON(ctx, client, http.MethodGet, upstreamURL(baseURL, "/api/v1/user/profile"), nil, headers, &profileEnvelope); err != nil {
-		return UpstreamSnapshot{}, fmt.Errorf("fetch sub2api account failed: %w", err)
-	}
-	if profileEnvelope.Code != 0 {
-		return UpstreamSnapshot{}, upstreamEnvelopeError("fetch sub2api account", profileEnvelope.Message)
-	}
-	var accountData struct {
-		ID       int64   `json:"id"`
-		Email    string  `json:"email"`
-		Username string  `json:"username"`
-		Role     string  `json:"role"`
-		Balance  float64 `json:"balance"`
-	}
-	if err := common.Unmarshal(profileEnvelope.Data, &accountData); err != nil {
-		return UpstreamSnapshot{}, fmt.Errorf("decode sub2api account response: %w", err)
+	account, err := fetchSub2APIAccount(ctx, sessionClient, baseURL, headers)
+	if err != nil {
+		return UpstreamSnapshot{}, err
 	}
 
-	keys, err := fetchSub2APIKeys(ctx, client, baseURL, headers)
+	keys, err := fetchSub2APIKeys(ctx, sessionClient, baseURL, headers)
 	if err != nil {
 		return UpstreamSnapshot{}, err
 	}
@@ -399,17 +1067,17 @@ func fetchSub2APIUpstreamSnapshot(ctx context.Context, client *http.Client, base
 		if keys[i].KeyFingerprint != "" {
 			continue
 		}
-		fullKey, fetchErr := fetchSub2APIFullKeyWithToken(ctx, client, baseURL, headers, keys[i].ID)
+		fullKey, fetchErr := fetchSub2APIFullKeyWithToken(ctx, sessionClient, baseURL, headers, keys[i].ID)
 		if fetchErr != nil {
 			return UpstreamSnapshot{}, fmt.Errorf("fetch sub2api key %d for import status: %w", keys[i].ID, fetchErr)
 		}
 		keys[i].KeyFingerprint = upstreamKeyFingerprint(fullKey)
 	}
-	groups, err := fetchSub2APIGroups(ctx, client, baseURL, headers)
+	groups, err := fetchSub2APIGroups(ctx, sessionClient, baseURL, headers)
 	if err != nil {
 		return UpstreamSnapshot{}, err
 	}
-	ratios, err := fetchSub2APIRatios(ctx, client, baseURL, headers)
+	ratios, err := fetchSub2APIRatios(ctx, sessionClient, baseURL, headers)
 	if err != nil {
 		return UpstreamSnapshot{}, err
 	}
@@ -421,15 +1089,9 @@ func fetchSub2APIUpstreamSnapshot(ctx context.Context, client *http.Client, base
 	applyUpstreamGroupNames(keys, groups)
 
 	return UpstreamSnapshot{
-		Provider: UpstreamProviderSub2API,
-		Balance:  accountData.Balance,
-		Account: UpstreamAccount{
-			ID:       accountData.ID,
-			Username: accountData.Username,
-			Email:    accountData.Email,
-			Role:     accountData.Role,
-			Balance:  accountData.Balance,
-		},
+		Provider:    UpstreamProviderSub2API,
+		Balance:     account.Balance,
+		Account:     account,
 		Keys:        keys,
 		Groups:      groups,
 		Ratios:      ratios,
@@ -546,8 +1208,8 @@ func FetchUpstreamFullKey(ctx context.Context, client *http.Client, baseURL stri
 	if authType != model.UpstreamAuthTypePassword && authType != model.UpstreamAuthTypeAccessToken {
 		return "", fmt.Errorf("unsupported upstream authentication method %q", authType)
 	}
-	if authType == model.UpstreamAuthTypeAccessToken && provider != UpstreamProviderNewAPI {
-		return "", errors.New("management access token authentication is only supported for new-api upstream channels")
+	if authType == model.UpstreamAuthTypeAccessToken && !supportsUpstreamAccessToken(provider) {
+		return "", errors.New("access token authentication is only supported for new-api and sub2api upstream channels")
 	}
 	switch provider {
 	case UpstreamProviderNewAPI:
@@ -653,21 +1315,11 @@ func fetchNewAPIFullKeyWithSession(ctx context.Context, client *http.Client, bas
 }
 
 func fetchSub2APIFullKey(ctx context.Context, client *http.Client, baseURL string, credential UpstreamCredential, keyID int64) (string, error) {
-	var loginEnvelope sub2APIEnvelope
-	if err := doUpstreamJSON(ctx, client, http.MethodPost, upstreamURL(baseURL, "/api/v1/auth/login"), map[string]string{"email": credential.Username, "password": credential.Password}, nil, &loginEnvelope); err != nil {
+	sessionClient, headers, err := authenticateSub2API(ctx, client, baseURL, credential)
+	if err != nil {
 		return "", err
 	}
-	if loginEnvelope.Code != 0 {
-		return "", upstreamEnvelopeError("sub2api login", loginEnvelope.Message)
-	}
-	var loginData struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := common.Unmarshal(loginEnvelope.Data, &loginData); err != nil || loginData.AccessToken == "" {
-		return "", errors.New("sub2api login response did not include an access token")
-	}
-	headers := map[string]string{"Authorization": "Bearer " + loginData.AccessToken}
-	return fetchSub2APIFullKeyWithToken(ctx, client, baseURL, headers, keyID)
+	return fetchSub2APIFullKeyWithToken(ctx, sessionClient, baseURL, headers, keyID)
 }
 
 func fetchSub2APIFullKeyWithToken(ctx context.Context, client *http.Client, baseURL string, headers map[string]string, keyID int64) (string, error) {
@@ -720,6 +1372,9 @@ func doUpstreamJSON(ctx context.Context, client *http.Client, method string, url
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		message, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		if target != nil && len(message) > 0 {
+			_ = common.Unmarshal(message, target)
+		}
 		messageText := strings.TrimSpace(string(message))
 		if messageText == "" {
 			messageText = resp.Status

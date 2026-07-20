@@ -75,11 +75,30 @@ export function UpstreamChannelConfigDialog({
   const [autoRefreshInterval, setAutoRefreshInterval] = useState('300')
   const [priority, setPriority] = useState('0')
   const savedAuthType = channel?.auth_type || 'password'
+  const isNewAPIAccessToken =
+    authType === 'access_token' && provider === 'new-api'
+  const isSub2APIAccessToken =
+    authType === 'access_token' && provider === 'sub2api'
+  let credentialLabel = t('Upstream password')
+  if (authType === 'access_token') {
+    credentialLabel = t('Access token')
+  }
+  if (isNewAPIAccessToken) {
+    credentialLabel = t('Management access token')
+  } else if (isSub2APIAccessToken) {
+    credentialLabel = t('Sub2API access token')
+  }
   const canReuseSavedCredential =
     channel?.has_password === true && savedAuthType === authType
   const canRefresh =
     provider !== 'other' &&
-    hasUsableUpstreamCredentials(username, password, canReuseSavedCredential)
+    hasUsableUpstreamCredentials(
+      provider,
+      authType,
+      username,
+      password,
+      canReuseSavedCredential
+    )
   let submitLabel = t('Save')
   if (saving) {
     submitLabel = t('Saving...')
@@ -149,12 +168,16 @@ export function UpstreamChannelConfigDialog({
               <Alert variant='destructive'>
                 <AlertTriangle />
                 <AlertTitle>
-                  {t('Turnstile requires a management access token')}
+                  {t('Turnstile requires an access token')}
                 </AlertTitle>
                 <AlertDescription>
-                  {t(
-                    'This upstream New-API has Turnstile enabled. Background synchronization cannot use account-password login. Enter the numeric user ID and create a management access token in the upstream account settings.'
-                  )}
+                  {isSub2APIAccessToken
+                    ? t(
+                        'This upstream Sub2API has Turnstile enabled. Background synchronization cannot use account-password login. Sign in through its browser page, then enter the issued access token here.'
+                      )
+                    : t(
+                        'This upstream New-API has Turnstile enabled. Background synchronization cannot use account-password login. Enter the numeric user ID and create a management access token in the upstream account settings.'
+                      )}
                 </AlertDescription>
               </Alert>
             )}
@@ -212,6 +235,8 @@ export function UpstreamChannelConfigDialog({
                       {
                         provider,
                         username,
+                        last_error: channel?.last_error,
+                        snapshot: channel?.snapshot,
                       }
                     )
                     setProvider(recommendation.provider)
@@ -224,32 +249,26 @@ export function UpstreamChannelConfigDialog({
                 }}
               >
                 <option value='password'>{t('Account password')}</option>
-                <option value='access_token'>
-                  {t('Management access token')}
-                </option>
+                <option value='access_token'>{t('Access token')}</option>
               </NativeSelect>
             </div>
             <div className='space-y-1.5'>
               <Label htmlFor='upstream-username'>
-                {authType === 'access_token'
+                {isNewAPIAccessToken
                   ? t('Upstream numeric user ID')
                   : t('Upstream username or email')}
               </Label>
               <Input
                 id='upstream-username'
                 autoComplete='username'
-                inputMode={authType === 'access_token' ? 'numeric' : undefined}
+                inputMode={isNewAPIAccessToken ? 'numeric' : undefined}
                 maxLength={255}
                 value={username}
                 onChange={(event) => setUsername(event.target.value)}
               />
             </div>
             <div className='space-y-1.5'>
-              <Label htmlFor='upstream-password'>
-                {authType === 'access_token'
-                  ? t('Management access token')
-                  : t('Upstream password')}
-              </Label>
+              <Label htmlFor='upstream-password'>{credentialLabel}</Label>
               <Input
                 id='upstream-password'
                 type='password'
@@ -265,9 +284,13 @@ export function UpstreamChannelConfigDialog({
               />
               {authType === 'access_token' && (
                 <p className='text-muted-foreground text-xs'>
-                  {t(
-                    'Use the numeric user ID and management access token from the upstream New-API account for background synchronization.'
-                  )}
+                  {isSub2APIAccessToken
+                    ? t(
+                        'Use the access token issued after signing in to the upstream Sub2API browser page. The token is stored only by the new-api backend.'
+                      )
+                    : t(
+                        'Use the numeric user ID and management access token from the upstream New-API account for background synchronization.'
+                      )}
                 </p>
               )}
             </div>

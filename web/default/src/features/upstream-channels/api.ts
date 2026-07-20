@@ -36,6 +36,7 @@ import type {
   RefreshAllResult,
   UpstreamChannel,
   UpstreamChannelConfig,
+  UpstreamPrioritySchedule,
 } from './types'
 
 export async function getManagedUpstreamChannels(): Promise<
@@ -104,11 +105,72 @@ export async function updateManagedUpstreamChannelSelectedGroup(
   return res.data
 }
 
+export async function updateManagedUpstreamChannelDefaultTestModel(
+  id: number,
+  defaultTestModel: string
+): Promise<ApiResponse<UpstreamChannel>> {
+  const res = await api.patch<ApiResponse<UpstreamChannel>>(
+    `/api/upstream-channels/${id}/default-test-model`,
+    { default_test_model: defaultTestModel },
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function getManagedUpstreamPrioritySchedule(): Promise<
+  ApiResponse<UpstreamPrioritySchedule>
+> {
+  const res = await api.get<ApiResponse<UpstreamPrioritySchedule>>(
+    '/api/upstream-channels/priority-schedule',
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function updateManagedUpstreamPrioritySchedule(
+  schedule: UpstreamPrioritySchedule
+): Promise<ApiResponse<UpstreamPrioritySchedule>> {
+  const res = await api.put<ApiResponse<UpstreamPrioritySchedule>>(
+    '/api/upstream-channels/priority-schedule',
+    schedule,
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
 export async function refreshManagedUpstreamChannel(
   id: number
 ): Promise<ApiResponse<UpstreamChannel>> {
+  return refreshManagedUpstreamChannelBalance(id)
+}
+
+export async function refreshManagedUpstreamChannelBalance(
+  id: number
+): Promise<ApiResponse<UpstreamChannel>> {
   const res = await api.post<ApiResponse<UpstreamChannel>>(
-    `/api/upstream-channels/${id}/refresh`,
+    `/api/upstream-channels/${id}/refresh-balance`,
+    undefined,
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function refreshManagedUpstreamChannelKeys(
+  id: number
+): Promise<ApiResponse<UpstreamChannel>> {
+  const res = await api.post<ApiResponse<UpstreamChannel>>(
+    `/api/upstream-channels/${id}/refresh-keys`,
+    undefined,
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function refreshManagedUpstreamChannelGroups(
+  id: number
+): Promise<ApiResponse<UpstreamChannel>> {
+  const res = await api.post<ApiResponse<UpstreamChannel>>(
+    `/api/upstream-channels/${id}/refresh-groups`,
     undefined,
     { skipBusinessError: true }
   )

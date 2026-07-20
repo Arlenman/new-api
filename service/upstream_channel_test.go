@@ -64,6 +64,121 @@ func TestRefreshUpstreamChannelPersistsTurnstileRecoveryState(t *testing.T) {
 	assert.NotZero(t, refreshed.LastSyncTime)
 }
 
+func TestRefreshAllUpstreamChannelsRefreshesOnlyReadyChannels(t *testing.T) {
+	originalDB := model.DB
+	originalLogDB := model.LOG_DB
+	originalHTTPClient := httpClient
+	originalCryptoSecret := common.CryptoSecret
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "refresh-all-ready.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}, &model.AlertRule{}))
+	model.DB = db
+	model.LOG_DB = db
+	common.CryptoSecret = "refresh-all-ready-test-secret"
+
+	requestedHosts := make([]string, 0)
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestedHosts = append(requestedHosts, request.URL.Host)
+		if request.URL.Host == "sub2.test" {
+			require.Equal(t, "/api/v1/user/profile", request.URL.Path)
+			require.Equal(t, "Bearer management-token", request.Header.Get("Authorization"))
+			return jsonResponse(http.StatusOK, `{"code":0,"data":{"id":2,"username":"sub2-user","balance":12.5}}`, nil), nil
+		}
+		switch request.URL.Path {
+		case "/api/status":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"quota_per_unit":500000}}`, nil), nil
+		case "/api/user/self":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"id":1,"username":"root","role":10,"group":"default","quota":5000000}}`, nil), nil
+		default:
+			require.Failf(t, "unexpected upstream request", "%s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	})}
+	t.Cleanup(func() {
+		model.DB = originalDB
+		model.LOG_DB = originalLogDB
+		httpClient = originalHTTPClient
+		common.CryptoSecret = originalCryptoSecret
+	})
+
+	encryptedToken, err := common.EncryptSecret("upstream-channel-password", "management-token")
+	require.NoError(t, err)
+	ready := &model.UpstreamChannel{
+		Name:               "ready",
+		BaseURL:            "https://ready.test",
+		BaseURLHash:        model.UpstreamBaseURLHash("https://ready.test"),
+		Provider:           UpstreamProviderNewAPI,
+		AuthType:           model.UpstreamAuthTypeAccessToken,
+		Username:           "1",
+		PasswordCiphertext: encryptedToken,
+		Status:             model.UpstreamChannelStatusReady,
+	}
+	notReady := &model.UpstreamChannel{
+		Name:               "error",
+		BaseURL:            "https://error.test",
+		BaseURLHash:        model.UpstreamBaseURLHash("https://error.test"),
+		Provider:           UpstreamProviderNewAPI,
+		AuthType:           model.UpstreamAuthTypeAccessToken,
+		Username:           "1",
+		PasswordCiphertext: encryptedToken,
+		Balance:            7,
+		Status:             model.UpstreamChannelStatusError,
+	}
+	sub2AccessToken := &model.UpstreamChannel{
+		Name:               "sub2-access-token",
+		BaseURL:            "https://sub2.test",
+		BaseURLHash:        model.UpstreamBaseURLHash("https://sub2.test"),
+		Provider:           UpstreamProviderSub2API,
+		AuthType:           model.UpstreamAuthTypeAccessToken,
+		PasswordCiphertext: encryptedToken,
+		Status:             model.UpstreamChannelStatusReady,
+	}
+	require.NoError(t, db.Create(ready).Error)
+	require.NoError(t, db.Create(notReady).Error)
+	require.NoError(t, db.Create(sub2AccessToken).Error)
+
+	refreshed, errorsFound := RefreshAllUpstreamChannels(context.Background())
+
+	assert.Equal(t, 2, refreshed)
+	assert.Empty(t, errorsFound)
+	assert.ElementsMatch(t, []string{"ready.test", "ready.test", "sub2.test"}, requestedHosts)
+
+	storedReady, err := model.GetUpstreamChannelByID(ready.Id)
+	require.NoError(t, err)
+	assert.Equal(t, float64(10), storedReady.Balance)
+	assert.Equal(t, model.UpstreamChannelStatusReady, storedReady.Status)
+
+	storedNotReady, err := model.GetUpstreamChannelByID(notReady.Id)
+	require.NoError(t, err)
+	assert.Equal(t, float64(7), storedNotReady.Balance)
+	assert.Equal(t, model.UpstreamChannelStatusError, storedNotReady.Status)
+
+	storedSub2, err := model.GetUpstreamChannelByID(sub2AccessToken.Id)
+	require.NoError(t, err)
+	assert.Equal(t, 12.5, storedSub2.Balance)
+	assert.Equal(t, model.UpstreamChannelStatusReady, storedSub2.Status)
+}
+
+func TestUpstreamCredentialRequiresUsername(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		authType string
+		want     bool
+	}{
+		{name: "new api password", provider: UpstreamProviderNewAPI, authType: model.UpstreamAuthTypePassword, want: true},
+		{name: "new api access token", provider: UpstreamProviderNewAPI, authType: model.UpstreamAuthTypeAccessToken, want: true},
+		{name: "sub2api password", provider: UpstreamProviderSub2API, authType: model.UpstreamAuthTypePassword, want: true},
+		{name: "sub2api access token", provider: UpstreamProviderSub2API, authType: model.UpstreamAuthTypeAccessToken, want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, UpstreamCredentialRequiresUsername(test.provider, test.authType))
+		})
+	}
+}
+
 func TestNormalizeUpstreamBaseURL(t *testing.T) {
 	tests := []struct {
 		name string
@@ -247,6 +362,48 @@ func TestDiscoverUpstreamChannelsCountsOnlyEnabledSnapshotKeysAsActive(t *testin
 	assert.Equal(t, 1, stats[baseURL].Active)
 	require.NoError(t, common.UnmarshalJsonStr(rows[0].SnapshotJSON, &snapshot))
 	assert.True(t, snapshot.Keys[0].Active)
+}
+
+func TestGetUpstreamChannelLogMetricsSinceAggregatesNormalizedBaseURL(t *testing.T) {
+	originalDB := model.DB
+	originalLogDB := model.LOG_DB
+	originalLogDatabaseType := common.LogDatabaseType()
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "upstream-log-metrics.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Log{}))
+	model.DB = db
+	model.LOG_DB = db
+	common.SetLogDatabaseType(common.DatabaseTypeSQLite)
+	t.Cleanup(func() {
+		model.DB = originalDB
+		model.LOG_DB = originalLogDB
+		common.SetLogDatabaseType(originalLogDatabaseType)
+	})
+
+	firstBaseURL := "https://EXAMPLE.com/api/v1"
+	secondBaseURL := "https://example.com/v1"
+	firstChannel := model.Channel{Key: "sk-first", BaseURL: &firstBaseURL, Status: common.ChannelStatusEnabled}
+	secondChannel := model.Channel{Key: "sk-second", BaseURL: &secondBaseURL, Status: common.ChannelStatusEnabled}
+	require.NoError(t, db.Create(&firstChannel).Error)
+	require.NoError(t, db.Create(&secondChannel).Error)
+
+	startTimestamp := int64(1_720_000_000)
+	logs := []model.Log{
+		{CreatedAt: startTimestamp, Type: model.LogTypeConsume, ChannelId: firstChannel.Id, Other: `{"frt":100}`},
+		{CreatedAt: startTimestamp + 1, Type: model.LogTypeError, ChannelId: firstChannel.Id},
+		{CreatedAt: startTimestamp + 2, Type: model.LogTypeConsume, ChannelId: secondChannel.Id, Other: `{"frt":300}`},
+		{CreatedAt: startTimestamp + 3, Type: model.LogTypeConsume, ChannelId: secondChannel.Id, Other: "not-json"},
+		{CreatedAt: startTimestamp - 1, Type: model.LogTypeError, ChannelId: secondChannel.Id},
+	}
+	require.NoError(t, db.Create(&logs).Error)
+
+	metrics, err := GetUpstreamChannelLogMetricsSince(startTimestamp)
+	require.NoError(t, err)
+	require.Contains(t, metrics, "https://example.com")
+	require.NotNil(t, metrics["https://example.com"].Availability24h)
+	require.NotNil(t, metrics["https://example.com"].AverageFirstTokenLatencyMs)
+	assert.InDelta(t, 75, *metrics["https://example.com"].Availability24h, 0.0001)
+	assert.InDelta(t, 200, *metrics["https://example.com"].AverageFirstTokenLatencyMs, 0.0001)
 }
 
 func TestMarkImportedUpstreamKeysUsesBaseURLAndFullKeyFingerprint(t *testing.T) {
@@ -686,4 +843,171 @@ func TestNormalizeUpstreamKeyImportOptionsRejectsInvalidValues(t *testing.T) {
 			require.EqualError(t, err, tt.want)
 		})
 	}
+}
+
+func TestRefreshUpstreamChannelGroupsUsesLatestKeysAndPersistsDiscoveredModels(t *testing.T) {
+	originalDB := model.DB
+	originalLogDB := model.LOG_DB
+	originalHTTPClient := httpClient
+	originalCryptoSecret := common.CryptoSecret
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "refresh-groups-models.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}))
+	model.DB = db
+	model.LOG_DB = db
+	common.CryptoSecret = "refresh-groups-models-test-secret"
+	t.Cleanup(func() {
+		model.DB = originalDB
+		model.LOG_DB = originalLogDB
+		httpClient = originalHTTPClient
+		common.CryptoSecret = originalCryptoSecret
+	})
+
+	const managementToken = "management-token"
+	requestedModelKeys := make([]string, 0, 2)
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/api/user/self/groups":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"default":{"ratio":1,"desc":"Default"}}}`, nil), nil
+		case "/api/status":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"quota_per_unit":1000000}}`, nil), nil
+		case "/api/token":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"page":1,"page_size":100,"total":2,"items":[{"id":1,"name":"first","key":"sk-first...cret","group":"default","status":1},{"id":2,"name":"new","key":"sk-new...cret","group":"default","status":1}]}}`, nil), nil
+		case "/api/token/1/key":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-first-secret"}}`, nil), nil
+		case "/api/token/2/key":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-new-secret"}}`, nil), nil
+		case "/v1/models":
+			requestedModelKeys = append(requestedModelKeys, request.Header.Get("Authorization"))
+			switch request.Header.Get("Authorization") {
+			case "Bearer sk-first-secret":
+				return jsonResponse(http.StatusOK, `{"data":[{"id":"gpt-4o"},{"id":"shared"}]}`, nil), nil
+			case "Bearer sk-new-secret":
+				return jsonResponse(http.StatusOK, `{"data":[{"id":"claude-sonnet-4-5"},{"id":"shared"}]}`, nil), nil
+			default:
+				return jsonResponse(http.StatusUnauthorized, `{}`, nil), nil
+			}
+		case "/api/ratio_config":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"model_ratio":{"gpt-4o":0.5,"claude-sonnet-4-5":1},"completion_ratio":{"gpt-4o":0.25}}}`, nil), nil
+		default:
+			require.Failf(t, "unexpected upstream request", "%s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	})}
+
+	ciphertext, err := common.EncryptSecret("upstream-channel-password", managementToken)
+	require.NoError(t, err)
+	oldSnapshot, err := common.Marshal(UpstreamSnapshot{
+		Provider: UpstreamProviderNewAPI,
+		Keys:     []UpstreamKey{{ID: 1, Name: "old"}},
+		Groups:   []UpstreamGroup{{Name: "old-group"}},
+		Models:   []UpstreamModel{{ID: "old-model"}},
+	})
+	require.NoError(t, err)
+	row := &model.UpstreamChannel{
+		BaseURL:            "https://upstream.test",
+		BaseURLHash:        model.UpstreamBaseURLHash("https://upstream.test"),
+		Provider:           UpstreamProviderNewAPI,
+		AuthType:           model.UpstreamAuthTypeAccessToken,
+		Username:           "42",
+		DefaultTestModel:   "old-model",
+		PasswordCiphertext: ciphertext,
+		SnapshotJSON:       string(oldSnapshot),
+		Status:             model.UpstreamChannelStatusReady,
+	}
+	require.NoError(t, db.Create(row).Error)
+
+	refreshed, snapshot, err := RefreshUpstreamChannelGroups(context.Background(), row.Id)
+	require.NoError(t, err)
+	require.NotNil(t, refreshed)
+	assert.Equal(t, model.UpstreamChannelStatusReady, refreshed.Status)
+	assert.Equal(t, []int64{1, 2}, []int64{snapshot.Keys[0].ID, snapshot.Keys[1].ID})
+	assert.Equal(t, []string{"claude-sonnet-4-5", "gpt-4o", "shared"}, []string{snapshot.Models[0].ID, snapshot.Models[1].ID, snapshot.Models[2].ID})
+	assert.Equal(t, []string{"Bearer sk-first-secret", "Bearer sk-new-secret"}, requestedModelKeys)
+
+	stored, err := model.GetUpstreamChannelByID(row.Id)
+	require.NoError(t, err)
+	var storedSnapshot UpstreamSnapshot
+	require.NoError(t, common.UnmarshalJsonStr(stored.SnapshotJSON, &storedSnapshot))
+	require.Len(t, storedSnapshot.Keys, 2)
+	require.Len(t, storedSnapshot.Models, 3)
+	assert.Equal(t, "claude-sonnet-4-5", storedSnapshot.Models[0].ID)
+	assert.Equal(t, 0.5, *storedSnapshot.Models[1].Pricing[0].ModelRatio)
+	assert.Empty(t, stored.DefaultTestModel)
+}
+
+func TestRefreshUpstreamChannelGroupsKeepsPreviousPricingWhenPricingEndpointFails(t *testing.T) {
+	originalDB := model.DB
+	originalLogDB := model.LOG_DB
+	originalHTTPClient := httpClient
+	originalCryptoSecret := common.CryptoSecret
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "refresh-groups-pricing-failure.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}))
+	model.DB = db
+	model.LOG_DB = db
+	common.CryptoSecret = "refresh-groups-pricing-failure-test-secret"
+	t.Cleanup(func() {
+		model.DB = originalDB
+		model.LOG_DB = originalLogDB
+		httpClient = originalHTTPClient
+		common.CryptoSecret = originalCryptoSecret
+	})
+
+	const managementToken = "management-token"
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/api/user/self/groups":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"default":{"ratio":1,"desc":"Default"}}}`, nil), nil
+		case "/api/status":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"quota_per_unit":1000000}}`, nil), nil
+		case "/api/token":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"page":1,"page_size":100,"total":1,"items":[{"id":1,"name":"first","key":"sk-first...cret","group":"default","status":1}]}}`, nil), nil
+		case "/api/token/1/key":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-first-secret"}}`, nil), nil
+		case "/v1/models":
+			return jsonResponse(http.StatusOK, `{"data":[{"id":"gpt-4o"},{"id":"new-model"}]}`, nil), nil
+		case "/api/ratio_config":
+			return jsonResponse(http.StatusServiceUnavailable, `{"success":false,"message":"pricing endpoint temporarily unavailable"}`, nil), nil
+		default:
+			require.Failf(t, "unexpected upstream request", "%s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	})}
+
+	oldRatio := 0.75
+	ciphertext, err := common.EncryptSecret("upstream-channel-password", managementToken)
+	require.NoError(t, err)
+	oldSnapshot, err := common.Marshal(UpstreamSnapshot{
+		Provider: UpstreamProviderNewAPI,
+		Keys:     []UpstreamKey{{ID: 1, Name: "first"}},
+		Models:   []UpstreamModel{{ID: "gpt-4o", Pricing: []UpstreamModelPricing{{Source: UpstreamProviderNewAPI, ModelRatio: &oldRatio}}}},
+	})
+	require.NoError(t, err)
+	row := &model.UpstreamChannel{
+		BaseURL:            "https://upstream.test",
+		BaseURLHash:        model.UpstreamBaseURLHash("https://upstream.test"),
+		Provider:           UpstreamProviderNewAPI,
+		AuthType:           model.UpstreamAuthTypeAccessToken,
+		Username:           "42",
+		DefaultTestModel:   "gpt-4o",
+		PasswordCiphertext: ciphertext,
+		SnapshotJSON:       string(oldSnapshot),
+		Status:             model.UpstreamChannelStatusReady,
+	}
+	require.NoError(t, db.Create(row).Error)
+
+	_, snapshot, err := RefreshUpstreamChannelGroups(context.Background(), row.Id)
+	require.NoError(t, err)
+	require.Len(t, snapshot.Models, 2)
+	assert.Equal(t, "gpt-4o", snapshot.Models[0].ID)
+	require.Len(t, snapshot.Models[0].Pricing, 1)
+	require.NotNil(t, snapshot.Models[0].Pricing[0].ModelRatio)
+	assert.Equal(t, oldRatio, *snapshot.Models[0].Pricing[0].ModelRatio)
+	assert.Empty(t, snapshot.Models[1].Pricing)
+
+	stored, err := model.GetUpstreamChannelByID(row.Id)
+	require.NoError(t, err)
+	assert.Empty(t, stored.LastError)
+	assert.Equal(t, "gpt-4o", stored.DefaultTestModel)
 }

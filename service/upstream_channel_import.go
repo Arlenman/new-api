@@ -89,7 +89,7 @@ func importUpstreamChannelKeys(ctx context.Context, client *http.Client, upstrea
 	if err != nil {
 		return UpstreamKeyImportResult{}, err
 	}
-	if strings.TrimSpace(row.Username) == "" {
+	if UpstreamCredentialRequiresUsername(row.Provider, row.EffectiveAuthType()) && strings.TrimSpace(row.Username) == "" {
 		return UpstreamKeyImportResult{}, errors.New("upstream username is not configured")
 	}
 	password, err := row.DecryptPassword()
@@ -400,7 +400,7 @@ func fetchUpstreamChannelKeyModels(ctx context.Context, client *http.Client, ups
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(row.Username) == "" {
+	if UpstreamCredentialRequiresUsername(row.Provider, row.EffectiveAuthType()) && strings.TrimSpace(row.Username) == "" {
 		return nil, errors.New("upstream username is not configured")
 	}
 	password, err := row.DecryptPassword()
@@ -459,6 +459,17 @@ func fetchUpstreamChannelKeyModels(ctx context.Context, client *http.Client, ups
 }
 
 func fetchUpstreamKeyModels(ctx context.Context, client *http.Client, baseURL string, key string) ([]string, error) {
+	models, err := fetchUpstreamKeyModelsAllowEmpty(ctx, client, baseURL, key)
+	if err != nil {
+		return nil, err
+	}
+	if len(models) == 0 {
+		return nil, errors.New("upstream model list is empty")
+	}
+	return models, nil
+}
+
+func fetchUpstreamKeyModelsAllowEmpty(ctx context.Context, client *http.Client, baseURL string, key string) ([]string, error) {
 	var response struct {
 		Data []struct {
 			ID string `json:"id"`
@@ -482,8 +493,5 @@ func fetchUpstreamKeyModels(ctx context.Context, client *http.Client, baseURL st
 		models = append(models, modelName)
 	}
 	sort.Strings(models)
-	if len(models) == 0 {
-		return nil, errors.New("upstream model list is empty")
-	}
 	return models, nil
 }

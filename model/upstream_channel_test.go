@@ -326,6 +326,7 @@ func TestUpdateUpstreamChannelConfigClearsSnapshotWhenLoginIdentityChanges(t *te
 		LastSyncTime:        100,
 		Status:              UpstreamChannelStatusReady,
 		SnapshotJSON:        `{"provider":"new-api","balance":15}`,
+		DefaultTestModel:    "gpt-4o-mini",
 	}
 	require.NoError(t, db.Create(&row).Error)
 
@@ -336,6 +337,7 @@ func TestUpdateUpstreamChannelConfigClearsSnapshotWhenLoginIdentityChanges(t *te
 	require.NoError(t, err)
 	assert.Equal(t, UpstreamChannelStatusUnconfigured, updated.Status)
 	assert.Empty(t, updated.SnapshotJSON)
+	assert.Empty(t, updated.DefaultTestModel)
 	assert.Zero(t, updated.Balance)
 	assert.Zero(t, updated.BalanceUpdatedTime)
 	assert.Zero(t, updated.LastSyncTime)
@@ -362,6 +364,7 @@ func TestUpdateUpstreamChannelConfigClearsSnapshotWhenPasswordChanges(t *testing
 		LastSyncTime:        100,
 		Status:              UpstreamChannelStatusReady,
 		SnapshotJSON:        `{"provider":"new-api","balance":15}`,
+		DefaultTestModel:    "gpt-4o-mini",
 	}
 	require.NoError(t, db.Create(&row).Error)
 	newPassword := "new-encrypted-value"
@@ -373,6 +376,7 @@ func TestUpdateUpstreamChannelConfigClearsSnapshotWhenPasswordChanges(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, UpstreamChannelStatusUnconfigured, updated.Status)
 	assert.Empty(t, updated.SnapshotJSON)
+	assert.Empty(t, updated.DefaultTestModel)
 	assert.Zero(t, updated.Balance)
 	assert.Zero(t, updated.BalanceUpdatedTime)
 	assert.Zero(t, updated.LastSyncTime)
@@ -394,6 +398,7 @@ func TestUpdateUpstreamChannelConfigPreservesSnapshotForRefreshSettingsOnly(t *t
 		LastSyncTime:        100,
 		Status:              UpstreamChannelStatusReady,
 		SnapshotJSON:        `{"provider":"new-api","balance":15}`,
+		DefaultTestModel:    "gpt-4o-mini",
 	}
 	require.NoError(t, db.Create(&row).Error)
 
@@ -404,6 +409,7 @@ func TestUpdateUpstreamChannelConfigPreservesSnapshotForRefreshSettingsOnly(t *t
 	require.NoError(t, err)
 	assert.Equal(t, UpstreamChannelStatusReady, updated.Status)
 	assert.Equal(t, row.SnapshotJSON, updated.SnapshotJSON)
+	assert.Equal(t, "gpt-4o-mini", updated.DefaultTestModel)
 	assert.Equal(t, float64(15), updated.Balance)
 	assert.Equal(t, int64(100), updated.BalanceUpdatedTime)
 	assert.Equal(t, int64(100), updated.LastSyncTime)
@@ -533,6 +539,22 @@ func TestListDueUpstreamChannelsUsesLastAttemptAndSkipsDisabledOrUnconfiguredRow
 			AutoRefreshInterval: 300,
 		},
 		{
+			BaseURL:             "https://sub2-access-token.example",
+			BaseURLHash:         UpstreamBaseURLHash("https://sub2-access-token.example"),
+			Provider:            "sub2api",
+			AuthType:            UpstreamAuthTypeAccessToken,
+			PasswordCiphertext:  "encrypted",
+			AutoRefreshInterval: 300,
+		},
+		{
+			BaseURL:             "https://sub2-password-missing-username.example",
+			BaseURLHash:         UpstreamBaseURLHash("https://sub2-password-missing-username.example"),
+			Provider:            "sub2api",
+			AuthType:            UpstreamAuthTypePassword,
+			PasswordCiphertext:  "encrypted",
+			AutoRefreshInterval: 300,
+		},
+		{
 			BaseURL:             "https://unconfigured.example",
 			BaseURLHash:         UpstreamBaseURLHash("https://unconfigured.example"),
 			AutoRefreshInterval: 300,
@@ -542,9 +564,10 @@ func TestListDueUpstreamChannelsUsesLastAttemptAndSkipsDisabledOrUnconfiguredRow
 
 	due, err := ListDueUpstreamChannels(now, 100)
 	require.NoError(t, err)
-	require.Len(t, due, 2)
+	require.Len(t, due, 3)
 	assert.Equal(t, "https://never-attempted.example", due[0].BaseURL)
 	assert.Equal(t, "https://due.example", due[1].BaseURL)
+	assert.Equal(t, "https://sub2-access-token.example", due[2].BaseURL)
 }
 
 func TestSaveUpstreamChannelRefreshErrorPreservesLastSuccessfulSnapshot(t *testing.T) {

@@ -3,6 +3,7 @@ import { describe, test } from 'node:test'
 
 import {
   filterAndSortUpstreamChannels,
+  formatUpstreamPricingInterval,
   getAdjustedUpstreamAmount,
   getEffectiveUpstreamMultiplier,
   getTotalAdjustedUpstreamBalance,
@@ -14,9 +15,12 @@ import {
   getUpstreamImportBaseName,
   getUpstreamImportDefaults,
   getUpstreamSelectedGroupMultiplier,
+  getUpstreamModelPricingFields,
   hasUsableUpstreamCredentials,
   isUpstreamTurnstileAccessTokenRequired,
   isValidUpstreamMultiplier,
+  formatUpstreamAvailability,
+  formatUpstreamFirstTokenLatency,
 } from './lib.ts'
 import type { UpstreamChannel, UpstreamChannelStatus } from './types.ts'
 
@@ -35,12 +39,15 @@ function createChannel(
     provider: 'new-api',
     auth_type: 'password',
     selected_group: '',
+    default_test_model: '',
     username: 'root',
     note: '',
     has_password: true,
     source_channel_count: 0,
     active_source_channel_count: activeSourceChannelCount,
     balance,
+    availability_24h: null,
+    average_first_token_latency_ms: null,
     balance_updated_time: 0,
     balance_threshold: 0,
     multiplier,
@@ -122,11 +129,53 @@ describe('upstream channel display values', () => {
   })
 
   test('only refreshes after saving when complete credentials are available', () => {
-    assert.equal(hasUsableUpstreamCredentials('', '', false), false)
-    assert.equal(hasUsableUpstreamCredentials('root', '', false), false)
-    assert.equal(hasUsableUpstreamCredentials('', 'secret', false), false)
-    assert.equal(hasUsableUpstreamCredentials('root', 'secret', false), true)
-    assert.equal(hasUsableUpstreamCredentials('root', '', true), true)
+    assert.equal(
+      hasUsableUpstreamCredentials('new-api', 'password', '', '', false),
+      false
+    )
+    assert.equal(
+      hasUsableUpstreamCredentials('new-api', 'password', 'root', '', false),
+      false
+    )
+    assert.equal(
+      hasUsableUpstreamCredentials('new-api', 'password', '', 'secret', false),
+      false
+    )
+    assert.equal(
+      hasUsableUpstreamCredentials(
+        'new-api',
+        'password',
+        'root',
+        'secret',
+        false
+      ),
+      true
+    )
+    assert.equal(
+      hasUsableUpstreamCredentials('new-api', 'access_token', '1', '', true),
+      true
+    )
+  })
+
+  test('allows Sub2API access-token refresh without a username', () => {
+    assert.equal(
+      hasUsableUpstreamCredentials(
+        'sub2api',
+        'access_token',
+        '',
+        'token',
+        false
+      ),
+      true
+    )
+    assert.equal(
+      hasUsableUpstreamCredentials('sub2api', 'access_token', '', '', true),
+      true
+    )
+    assert.equal(
+      hasUsableUpstreamCredentials('sub2api', 'password', '', 'token', false),
+      false
+    )
   })
 })
 
@@ -178,6 +227,36 @@ describe('upstream Turnstile authentication recovery', () => {
         username: '0',
       }).username,
       ''
+    )
+  })
+
+  test('preserves a Sub2API account name when recommending access-token auth', () => {
+    assert.deepEqual(
+      getUpstreamAccessTokenRecommendation({
+        provider: 'sub2api',
+        username: ' owner@example.com ',
+      }),
+      {
+        provider: 'sub2api',
+        authType: 'access_token',
+        username: 'owner@example.com',
+      }
+    )
+  })
+
+  test('uses the Sub2API error source when an auto-detected channel hits Turnstile', () => {
+    assert.deepEqual(
+      getUpstreamAccessTokenRecommendation({
+        provider: 'auto',
+        username: ' owner@example.com ',
+        last_error:
+          'sub2api has Turnstile enabled; use a browser-issued access token instead of account-password login',
+      }),
+      {
+        provider: 'sub2api',
+        authType: 'access_token',
+        username: 'owner@example.com',
+      }
     )
   })
 })
@@ -250,6 +329,36 @@ describe('upstream channel filtering and sorting', () => {
     )
   })
 
+  test('sorts recent availability and first-token latency with missing metrics last', () => {
+    const channels = [
+      createChannel(3, 10, 'ready'),
+      createChannel(2, 10, 'ready'),
+      createChannel(1, 10, 'ready'),
+      createChannel(4, 10, 'ready'),
+    ]
+    channels[0].availability_24h = 95
+    channels[0].average_first_token_latency_ms = 300
+    channels[1].availability_24h = 99.5
+    channels[1].average_first_token_latency_ms = 800
+    channels[2].availability_24h = 99.5
+    channels[2].average_first_token_latency_ms = 120
+
+    assert.deepEqual(
+      filterAndSortUpstreamChannels(channels, 'all', 'availability-desc').map(
+        (channel) => channel.id
+      ),
+      [1, 2, 3, 4]
+    )
+    assert.deepEqual(
+      filterAndSortUpstreamChannels(
+        channels,
+        'all',
+        'first-token-latency-asc'
+      ).map((channel) => channel.id),
+      [1, 3, 2, 4]
+    )
+  })
+
   test('sorts selected group multipliers and keeps unavailable values last', () => {
     const createRateChannel = (
       id: number,
@@ -296,6 +405,92 @@ describe('upstream channel filtering and sorting', () => {
         (channel) => channel.id
       ),
       [1, 5, 2, 3, 4]
+    )
+  })
+})
+
+describe('upstream channel request metrics', () => {
+  test('formats availability and first-token latency for compact badges', () => {
+    assert.equal(formatUpstreamAvailability(99.456), '99.46%')
+    assert.equal(formatUpstreamAvailability(null), '-')
+    assert.equal(formatUpstreamFirstTokenLatency(123.4), '123 ms')
+    assert.equal(formatUpstreamFirstTokenLatency(1234), '1.23 s')
+    assert.equal(formatUpstreamFirstTokenLatency(null), '-')
+  })
+})
+
+describe('upstream model pricing', () => {
+  test('keeps New-API zero ratios and formats all ratio fields', () => {
+    assert.deepEqual(
+      getUpstreamModelPricingFields({
+        source: 'new-api',
+        model_ratio: 1.25,
+        completion_ratio: 0,
+        cache_ratio: 0.5,
+        create_cache_ratio: 2,
+        model_price: 0.01,
+      }),
+      [
+        { label: 'Model ratio', value: '×1.25' },
+        { label: 'Completion ratio', value: '×0' },
+        { label: 'Cache ratio', value: '×0.5' },
+        { label: 'Cache creation ratio', value: '×2' },
+        { label: 'Fixed price', value: '0.01' },
+      ]
+    )
+  })
+
+  test('formats Sub2API token, image, and per-request prices', () => {
+    assert.deepEqual(
+      getUpstreamModelPricingFields({
+        source: 'sub2api',
+        input_price: 0.000003,
+        output_price: 0.000015,
+        cache_write_price: 0,
+        cache_read_price: 0.0000003,
+        image_input_price: 0.02,
+        image_output_price: 0.04,
+        per_request_price: 0.02,
+      }),
+      [
+        { label: 'Input price', value: '$3 / 1M tokens' },
+        { label: 'Output price', value: '$15 / 1M tokens' },
+        { label: 'Cache write price', value: '$0 / 1M tokens' },
+        { label: 'Cache read price', value: '$0.3 / 1M tokens' },
+        { label: 'Image input price', value: '$0.02' },
+        { label: 'Image output price', value: '$0.04' },
+        { label: 'Per-request price', value: '$0.02 / request' },
+      ]
+    )
+  })
+
+  test('formats tier ranges and ignores non-finite prices', () => {
+    assert.equal(
+      formatUpstreamPricingInterval(
+        {
+          min_tokens: 0,
+          max_tokens: 200000,
+          tier_label: 'standard',
+          input_price: 0.000003,
+          output_price: 0.000015,
+          cache_read_price: Number.NaN,
+        },
+        {
+          tokens: 'tokens',
+          input: 'input',
+          output: 'output',
+          cacheRead: 'cache read',
+        }
+      ),
+      'standard: 0-200,000 tokens · input $3 / 1M tokens · output $15 / 1M tokens'
+    )
+    assert.deepEqual(
+      getUpstreamModelPricingFields({
+        source: 'sub2api',
+        input_price: Number.NaN,
+        output_price: Number.POSITIVE_INFINITY,
+      }),
+      []
     )
   })
 })

@@ -26,7 +26,7 @@ import {
   RefreshCw,
   Trash2,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type FocusEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -38,40 +38,61 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
 
 import {
+  formatUpstreamAvailability,
   formatUpstreamBalance,
+  formatUpstreamFirstTokenLatency,
+  formatUpstreamPricingInterval,
   formatUpstreamTime,
   getAdjustedUpstreamAmount,
   getEffectiveUpstreamMultiplier,
+  getUpstreamAccessTokenRecommendation,
+  getUpstreamModelPricingFields,
   getUpstreamSelectedGroupMultiplier,
   getUpstreamCardTone,
   getUpstreamChannelDisplayName,
+  hasUsableUpstreamCredentials,
   isUpstreamTurnstileAccessTokenRequired,
 } from '../lib'
-import type { UpstreamChannel, UpstreamSnapshot } from '../types'
+import type {
+  UpstreamChannel,
+  UpstreamModel,
+  UpstreamModelPricing,
+  UpstreamSnapshot,
+} from '../types'
 import { UpstreamKeysTable } from './upstream-keys-table'
 
 interface UpstreamChannelCardProps {
   channel: UpstreamChannel
   refreshing: boolean
+  refreshingKeys: boolean
+  refreshingGroups: boolean
   autoRefreshUpdating: boolean
   pinning: boolean
   selectingGroup: boolean
+  savingDefaultTestModel: boolean
   deleting: boolean
   onConfigure: (channel: UpstreamChannel) => void
   onConfigureAccessToken: (channel: UpstreamChannel) => void
   onPin: (channel: UpstreamChannel) => void
   onDelete: (channel: UpstreamChannel) => void
   onRefresh: (channel: UpstreamChannel) => void
+  onRefreshKeys: (channel: UpstreamChannel) => void
+  onRefreshGroups: (channel: UpstreamChannel) => void
   onToggleAutoRefresh: (
     channel: UpstreamChannel,
     enabled: boolean
   ) => Promise<void>
   onSaveNote: (channel: UpstreamChannel, note: string) => Promise<void>
+  onSaveDefaultTestModel: (
+    channel: UpstreamChannel,
+    defaultTestModel: string
+  ) => Promise<boolean>
   onSelectGroup: (
     channel: UpstreamChannel,
     selectedGroup: string
@@ -82,17 +103,23 @@ interface UpstreamChannelCardProps {
 export function UpstreamChannelCard({
   channel,
   refreshing,
+  refreshingKeys,
+  refreshingGroups,
   autoRefreshUpdating,
   pinning,
   selectingGroup,
+  savingDefaultTestModel,
   deleting,
   onConfigure,
   onConfigureAccessToken,
   onPin,
   onDelete,
   onRefresh,
+  onRefreshKeys,
+  onRefreshGroups,
   onToggleAutoRefresh,
   onSaveNote,
+  onSaveDefaultTestModel,
   onSelectGroup,
   onDataChanged,
 }: UpstreamChannelCardProps) {
@@ -101,6 +128,9 @@ export function UpstreamChannelCard({
   const [groupsOpen, setGroupsOpen] = useState(false)
   const [editingNote, setEditingNote] = useState(false)
   const [noteDraft, setNoteDraft] = useState(channel.note || '')
+  const [defaultTestModelDraft, setDefaultTestModelDraft] = useState(
+    channel.default_test_model || ''
+  )
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(
     channel.auto_refresh_interval > 0
   )
@@ -128,6 +158,18 @@ export function UpstreamChannelCard({
   const accessTokenRequired = isUpstreamTurnstileAccessTokenRequired(
     channel.last_error_code
   )
+  const accessTokenRecommendation = accessTokenRequired
+    ? getUpstreamAccessTokenRecommendation(channel)
+    : null
+  const recommendsSub2APIAccessToken =
+    accessTokenRecommendation?.provider === 'sub2api'
+  const hasUsableCredentials = hasUsableUpstreamCredentials(
+    channel.provider,
+    channel.auth_type,
+    channel.username,
+    '',
+    channel.has_password
+  )
   let statusLabel = t('Not configured')
   let statusVariant: 'outline' | 'default' | 'destructive' = 'outline'
   let statusClassName = ''
@@ -146,6 +188,12 @@ export function UpstreamChannelCard({
   }, [channel.note, editingNote])
 
   useEffect(() => {
+    if (!savingDefaultTestModel) {
+      setDefaultTestModelDraft(channel.default_test_model || '')
+    }
+  }, [channel.default_test_model, savingDefaultTestModel])
+
+  useEffect(() => {
     setAutoRefreshEnabled(channel.auto_refresh_interval > 0)
   }, [channel.auto_refresh_interval])
 
@@ -160,6 +208,14 @@ export function UpstreamChannelCard({
   function cancelNoteEditing() {
     setNoteDraft(channel.note || '')
     setEditingNote(false)
+  }
+
+  async function saveDefaultTestModel(defaultTestModel: string) {
+    const previousDefaultTestModel = channel.default_test_model || ''
+    setDefaultTestModelDraft(defaultTestModel)
+    if (editingNote) await saveNote()
+    const saved = await onSaveDefaultTestModel(channel, defaultTestModel)
+    if (!saved) setDefaultTestModelDraft(previousDefaultTestModel)
   }
 
   async function toggleAutoRefresh(enabled: boolean) {
@@ -178,9 +234,23 @@ export function UpstreamChannelCard({
       snapshot={snapshot}
       editingNote={editingNote}
       noteDraft={noteDraft}
+      defaultTestModel={defaultTestModelDraft}
       onEditNote={() => setEditingNote(true)}
       onChangeNote={setNoteDraft}
-      onBlurNote={() => void saveNote()}
+      onBlurNote={(event) => {
+        const nextTarget = event.relatedTarget
+        if (
+          nextTarget instanceof HTMLElement &&
+          nextTarget.closest('[data-default-test-model-select="true"]')
+        ) {
+          return
+        }
+        void saveNote()
+      }}
+      onSaveDefaultTestModel={(defaultTestModel) =>
+        void saveDefaultTestModel(defaultTestModel)
+      }
+      savingDefaultTestModel={savingDefaultTestModel}
       deleting={deleting}
       onCancelNote={cancelNoteEditing}
       onDelete={() => onDelete(channel)}
@@ -230,6 +300,32 @@ export function UpstreamChannelCard({
                 <span className='text-muted-foreground'>{t('Balance')}</span>
                 <span className='font-semibold tabular-nums'>
                   {formatUpstreamBalance(adjustedBalance)}
+                </span>
+              </Badge>
+              <Badge
+                variant='outline'
+                className='bg-background/70 h-6 gap-1.5 px-2'
+                title={t('Availability (last 24h)')}
+              >
+                <span className='text-muted-foreground'>
+                  {t('Availability')}
+                </span>
+                <span className='font-semibold tabular-nums'>
+                  {formatUpstreamAvailability(channel.availability_24h)}
+                </span>
+              </Badge>
+              <Badge
+                variant='outline'
+                className='bg-background/70 h-6 gap-1.5 px-2'
+                title={t('Average first-token latency (last 24h)')}
+              >
+                <span className='text-muted-foreground'>
+                  {t('First-token latency')}
+                </span>
+                <span className='font-semibold tabular-nums'>
+                  {formatUpstreamFirstTokenLatency(
+                    channel.average_first_token_latency_ms
+                  )}
                 </span>
               </Badge>
               <Badge
@@ -312,14 +408,13 @@ export function UpstreamChannelCard({
               <Button
                 size='icon-sm'
                 variant='outline'
-                aria-label={t('Refresh')}
-                title={t('Refresh')}
+                aria-label={t('Refresh balance')}
+                title={t('Refresh balance')}
                 onClick={() => onRefresh(channel)}
                 disabled={
                   refreshing ||
                   channel.provider === 'other' ||
-                  !channel.has_password ||
-                  !channel.username
+                  !hasUsableCredentials
                 }
               >
                 {refreshing ? (
@@ -375,12 +470,14 @@ export function UpstreamChannelCard({
                 {accessTokenRequired ? (
                   <>
                     <AlertTitle>
-                      {t('Turnstile requires a management access token')}
+                      {t('Turnstile requires an access token')}
                     </AlertTitle>
                     <AlertDescription className='space-y-2'>
                       <p>
                         {t(
-                          'This upstream New-API has Turnstile enabled. Background synchronization cannot use account-password login. Enter the numeric user ID and create a management access token in the upstream account settings.'
+                          recommendsSub2APIAccessToken
+                            ? 'This upstream Sub2API has Turnstile enabled. Background synchronization cannot use account-password login. Sign in through its browser page, then enter the issued access token here.'
+                            : 'This upstream New-API has Turnstile enabled. Background synchronization cannot use account-password login. Enter the numeric user ID and create a management access token in the upstream account settings.'
                         )}
                       </p>
                       <Button
@@ -389,7 +486,9 @@ export function UpstreamChannelCard({
                         variant='outline'
                         onClick={() => onConfigureAccessToken(channel)}
                       >
-                        {t('Configure management access token')}
+                        {recommendsSub2APIAccessToken
+                          ? t('Configure')
+                          : t('Configure management access token')}
                       </Button>
                     </AlertDescription>
                   </>
@@ -404,12 +503,39 @@ export function UpstreamChannelCard({
                 {accountPanel}
                 <div className='bg-background/65 rounded-md border p-1.5 backdrop-blur-sm'>
                   <Collapsible open={groupsOpen} onOpenChange={setGroupsOpen}>
-                    <CollapsibleTrigger className='hover:bg-muted/50 flex w-full cursor-pointer items-center justify-between rounded-sm px-1.5 py-0.5 text-left text-sm font-medium outline-none'>
-                      <span>{t('Groups and multipliers')}</span>
-                      <span className='text-muted-foreground text-xs'>
-                        {groupsOpen ? t('Collapse') : t('Expand')}
-                      </span>
-                    </CollapsibleTrigger>
+                    <div className='flex items-center justify-between gap-1'>
+                      <CollapsibleTrigger className='hover:bg-muted/50 flex min-w-0 flex-1 cursor-pointer items-center justify-between rounded-sm px-1.5 py-0.5 text-left text-sm font-medium outline-none'>
+                        <span>{t('Groups and multipliers')}</span>
+                        <span className='text-muted-foreground text-xs'>
+                          {groupsOpen ? t('Collapse') : t('Expand')}
+                        </span>
+                      </CollapsibleTrigger>
+                      <Button
+                        type='button'
+                        size='sm'
+                        variant='ghost'
+                        className='h-7 shrink-0 px-2'
+                        aria-label={t(
+                          'Refresh groups, multipliers, models and pricing'
+                        )}
+                        title={t(
+                          'Refresh groups, multipliers, models and pricing'
+                        )}
+                        disabled={
+                          refreshingGroups ||
+                          channel.provider === 'other' ||
+                          !hasUsableCredentials
+                        }
+                        onClick={() => onRefreshGroups(channel)}
+                      >
+                        {refreshingGroups ? (
+                          <LoaderCircle className='animate-spin' />
+                        ) : (
+                          <RefreshCw />
+                        )}
+                        {t('Refresh')}
+                      </Button>
+                    </div>
                     <CollapsibleContent className='px-1.5 pt-1.5 pb-0.5'>
                       {snapshot.groups.length === 0 ? (
                         <p className='text-muted-foreground text-sm'>
@@ -464,6 +590,7 @@ export function UpstreamChannelCard({
                           })}
                         </div>
                       )}
+                      <UpstreamModelsPanel models={snapshot.models ?? []} />
                     </CollapsibleContent>
                   </Collapsible>
                 </div>
@@ -477,12 +604,144 @@ export function UpstreamChannelCard({
                 channel={channel}
                 snapshot={snapshot}
                 onImported={onDataChanged}
+                refreshing={refreshingKeys}
+                onRefresh={onRefreshKeys}
               />
             )}
           </CardContent>
         </CollapsibleContent>
       </Collapsible>
     </Card>
+  )
+}
+
+function UpstreamModelsPanel({ models }: { models: UpstreamModel[] }) {
+  const { t } = useTranslation()
+
+  return (
+    <section
+      className='mt-3 border-t pt-2'
+      aria-label={t('Models ({{count}})', { count: models.length })}
+    >
+      <h3 className='text-sm font-medium'>
+        {t('Models ({{count}})', { count: models.length })}
+      </h3>
+      {models.length === 0 ? (
+        <p className='text-muted-foreground mt-1 text-sm'>
+          {t('No upstream models found')}
+        </p>
+      ) : (
+        <div className='mt-1.5 max-h-96 space-y-1.5 overflow-y-auto pr-1'>
+          {models.map((model) => (
+            <UpstreamModelCard key={model.id} model={model} />
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function UpstreamModelCard({ model }: { model: UpstreamModel }) {
+  const { t } = useTranslation()
+
+  return (
+    <div className='bg-background/70 rounded-md border px-2 py-1.5'>
+      <code className='block text-sm font-medium break-all'>{model.id}</code>
+      {model.pricing.length === 0 ? (
+        <p className='text-muted-foreground mt-1 text-xs'>
+          {t('Pricing not provided by upstream')}
+        </p>
+      ) : (
+        <div className='mt-1.5 space-y-1.5'>
+          {model.pricing.map((pricing) => (
+            <UpstreamModelPricingCard
+              key={`${pricing.source}-${pricing.channel_name ?? 'default'}-${pricing.platform ?? 'default'}-${pricing.billing_mode ?? 'default'}`}
+              pricing={pricing}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function UpstreamModelPricingCard({
+  pricing,
+}: {
+  pricing: UpstreamModelPricing
+}) {
+  const { t } = useTranslation()
+  const fields = getUpstreamModelPricingFields(pricing)
+  const intervals = pricing.intervals ?? []
+  const hasPricing = fields.length > 0 || intervals.length > 0
+  const intervalLabels = {
+    tokens: t('tokens'),
+    input: t('Input price'),
+    output: t('Output price'),
+    cacheWrite: t('Cache write price'),
+    cacheRead: t('Cache read price'),
+    request: t('Per-request price'),
+  }
+
+  return (
+    <div className='bg-muted/30 rounded border px-2 py-1.5 text-xs'>
+      {pricing.source === 'sub2api' && (
+        <div className='grid gap-x-3 gap-y-0.5 sm:grid-cols-3'>
+          <PricingMetadata label={t('Channel')} value={pricing.channel_name} />
+          <PricingMetadata label={t('Platform')} value={pricing.platform} />
+          <PricingMetadata
+            label={t('Billing mode')}
+            value={pricing.billing_mode}
+          />
+        </div>
+      )}
+      {!hasPricing ? (
+        <p className='text-muted-foreground'>
+          {t('Pricing not provided by upstream')}
+        </p>
+      ) : (
+        <>
+          {fields.length > 0 && (
+            <dl className='mt-1 grid gap-x-3 gap-y-0.5 sm:grid-cols-2'>
+              {fields.map((field) => (
+                <div
+                  key={field.label}
+                  className='grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-2'
+                >
+                  <dt className='text-muted-foreground'>{t(field.label)}</dt>
+                  <dd className='truncate text-right font-medium tabular-nums'>
+                    {field.value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          )}
+          {intervals.length > 0 && (
+            <div className='mt-1.5'>
+              <div className='text-muted-foreground'>{t('Tier pricing')}</div>
+              <ul className='mt-0.5 space-y-0.5'>
+                {intervals.map((interval) => (
+                  <li
+                    key={`${interval.min_tokens}-${interval.max_tokens ?? 'max'}-${interval.tier_label ?? 'tier'}`}
+                  >
+                    {formatUpstreamPricingInterval(interval, intervalLabels)}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+function PricingMetadata({ label, value }: { label: string; value?: string }) {
+  return (
+    <div className='grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-1'>
+      <span className='text-muted-foreground'>{label}</span>
+      <span className='truncate'>{value?.trim() || '-'}</span>
+    </div>
   )
 }
 
@@ -500,11 +759,14 @@ interface AccountPanelProps {
   snapshot?: UpstreamSnapshot
   editingNote: boolean
   noteDraft: string
+  defaultTestModel: string
+  savingDefaultTestModel: boolean
   deleting: boolean
   onEditNote: () => void
   onChangeNote: (value: string) => void
-  onBlurNote: () => void
+  onBlurNote: (event: FocusEvent<HTMLTextAreaElement>) => void
   onCancelNote: () => void
+  onSaveDefaultTestModel: (defaultTestModel: string) => void
   onDelete: () => void
 }
 
@@ -513,15 +775,28 @@ function AccountPanel({
   snapshot,
   editingNote,
   noteDraft,
+  defaultTestModel,
+  savingDefaultTestModel,
   deleting,
   onEditNote,
   onChangeNote,
   onBlurNote,
   onCancelNote,
+  onSaveDefaultTestModel,
   onDelete,
 }: AccountPanelProps) {
   const { t } = useTranslation()
   const account = snapshot?.account
+  const modelSet = new Set(
+    (snapshot?.models || [])
+      .map((model) => model.id.trim())
+      .filter((model) => model !== '')
+  )
+  if (defaultTestModel.trim()) modelSet.add(defaultTestModel.trim())
+  const defaultTestModels = [...modelSet].sort((left, right) =>
+    left.localeCompare(right)
+  )
+  const hasModels = defaultTestModels.length > 0
 
   return (
     <div className='bg-background/65 space-y-1 rounded-md border p-2 backdrop-blur-sm'>
@@ -541,7 +816,7 @@ function AccountPanel({
           <dd className='truncate'>{account?.email || '-'}</dd>
         </dl>
       </div>
-      <div className='flex items-end gap-2 border-t pt-1'>
+      <div className='flex flex-col gap-2 border-t pt-1 sm:flex-row sm:items-end'>
         <div className='min-w-0 flex-1'>
           {editingNote ? (
             <Textarea
@@ -570,6 +845,50 @@ function AccountPanel({
                 ? t('Note: {{note}}', { note: channel.note })
                 : t('Note: (click to edit)')}
             </button>
+          )}
+        </div>
+        <div className='w-full shrink-0 space-y-1 sm:w-64'>
+          <div className='flex items-center justify-between gap-2'>
+            <label
+              className='text-muted-foreground text-xs'
+              htmlFor={`upstream-default-test-model-${channel.id}`}
+            >
+              {t('Default test model')}
+            </label>
+            {savingDefaultTestModel && (
+              <LoaderCircle className='text-muted-foreground size-3.5 animate-spin' />
+            )}
+          </div>
+          <NativeSelect
+            id={`upstream-default-test-model-${channel.id}`}
+            className='w-full'
+            size='sm'
+            value={defaultTestModel}
+            disabled={!hasModels || savingDefaultTestModel}
+            data-default-test-model-select='true'
+            aria-label={t('Default test model')}
+            title={
+              hasModels
+                ? t('Select a default test model')
+                : t('Refresh groups, multipliers, models and pricing first')
+            }
+            onChange={(event) => onSaveDefaultTestModel(event.target.value)}
+          >
+            <NativeSelectOption value=''>
+              {hasModels
+                ? t('Select a default test model')
+                : t('No models available')}
+            </NativeSelectOption>
+            {defaultTestModels.map((model) => (
+              <NativeSelectOption key={model} value={model}>
+                {model}
+              </NativeSelectOption>
+            ))}
+          </NativeSelect>
+          {!hasModels && (
+            <p className='text-muted-foreground text-[11px] leading-tight'>
+              {t('Refresh groups, multipliers, models and pricing first')}
+            </p>
           )}
         </div>
         <Button

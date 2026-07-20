@@ -17,7 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Bell, LoaderCircle, Plus, RefreshCw } from 'lucide-react'
+import {
+  Bell,
+  CalendarClock,
+  LoaderCircle,
+  Plus,
+  RefreshCw,
+} from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -55,7 +61,11 @@ import {
   pinManagedUpstreamChannel,
   refreshAllManagedUpstreamChannels,
   refreshManagedUpstreamChannel,
+  refreshManagedUpstreamChannelBalance,
+  refreshManagedUpstreamChannelGroups,
+  refreshManagedUpstreamChannelKeys,
   updateManagedUpstreamChannel,
+  updateManagedUpstreamChannelDefaultTestModel,
   updateManagedUpstreamChannelNote,
   updateAlertRule,
   updateManagedUpstreamChannelSelectedGroup,
@@ -63,6 +73,7 @@ import {
 import { AlertRuleDialog } from './components/alert-rule-dialog'
 import { UpstreamChannelCard } from './components/upstream-channel-card'
 import { UpstreamChannelConfigDialog } from './components/upstream-channel-config-dialog'
+import { UpstreamPriorityScheduleDialog } from './components/upstream-priority-schedule-dialog'
 import {
   filterAndSortUpstreamChannels,
   formatUpstreamBalance,
@@ -94,12 +105,19 @@ export function UpstreamChannels() {
     useState<UpstreamChannel | null>(null)
   const [configOpen, setConfigOpen] = useState(false)
   const [alertRulesOpen, setAlertRulesOpen] = useState(false)
+  const [priorityScheduleOpen, setPriorityScheduleOpen] = useState(false)
   const [channelToDelete, setChannelToDelete] =
     useState<UpstreamChannel | null>(null)
   const [accessTokenRequired, setAccessTokenRequired] = useState(false)
   const [refreshingChannelId, setRefreshingChannelId] = useState<number | null>(
     null
   )
+  const [refreshingKeysChannelId, setRefreshingKeysChannelId] = useState<
+    number | null
+  >(null)
+  const [refreshingGroupsChannelId, setRefreshingGroupsChannelId] = useState<
+    number | null
+  >(null)
   const [autoRefreshUpdatingChannelId, setAutoRefreshUpdatingChannelId] =
     useState<number | null>(null)
   const [pinningChannelId, setPinningChannelId] = useState<number | null>(null)
@@ -109,6 +127,8 @@ export function UpstreamChannels() {
   const [selectingGroupChannelId, setSelectingGroupChannelId] = useState<
     number | null
   >(null)
+  const [savingDefaultTestModelChannelId, setSavingDefaultTestModelChannelId] =
+    useState<number | null>(null)
   const [enabledChannelThreshold, setEnabledChannelThreshold] = useState('1')
   const [enabledChannelNoticeEnabled, setEnabledChannelNoticeEnabled] =
     useState(false)
@@ -329,6 +349,8 @@ export function UpstreamChannels() {
       if (
         variables.config.provider === 'other' ||
         !hasUsableUpstreamCredentials(
+          variables.config.provider,
+          variables.config.auth_type,
           variables.config.username,
           variables.config.password,
           canReuseSavedCredential
@@ -400,10 +422,31 @@ export function UpstreamChannels() {
     }
   }
 
-  async function refreshChannel(channel: UpstreamChannel) {
-    setRefreshingChannelId(channel.id)
+  async function refreshChannelPart(
+    channel: UpstreamChannel,
+    part: 'balance' | 'keys' | 'groups'
+  ) {
+    const refreshers = {
+      balance: refreshManagedUpstreamChannelBalance,
+      keys: refreshManagedUpstreamChannelKeys,
+      groups: refreshManagedUpstreamChannelGroups,
+    }
+    const setRefreshing = {
+      balance: setRefreshingChannelId,
+      keys: setRefreshingKeysChannelId,
+      groups: setRefreshingGroupsChannelId,
+    }
+    const messages = {
+      balance: ['Failed to refresh balance', 'Balance refreshed'],
+      keys: ['Failed to refresh keys', 'Keys refreshed'],
+      groups: [
+        'Failed to refresh groups, multipliers, models and pricing',
+        'Groups, multipliers, models and pricing refreshed',
+      ],
+    }
+    setRefreshing[part](channel.id)
     try {
-      const response = await refreshManagedUpstreamChannel(channel.id)
+      const response = await refreshers[part](channel.id)
       await queryClient.invalidateQueries({ queryKey })
       if (!response.success) {
         if (
@@ -413,19 +456,27 @@ export function UpstreamChannels() {
           openAccessTokenConfiguration(response.data || channel)
           return
         }
-        toast.error(response.message || t('Failed to refresh upstream channel'))
+        toast.error(response.message || t(messages[part][0]))
         return
       }
-      toast.success(t('Upstream channel refreshed'))
+      toast.success(t(messages[part][1]))
     } catch (error) {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : t('Failed to refresh upstream channel')
-      )
+      toast.error(error instanceof Error ? error.message : t(messages[part][0]))
     } finally {
-      setRefreshingChannelId(null)
+      setRefreshing[part](null)
     }
+  }
+
+  function refreshChannel(channel: UpstreamChannel) {
+    void refreshChannelPart(channel, 'balance')
+  }
+
+  function refreshKeys(channel: UpstreamChannel) {
+    void refreshChannelPart(channel, 'keys')
+  }
+
+  function refreshGroups(channel: UpstreamChannel) {
+    void refreshChannelPart(channel, 'groups')
   }
 
   async function saveChannelNote(channel: UpstreamChannel, note: string) {
@@ -472,6 +523,35 @@ export function UpstreamChannels() {
       )
     } finally {
       setSelectingGroupChannelId(null)
+    }
+  }
+
+  async function saveDefaultTestModel(
+    channel: UpstreamChannel,
+    defaultTestModel: string
+  ): Promise<boolean> {
+    setSavingDefaultTestModelChannelId(channel.id)
+    try {
+      const response = await updateManagedUpstreamChannelDefaultTestModel(
+        channel.id,
+        defaultTestModel
+      )
+      if (!response.success) {
+        toast.error(response.message || t('Failed to save default test model'))
+        return false
+      }
+      await queryClient.invalidateQueries({ queryKey })
+      toast.success(t('Default test model saved'))
+      return true
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t('Failed to save default test model')
+      )
+      return false
+    } finally {
+      setSavingDefaultTestModelChannelId(null)
     }
   }
 
@@ -562,15 +642,18 @@ export function UpstreamChannels() {
       return
     }
     if (config.auth_type === 'access_token') {
-      if (config.provider !== 'new-api') {
+      if (config.provider !== 'new-api' && config.provider !== 'sub2api') {
         toast.error(
           t(
-            'Management access token authentication is only supported for New-API upstream channels'
+            'Access token authentication is only supported for New-API and Sub2API upstream channels'
           )
         )
         return
       }
-      if (!/^[1-9]\d*$/.test(config.username.trim())) {
+      if (
+        config.provider === 'new-api' &&
+        !/^[1-9]\d*$/.test(config.username.trim())
+      ) {
         toast.error(t('Upstream user ID must be a positive integer'))
         return
       }
@@ -581,7 +664,7 @@ export function UpstreamChannels() {
       if (!config.password.trim() && !canReuseSavedCredential) {
         toast.error(
           t(
-            'Enter a new password or management access token when changing the authentication method'
+            'Enter a new password or access token when changing the authentication method'
           )
         )
         return
@@ -680,6 +763,12 @@ export function UpstreamChannels() {
                 <option value='default'>{t('Default order')}</option>
                 <option value='balance-desc'>{t('Balance high to low')}</option>
                 <option value='balance-asc'>{t('Balance low to high')}</option>
+                <option value='availability-desc'>
+                  {t('Availability high to low')}
+                </option>
+                <option value='first-token-latency-asc'>
+                  {t('First-token latency low to high')}
+                </option>
                 <option value='multiplier-desc'>
                   {t('Multiplier high to low')}
                 </option>
@@ -725,6 +814,16 @@ export function UpstreamChannels() {
                   label={t('Active keys')}
                   value={String(keyStats.active)}
                 />
+                <Button
+                  type='button'
+                  size='sm'
+                  variant='outline'
+                  className='h-7'
+                  onClick={() => setPriorityScheduleOpen(true)}
+                >
+                  <CalendarClock />
+                  {t('Scheduled task')}
+                </Button>
                 <div className='ml-auto flex flex-wrap items-center justify-end gap-2'>
                   <span className='text-muted-foreground'>
                     {t('Notify when only')}
@@ -827,11 +926,16 @@ export function UpstreamChannels() {
                     key={channel.id}
                     channel={channel}
                     refreshing={refreshingChannelId === channel.id}
+                    refreshingKeys={refreshingKeysChannelId === channel.id}
+                    refreshingGroups={refreshingGroupsChannelId === channel.id}
                     autoRefreshUpdating={
                       autoRefreshUpdatingChannelId === channel.id
                     }
                     pinning={pinningChannelId === channel.id}
                     selectingGroup={selectingGroupChannelId === channel.id}
+                    savingDefaultTestModel={
+                      savingDefaultTestModelChannelId === channel.id
+                    }
                     deleting={
                       deleteMutation.isPending &&
                       channelToDelete?.id === channel.id
@@ -841,8 +945,11 @@ export function UpstreamChannels() {
                     onPin={pinChannel}
                     onDelete={setChannelToDelete}
                     onRefresh={refreshChannel}
+                    onRefreshKeys={refreshKeys}
+                    onRefreshGroups={refreshGroups}
                     onToggleAutoRefresh={toggleAutoRefresh}
                     onSaveNote={saveChannelNote}
+                    onSaveDefaultTestModel={saveDefaultTestModel}
                     onSelectGroup={selectChannelGroup}
                     onDataChanged={refreshChannelList}
                   />
@@ -859,9 +966,16 @@ export function UpstreamChannels() {
         onOpenChange={(nextOpen) => {
           setAlertRulesOpen(nextOpen)
           if (!nextOpen) {
-            void queryClient.invalidateQueries({ queryKey: alertRulesQueryKey })
+            void queryClient.invalidateQueries({
+              queryKey: alertRulesQueryKey,
+            })
           }
         }}
+      />
+
+      <UpstreamPriorityScheduleDialog
+        open={priorityScheduleOpen}
+        onOpenChange={setPriorityScheduleOpen}
       />
 
       <UpstreamChannelConfigDialog
@@ -872,6 +986,7 @@ export function UpstreamChannels() {
         onOpenChange={handleConfigOpenChange}
         onSave={saveChannel}
       />
+
       <AlertDialog
         open={channelToDelete !== null}
         onOpenChange={(open) => {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -194,6 +195,63 @@ func TestFetchSub2APIUpstreamSnapshot(t *testing.T) {
 	assert.Equal(t, 0.9, snapshot.Ratios["5"])
 }
 
+func TestFetchSub2APIUpstreamSnapshotUsesExplicitAccessToken(t *testing.T) {
+	const accessToken = "sub2-access-secret"
+	loginRequested := false
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/api/v1/auth/login" {
+			loginRequested = true
+			return jsonResponse(http.StatusInternalServerError, `{}`, nil), nil
+		}
+		require.Equal(t, "Bearer "+accessToken, r.Header.Get("Authorization"))
+		switch r.URL.Path {
+		case "/api/v1/user/profile":
+			return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":{"id":9,"email":"owner@example.com","username":"owner","role":"user","balance":12.5}}`, nil), nil
+		case "/api/v1/keys":
+			return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":{"items":[{"id":3,"name":"main","key":"sk-sub2...cret","group_id":5,"status":"active","quota":100,"quota_used":4}]}}`, nil), nil
+		case "/api/v1/keys/3":
+			return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":{"id":3,"name":"main","key":"sk-sub2-secret","group_id":5,"status":"active"}}`, nil), nil
+		case "/api/v1/groups/available":
+			return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":[{"id":5,"name":"Claude","rate_multiplier":1.2}]}`, nil), nil
+		case "/api/v1/groups/rates":
+			return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":{"5":0.9}}`, nil), nil
+		default:
+			return jsonResponse(http.StatusNotFound, `{}`, nil), nil
+		}
+	})}
+
+	snapshot, err := FetchUpstreamSnapshot(context.Background(), client, "https://sub2.test", UpstreamProviderSub2API, UpstreamCredential{
+		AuthType: model.UpstreamAuthTypeAccessToken,
+		Username: "owner@example.com",
+		Password: accessToken,
+	})
+	require.NoError(t, err)
+	assert.False(t, loginRequested)
+	assert.Equal(t, UpstreamProviderSub2API, snapshot.Provider)
+	assert.InDelta(t, 12.5, snapshot.Balance, 0.000001)
+}
+
+func TestFetchSub2APIUpstreamSnapshotExplainsTurnstileAccessTokenSetup(t *testing.T) {
+	const password = "account-password"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		require.Equal(t, "/api/v1/auth/login", r.URL.Path)
+		return jsonResponse(http.StatusBadRequest, `{"code":400,"message":"turnstile verification failed","reason":"TURNSTILE_VERIFICATION_FAILED"}`, nil), nil
+	})}
+
+	_, err := FetchUpstreamSnapshot(context.Background(), client, "https://sub2.test", UpstreamProviderSub2API, UpstreamCredential{
+		AuthType: model.UpstreamAuthTypePassword,
+		Username: "owner@example.com",
+		Password: password,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrSub2APITurnstileRequiresAccessToken)
+	assert.Equal(t, UpstreamErrorCodeTurnstileRequiresAccessToken, UpstreamErrorCode(err))
+	assert.Equal(t, UpstreamErrorCodeTurnstileRequiresAccessToken, UpstreamErrorCodeFromMessage(err.Error()))
+	assert.Contains(t, err.Error(), "Sub2API")
+	assert.Contains(t, strings.ToLower(err.Error()), "access token")
+	assert.NotContains(t, err.Error(), password)
+}
+
 func TestApplyUpstreamGroupNamesUsesReadableName(t *testing.T) {
 	groupID := int64(27)
 	unknownGroupID := int64(99)
@@ -355,4 +413,292 @@ func TestFetchSub2APIFullKey(t *testing.T) {
 	key, err := FetchUpstreamFullKey(context.Background(), client, "https://sub2.test", UpstreamProviderSub2API, UpstreamCredential{Username: "owner@example.com", Password: "secret"}, 9)
 	require.NoError(t, err)
 	assert.Equal(t, "sk-sub2-full-key", key)
+}
+
+func TestFetchSub2APIFullKeyUsesExplicitAccessToken(t *testing.T) {
+	const accessToken = "sub2-access-secret"
+	loginRequested := false
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/api/v1/auth/login" {
+			loginRequested = true
+			return jsonResponse(http.StatusInternalServerError, `{}`, nil), nil
+		}
+		require.Equal(t, "/api/v1/keys/9", r.URL.Path)
+		require.Equal(t, "Bearer "+accessToken, r.Header.Get("Authorization"))
+		return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":{"key":"sk-sub2-full-key"}}`, nil), nil
+	})}
+
+	key, err := FetchUpstreamFullKey(context.Background(), client, "https://sub2.test", UpstreamProviderSub2API, UpstreamCredential{
+		AuthType: model.UpstreamAuthTypeAccessToken,
+		Username: "owner@example.com",
+		Password: accessToken,
+	}, 9)
+	require.NoError(t, err)
+	assert.False(t, loginRequested)
+	assert.Equal(t, "sk-sub2-full-key", key)
+}
+
+func TestFetchUpstreamModelsFromNewAPI(t *testing.T) {
+	requestedKeyIDs := make([]string, 0)
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/api/token/3/key":
+			requestedKeyIDs = append(requestedKeyIDs, "3")
+			require.Equal(t, "Bearer management-token", request.Header.Get("Authorization"))
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-vip"}}`, nil), nil
+		case "/api/token/2/key":
+			requestedKeyIDs = append(requestedKeyIDs, "2")
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-default"}}`, nil), nil
+		case "/v1/models":
+			switch request.Header.Get("Authorization") {
+			case "Bearer sk-vip":
+				return jsonResponse(http.StatusOK, `{"data":[{"id":"gpt-4o"},{"id":"vip-only"}]}`, nil), nil
+			case "Bearer sk-default":
+				return jsonResponse(http.StatusOK, `{"data":[{"id":"gpt-4o-mini"},{"id":"gpt-4o"}]}`, nil), nil
+			default:
+				require.Failf(t, "unexpected model credential", "%q", request.Header.Get("Authorization"))
+				return nil, nil
+			}
+		case "/api/ratio_config":
+			require.Equal(t, "Bearer management-token", request.Header.Get("Authorization"))
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"model_ratio":{"gpt-4o":0,"not-exposed":9},"completion_ratio":{"gpt-4o":2},"cache_ratio":{"gpt-4o-mini":0.5},"create_cache_ratio":{"gpt-4o-mini":1.25},"model_price":{"vip-only":0.02}}}`, nil), nil
+		default:
+			require.Failf(t, "unexpected upstream request", "%s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	})}
+
+	groupDefault := int64(1)
+	groupVIP := int64(2)
+	models, err := FetchUpstreamModels(
+		context.Background(),
+		client,
+		"https://upstream.test",
+		UpstreamProviderNewAPI,
+		UpstreamCredential{AuthType: model.UpstreamAuthTypeAccessToken, Username: "42", Password: "management-token"},
+		[]UpstreamKey{
+			{ID: 1, Group: "default", GroupID: &groupDefault, Status: "disabled"},
+			{ID: 2, Group: "default", GroupID: &groupDefault, Status: "enabled"},
+			{ID: 3, Group: "vip", GroupID: &groupVIP, Status: "enabled"},
+		},
+		"vip",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"3", "2"}, requestedKeyIDs)
+	require.Len(t, models, 3)
+	assert.Equal(t, []string{"gpt-4o", "gpt-4o-mini", "vip-only"}, []string{models[0].ID, models[1].ID, models[2].ID})
+
+	require.Len(t, models[0].Pricing, 1)
+	require.NotNil(t, models[0].Pricing[0].ModelRatio)
+	assert.Zero(t, *models[0].Pricing[0].ModelRatio)
+	require.NotNil(t, models[0].Pricing[0].CompletionRatio)
+	assert.Equal(t, 2.0, *models[0].Pricing[0].CompletionRatio)
+	require.Len(t, models[1].Pricing, 1)
+	require.NotNil(t, models[1].Pricing[0].CacheRatio)
+	assert.Equal(t, 0.5, *models[1].Pricing[0].CacheRatio)
+	require.Len(t, models[2].Pricing, 1)
+	require.NotNil(t, models[2].Pricing[0].ModelPrice)
+	assert.Equal(t, 0.02, *models[2].Pricing[0].ModelPrice)
+	for _, item := range models {
+		assert.NotEqual(t, "not-exposed", item.ID)
+	}
+
+	encoded, err := common.Marshal(models)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"model_ratio":0`)
+	assert.NotContains(t, string(encoded), "management-token")
+	assert.NotContains(t, string(encoded), "sk-vip")
+}
+
+func TestFetchUpstreamModelsProbesAllEligibleKeysAndSkipsFailures(t *testing.T) {
+	requestedKeyIDs := make([]string, 0)
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/api/token/1/key":
+			requestedKeyIDs = append(requestedKeyIDs, "1")
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-first"}}`, nil), nil
+		case "/api/token/2/key":
+			requestedKeyIDs = append(requestedKeyIDs, "2")
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-second"}}`, nil), nil
+		case "/api/token/3/key":
+			requestedKeyIDs = append(requestedKeyIDs, "3")
+			return jsonResponse(http.StatusUnauthorized, `{"success":false,"message":"key unavailable"}`, nil), nil
+		case "/v1/models":
+			switch request.Header.Get("Authorization") {
+			case "Bearer sk-first":
+				return jsonResponse(http.StatusOK, `{"data":[{"id":"gpt-4o"}]}`, nil), nil
+			case "Bearer sk-second":
+				return jsonResponse(http.StatusOK, `{"data":[{"id":"claude-sonnet-4-5"}]}`, nil), nil
+			default:
+				require.Failf(t, "unexpected model credential", "%q", request.Header.Get("Authorization"))
+				return nil, nil
+			}
+		case "/api/ratio_config":
+			return jsonResponse(http.StatusForbidden, `{"success":false,"message":"not exposed"}`, nil), nil
+		default:
+			require.Failf(t, "unexpected upstream request", "%s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	})}
+
+	models, err := FetchUpstreamModels(
+		context.Background(),
+		client,
+		"https://upstream.test",
+		UpstreamProviderNewAPI,
+		UpstreamCredential{AuthType: model.UpstreamAuthTypeAccessToken, Username: "42", Password: "management-token"},
+		[]UpstreamKey{
+			{ID: 1, Group: "default", Status: "enabled"},
+			{ID: 2, Group: "default", Status: "enabled"},
+			{ID: 3, Group: "default", Status: "disabled"},
+		},
+		"default",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"1", "2"}, requestedKeyIDs)
+	assert.Equal(t, []string{"claude-sonnet-4-5", "gpt-4o"}, []string{models[0].ID, models[1].ID})
+}
+
+func TestFetchUpstreamModelsSupportsSub2APIPricingShapeVariants(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/api/v1/keys/9":
+			return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":{"key":"sk-sub2-model"}}`, nil), nil
+		case "/v1/models":
+			return jsonResponse(http.StatusOK, `{"data":[{"id":"gpt-4o"},{"id":"claude-sonnet-4-5"}]}`, nil), nil
+		case "/api/v1/channels/available":
+			return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":{"channels":[{"name":"Variant Channel","platforms":[{"platform":"openai","supported_models":["gpt-4o",{"model":"claude-sonnet-4-5","billing_mode":"token","input_price":0.000002,"output_price":0.000008}]}]}]}}`, nil), nil
+		default:
+			require.Failf(t, "unexpected upstream request", "%s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	})}
+
+	models, err := FetchUpstreamModels(
+		context.Background(),
+		client,
+		"https://sub2.test",
+		UpstreamProviderSub2API,
+		UpstreamCredential{AuthType: model.UpstreamAuthTypeAccessToken, Password: "user-access-token"},
+		[]UpstreamKey{{ID: 9, Status: "active"}},
+		"",
+	)
+	require.NoError(t, err)
+	require.Len(t, models, 2)
+	assert.Equal(t, "claude-sonnet-4-5", models[0].ID)
+	require.Len(t, models[0].Pricing, 1)
+	assert.Equal(t, "token", models[0].Pricing[0].BillingMode)
+	require.NotNil(t, models[0].Pricing[0].InputPrice)
+	assert.Equal(t, 0.000002, *models[0].Pricing[0].InputPrice)
+	assert.Equal(t, "gpt-4o", models[1].ID)
+	require.Len(t, models[1].Pricing, 1)
+	assert.Equal(t, "openai", models[1].Pricing[0].Platform)
+	assert.Empty(t, models[1].Pricing[0].BillingMode)
+}
+
+func TestFetchUpstreamModelsKeepsModelsWhenNewAPIPricingIsUnavailable(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/api/token/1/key":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-model"}}`, nil), nil
+		case "/v1/models":
+			return jsonResponse(http.StatusOK, `{"data":[{"id":"gpt-4o"}]}`, nil), nil
+		case "/api/ratio_config":
+			return jsonResponse(http.StatusForbidden, `{"success":false,"message":"ratio configuration is not exposed"}`, nil), nil
+		default:
+			require.Failf(t, "unexpected upstream request", "%s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	})}
+
+	models, err := FetchUpstreamModels(
+		context.Background(),
+		client,
+		"https://upstream.test",
+		UpstreamProviderNewAPI,
+		UpstreamCredential{AuthType: model.UpstreamAuthTypeAccessToken, Username: "42", Password: "management-token"},
+		[]UpstreamKey{{ID: 1, Group: "default", Status: "enabled"}},
+		"",
+	)
+	require.NoError(t, err)
+	require.Len(t, models, 1)
+	assert.Equal(t, "gpt-4o", models[0].ID)
+	assert.Empty(t, models[0].Pricing)
+}
+
+func TestFetchUpstreamModelsFromSub2API(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/api/v1/keys/9":
+			require.Equal(t, "Bearer user-access-token", request.Header.Get("Authorization"))
+			return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":{"key":"sk-sub2-model"}}`, nil), nil
+		case "/v1/models":
+			require.Equal(t, "Bearer sk-sub2-model", request.Header.Get("Authorization"))
+			return jsonResponse(http.StatusOK, `{"data":[{"id":"claude-sonnet-4-5"},{"id":"gpt-4o"}]}`, nil), nil
+		case "/api/v1/channels/available":
+			require.Equal(t, "Bearer user-access-token", request.Header.Get("Authorization"))
+			return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":[{"name":"Primary Claude","platforms":[{"platform":"anthropic","supported_models":[{"name":"claude-sonnet-4-5","pricing":{"billing_mode":"token","input_price":0.000003,"output_price":0.000015,"cache_write_price":0,"cache_read_price":0.0000003,"intervals":[{"min_tokens":0,"max_tokens":200000,"tier_label":"standard","input_price":0.000003,"output_price":0.000015}]}}]}]},{"name":"Backup Claude","platforms":[{"platform":"anthropic","supported_models":[{"name":"claude-sonnet-4-5","platform":"anthropic-compatible","pricing":{"billing_mode":"request","per_request_price":0.02}}]}]},{"name":"Unexposed","platforms":[{"platform":"openai","supported_models":[{"name":"not-exposed","pricing":{"billing_mode":"token","input_price":1}}]}]}]}`, nil), nil
+		default:
+			require.Failf(t, "unexpected upstream request", "%s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	})}
+
+	models, err := FetchUpstreamModels(
+		context.Background(),
+		client,
+		"https://sub2.test",
+		UpstreamProviderSub2API,
+		UpstreamCredential{AuthType: model.UpstreamAuthTypeAccessToken, Password: "user-access-token"},
+		[]UpstreamKey{{ID: 9, Group: "default", Status: "active"}},
+		"",
+	)
+	require.NoError(t, err)
+	require.Len(t, models, 2)
+	assert.Equal(t, "claude-sonnet-4-5", models[0].ID)
+	require.Len(t, models[0].Pricing, 2)
+	assert.Equal(t, "Backup Claude", models[0].Pricing[0].ChannelName)
+	assert.Equal(t, "request", models[0].Pricing[0].BillingMode)
+	require.NotNil(t, models[0].Pricing[0].PerRequestPrice)
+	assert.Equal(t, 0.02, *models[0].Pricing[0].PerRequestPrice)
+	assert.Equal(t, "Primary Claude", models[0].Pricing[1].ChannelName)
+	assert.Equal(t, "anthropic", models[0].Pricing[1].Platform)
+	require.NotNil(t, models[0].Pricing[1].CacheWritePrice)
+	assert.Zero(t, *models[0].Pricing[1].CacheWritePrice)
+	require.Len(t, models[0].Pricing[1].Intervals, 1)
+	require.NotNil(t, models[0].Pricing[1].Intervals[0].MaxTokens)
+	assert.Equal(t, 200000, *models[0].Pricing[1].Intervals[0].MaxTokens)
+	assert.Equal(t, "gpt-4o", models[1].ID)
+	assert.Empty(t, models[1].Pricing)
+}
+
+func TestFetchUpstreamModelsAllowsEmptyModelListAndMissingSub2APIPricingEndpoint(t *testing.T) {
+	pricingRequested := false
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/api/v1/keys/9":
+			return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":{"key":"sk-sub2-model"}}`, nil), nil
+		case "/v1/models":
+			return jsonResponse(http.StatusOK, `{"data":[]}`, nil), nil
+		case "/api/v1/channels/available":
+			pricingRequested = true
+			return jsonResponse(http.StatusNotFound, `{}`, nil), nil
+		default:
+			require.Failf(t, "unexpected upstream request", "%s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	})}
+
+	models, err := FetchUpstreamModels(
+		context.Background(),
+		client,
+		"https://sub2.test",
+		UpstreamProviderSub2API,
+		UpstreamCredential{AuthType: model.UpstreamAuthTypeAccessToken, Password: "user-access-token"},
+		[]UpstreamKey{{ID: 9, Status: "active"}},
+		"",
+	)
+	require.NoError(t, err)
+	assert.Empty(t, models)
+	assert.False(t, pricingRequested)
 }

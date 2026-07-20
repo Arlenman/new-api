@@ -359,6 +359,26 @@ func (channel *Channel) SaveWithoutKey() error {
 	return DB.Omit("key").Save(channel).Error
 }
 
+func UpdateChannelPrioritiesByID(priorities map[int]int64) error {
+	if len(priorities) == 0 {
+		return nil
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		for channelID, priority := range priorities {
+			if channelID <= 0 {
+				continue
+			}
+			if err := tx.Model(&Channel{}).Where("id = ?", channelID).Update("priority", priority).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&Ability{}).Where("channel_id = ?", channelID).Update("priority", priority).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func GetAllChannels(startIdx int, num int, selectAll bool, idSort bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
 	var channels []*Channel
 	var err error

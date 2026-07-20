@@ -80,6 +80,14 @@ type Log struct {
 	Other             string `json:"other"`
 }
 
+type ChannelLogMetric struct {
+	ChannelID                    int     `gorm:"column:channel_id"`
+	RequestCount                 int64   `gorm:"column:request_count"`
+	SuccessCount                 int64   `gorm:"column:success_count"`
+	FirstTokenLatencyTotalMs     float64 `gorm:"column:first_token_latency_total_ms"`
+	FirstTokenLatencySampleCount int64   `gorm:"column:first_token_latency_sample_count"`
+}
+
 // don't use iota, avoid change log type value
 const (
 	LogTypeUnknown   = 0
@@ -92,6 +100,55 @@ const (
 	LogTypeLogin     = 7
 	LogTypeSensitive = 8
 )
+
+func GetChannelLogMetricsSince(channelIDs []int, startTimestamp int64) (map[int]ChannelLogMetric, error) {
+	metrics := make(map[int]ChannelLogMetric)
+	if len(channelIDs) == 0 {
+		return metrics, nil
+	}
+
+	firstTokenExpression := "CAST(json_extract(CASE WHEN json_valid(other) THEN other ELSE '{}' END, '$.frt') AS REAL)"
+	switch {
+	case common.UsingLogDatabase(common.DatabaseTypeMySQL):
+		firstTokenExpression = "CAST(JSON_UNQUOTE(JSON_EXTRACT(CASE WHEN JSON_VALID(other) THEN other ELSE '{}' END, '$.frt')) AS DECIMAL(20,6))"
+	case common.UsingLogDatabase(common.DatabaseTypePostgreSQL):
+		firstTokenExpression = "CAST(NULLIF(substring(other from '\"frt\"[[:space:]]*:[[:space:]]*(-?[0-9]+\\.?[0-9]*)'), '') AS double precision)"
+	case common.UsingLogDatabase(common.DatabaseTypeClickHouse):
+		firstTokenExpression = "toFloat64OrNull(JSONExtractRaw(other, 'frt'))"
+	}
+	validFirstTokenExpression := fmt.Sprintf(
+		"type = %d AND %s IS NOT NULL AND %s >= 0",
+		LogTypeConsume,
+		firstTokenExpression,
+		firstTokenExpression,
+	)
+	selectExpression := fmt.Sprintf(
+		"channel_id, COUNT(*) AS request_count, "+
+			"SUM(CASE WHEN type = %d THEN 1 ELSE 0 END) AS success_count, "+
+			"SUM(CASE WHEN %s THEN %s ELSE 0 END) AS first_token_latency_total_ms, "+
+			"SUM(CASE WHEN %s THEN 1 ELSE 0 END) AS first_token_latency_sample_count",
+		LogTypeConsume,
+		validFirstTokenExpression,
+		firstTokenExpression,
+		validFirstTokenExpression,
+	)
+
+	var rows []ChannelLogMetric
+	err := LOG_DB.Model(&Log{}).
+		Select(selectExpression).
+		Where("channel_id IN ?", channelIDs).
+		Where("created_at >= ?", startTimestamp).
+		Where("type IN ?", []int{LogTypeConsume, LogTypeError}).
+		Group("channel_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		metrics[row.ChannelID] = row
+	}
+	return metrics, nil
+}
 
 func ensureLogRequestId(log *Log) {
 	if log != nil && log.RequestId == "" {

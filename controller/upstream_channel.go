@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"context"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
@@ -8,8 +10,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 )
 
@@ -23,10 +27,13 @@ type upstreamChannelView struct {
 	SelectedGroup            string                    `json:"selected_group"`
 	Username                 string                    `json:"username"`
 	Note                     string                    `json:"note"`
+	DefaultTestModel         string                    `json:"default_test_model"`
 	HasPassword              bool                      `json:"has_password"`
 	SourceChannelCount       int                       `json:"source_channel_count"`
 	ActiveSourceChannelCount int                       `json:"active_source_channel_count"`
 	Balance                  float64                   `json:"balance"`
+	Availability24h          *float64                  `json:"availability_24h"`
+	AverageFirstTokenLatency *float64                  `json:"average_first_token_latency_ms"`
 	BalanceUpdatedTime       int64                     `json:"balance_updated_time"`
 	BalanceThreshold         float64                   `json:"balance_threshold"`
 	Multiplier               float64                   `json:"multiplier"`
@@ -75,6 +82,16 @@ type updateUpstreamChannelNoteRequest struct {
 
 type updateUpstreamChannelSelectedGroupRequest struct {
 	SelectedGroup string `json:"selected_group"`
+}
+
+type updateUpstreamChannelDefaultTestModelRequest struct {
+	DefaultTestModel string `json:"default_test_model"`
+}
+
+type updateUpstreamPriorityScheduleRequest struct {
+	Enabled               bool `json:"enabled"`
+	IntervalSeconds       int  `json:"interval_seconds"`
+	MaxTestLatencySeconds int  `json:"max_test_latency_seconds"`
 }
 
 type importUpstreamChannelKeysRequest struct {
@@ -192,10 +209,19 @@ func GetUpstreamChannels(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	logMetrics, metricsErr := service.GetUpstreamChannelLogMetricsSince(common.GetTimestamp() - 24*60*60)
+	if metricsErr != nil {
+		common.SysError("failed to load upstream channel log metrics: " + metricsErr.Error())
+		logMetrics = map[string]service.UpstreamChannelLogMetrics{}
+	}
 	views := make([]upstreamChannelView, 0, len(rows))
 	for _, row := range rows {
 		channelStats := stats[row.BaseURL]
-		views = append(views, buildUpstreamChannelView(row, channelStats.Total, channelStats.Active))
+		view := buildUpstreamChannelView(row, channelStats.Total, channelStats.Active)
+		metrics := logMetrics[row.BaseURL]
+		view.Availability24h = metrics.Availability24h
+		view.AverageFirstTokenLatency = metrics.AverageFirstTokenLatencyMs
+		views = append(views, view)
 	}
 	common.ApiSuccess(c, views)
 }
@@ -338,6 +364,65 @@ func UpdateUpstreamChannelSelectedGroup(c *gin.Context) {
 	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0))
 }
 
+func UpdateUpstreamChannelDefaultTestModel(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		common.ApiError(c, errInvalidUpstreamChannelID)
+		return
+	}
+	var request updateUpstreamChannelDefaultTestModelRequest
+	if err = c.ShouldBindJSON(&request); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	request.DefaultTestModel = strings.TrimSpace(request.DefaultTestModel)
+	if utf8.RuneCountInString(request.DefaultTestModel) > upstreamChannelNameMaxLength {
+		common.ApiError(c, errInvalidUpstreamDefaultTestModel)
+		return
+	}
+	row, err := service.UpdateUpstreamChannelDefaultTestModel(id, request.DefaultTestModel)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0))
+}
+
+func GetUpstreamPrioritySchedule(c *gin.Context) {
+	common.ApiSuccess(c, operation_setting.GetUpstreamPrioritySetting())
+}
+
+func UpdateUpstreamPrioritySchedule(c *gin.Context) {
+	var request updateUpstreamPriorityScheduleRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if request.IntervalSeconds < operation_setting.UpstreamPriorityMinIntervalSeconds || request.IntervalSeconds > operation_setting.UpstreamPriorityMaxIntervalSeconds {
+		common.ApiError(c, errInvalidUpstreamPriorityInterval)
+		return
+	}
+	if request.MaxTestLatencySeconds < operation_setting.UpstreamPriorityMinLatencySeconds || request.MaxTestLatencySeconds > operation_setting.UpstreamPriorityMaxLatencySeconds {
+		common.ApiError(c, errInvalidUpstreamPriorityLatency)
+		return
+	}
+	wasEnabled := operation_setting.GetUpstreamPrioritySetting().Enabled
+	if err := model.UpdateOptionsBulk(map[string]string{
+		"upstream_priority_setting.enabled":                  strconv.FormatBool(request.Enabled),
+		"upstream_priority_setting.interval_seconds":         strconv.Itoa(request.IntervalSeconds),
+		"upstream_priority_setting.max_test_latency_seconds": strconv.Itoa(request.MaxTestLatencySeconds),
+	}); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if request.Enabled && !wasEnabled {
+		if _, _, err := service.EnqueueSystemTask(model.SystemTaskTypeUpstreamPrioritySync, nil); err != nil {
+			logger.LogWarn(c, fmt.Sprintf("enqueue upstream priority sync after enabling schedule failed: %v", err))
+		}
+	}
+	common.ApiSuccess(c, operation_setting.GetUpstreamPrioritySetting())
+}
+
 func PinUpstreamChannel(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil || id <= 0 {
@@ -391,6 +476,36 @@ func RefreshUpstreamChannel(c *gin.Context) {
 		return
 	}
 	row, _, err := service.RefreshUpstreamChannel(c.Request.Context(), id)
+	if err != nil {
+		var data any
+		if row != nil {
+			data = buildUpstreamChannelView(row, 0, 0)
+		}
+		respondUpstreamChannelError(c, err, data)
+		return
+	}
+	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0))
+}
+
+func RefreshUpstreamChannelBalance(c *gin.Context) {
+	refreshUpstreamChannel(c, service.RefreshUpstreamChannelBalance)
+}
+
+func RefreshUpstreamChannelKeys(c *gin.Context) {
+	refreshUpstreamChannel(c, service.RefreshUpstreamChannelKeys)
+}
+
+func RefreshUpstreamChannelGroups(c *gin.Context) {
+	refreshUpstreamChannel(c, service.RefreshUpstreamChannelGroups)
+}
+
+func refreshUpstreamChannel(c *gin.Context, refresh func(context.Context, int) (*model.UpstreamChannel, service.UpstreamSnapshot, error)) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		common.ApiError(c, errInvalidUpstreamChannelID)
+		return
+	}
+	row, _, err := refresh(c.Request.Context(), id)
 	if err != nil {
 		var data any
 		if row != nil {
@@ -503,6 +618,7 @@ func buildUpstreamChannelView(row *model.UpstreamChannel, sourceChannelCount int
 		SelectedGroup:            row.SelectedGroup,
 		Username:                 row.Username,
 		Note:                     row.Note,
+		DefaultTestModel:         row.DefaultTestModel,
 		HasPassword:              row.HasPassword(),
 		SourceChannelCount:       sourceChannelCount,
 		ActiveSourceChannelCount: activeSourceChannelCount,
@@ -519,6 +635,7 @@ func buildUpstreamChannelView(row *model.UpstreamChannel, sourceChannelCount int
 	if row.SnapshotJSON != "" {
 		var snapshot service.UpstreamSnapshot
 		if err := common.Unmarshal([]byte(row.SnapshotJSON), &snapshot); err == nil {
+			service.NormalizeUpstreamSnapshot(&snapshot)
 			for i := range snapshot.Keys {
 				snapshot.Keys[i].KeyFingerprint = ""
 			}
@@ -543,12 +660,14 @@ func validateUpstreamAuthentication(provider string, authType string, username s
 	if authType != model.UpstreamAuthTypeAccessToken {
 		return nil
 	}
-	if provider != service.UpstreamProviderNewAPI {
+	if provider != service.UpstreamProviderNewAPI && provider != service.UpstreamProviderSub2API {
 		return errUpstreamAccessTokenProvider
 	}
-	userID, err := strconv.ParseInt(strings.TrimSpace(username), 10, 64)
-	if err != nil || userID <= 0 {
-		return errInvalidUpstreamUserID
+	if provider == service.UpstreamProviderNewAPI {
+		userID, err := strconv.ParseInt(strings.TrimSpace(username), 10, 64)
+		if err != nil || userID <= 0 {
+			return errInvalidUpstreamUserID
+		}
 	}
 	if !hasCredential {
 		return errUpstreamCredentialRequired

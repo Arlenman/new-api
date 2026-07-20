@@ -16,7 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Copy, Download, Eye, EyeOff, LoaderCircle } from 'lucide-react'
+import {
+  Copy,
+  Download,
+  Eye,
+  EyeOff,
+  LoaderCircle,
+  RefreshCw,
+} from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -33,7 +40,11 @@ import {
 } from '@/components/ui/table'
 
 import { importManagedUpstreamKeys, revealManagedUpstreamKey } from '../api'
-import { formatUpstreamBalance, getEffectiveUpstreamMultiplier } from '../lib'
+import {
+  formatUpstreamBalance,
+  getEffectiveUpstreamMultiplier,
+  hasUsableUpstreamCredentials,
+} from '../lib'
 import type {
   UpstreamChannel,
   UpstreamKeyImportConfiguration,
@@ -44,12 +55,16 @@ import { UpstreamKeyImportDialog } from './upstream-key-import-dialog'
 interface UpstreamKeysTableProps {
   channel: UpstreamChannel
   snapshot: UpstreamSnapshot
+  refreshing: boolean
+  onRefresh: (channel: UpstreamChannel) => void
   onImported: () => Promise<void>
 }
 
 export function UpstreamKeysTable({
   channel,
   snapshot,
+  refreshing,
+  onRefresh,
   onImported,
 }: UpstreamKeysTableProps) {
   const { t } = useTranslation()
@@ -59,6 +74,13 @@ export function UpstreamKeysTable({
   const [importDialogOpen, setImportDialogOpen] = useState(false)
   const [importing, setImporting] = useState(false)
   const keys = snapshot.keys
+  const hasUsableCredentials = hasUsableUpstreamCredentials(
+    channel.provider,
+    channel.auth_type,
+    channel.username,
+    '',
+    channel.has_password
+  )
   const allSelected = keys.length > 0 && selectedKeyIds.size === keys.length
   const someSelected = selectedKeyIds.size > 0 && !allSelected
   const selectedKeyIdList = useMemo(
@@ -164,133 +186,154 @@ export function UpstreamKeysTable({
     }
   }
 
-  if (keys.length === 0) {
-    return (
-      <p className='text-muted-foreground text-sm'>{t('No upstream keys')}</p>
-    )
-  }
-
   return (
     <>
       <div className='space-y-1.5'>
         <div className='flex flex-wrap items-center justify-between gap-2'>
           <p className='text-muted-foreground text-sm'>
-            {t('{{count}} keys selected', { count: selectedKeyIds.size })}
+            {keys.length === 0
+              ? t('No upstream keys')
+              : t('{{count}} keys selected', { count: selectedKeyIds.size })}
           </p>
-          <Button
-            onClick={() => setImportDialogOpen(true)}
-            disabled={selectedKeyIds.size === 0 || importing}
-          >
-            <Download />
-            {t('Import channels')}
-          </Button>
+          <div className='flex items-center gap-1'>
+            <Button
+              variant='outline'
+              size='sm'
+              onClick={() => onRefresh(channel)}
+              disabled={
+                refreshing ||
+                channel.provider === 'other' ||
+                !hasUsableCredentials
+              }
+            >
+              {refreshing ? (
+                <LoaderCircle className='animate-spin' />
+              ) : (
+                <RefreshCw />
+              )}
+              {t('Refresh keys')}
+            </Button>
+            <Button
+              onClick={() => setImportDialogOpen(true)}
+              disabled={selectedKeyIds.size === 0 || importing}
+            >
+              <Download />
+              {t('Import channels')}
+            </Button>
+          </div>
         </div>
-        <div className='overflow-x-auto rounded-md border'>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className='h-9 w-10'>
-                  <Checkbox
-                    checked={allSelected}
-                    indeterminate={someSelected}
-                    onCheckedChange={(value) => toggleAll(!!value)}
-                    aria-label={t('Select all keys')}
-                  />
-                </TableHead>
-                <TableHead className='h-9'>{t('Name')}</TableHead>
-                <TableHead className='h-9'>{t('Key')}</TableHead>
-                <TableHead className='h-9'>{t('Group')}</TableHead>
-                <TableHead className='h-9'>{t('Multiplier')}</TableHead>
-                <TableHead className='h-9'>{t('Status')}</TableHead>
-                <TableHead className='h-9'>{t('Imported')}</TableHead>
-                <TableHead className='h-9 w-28 text-right'>
-                  {t('Actions')}
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody className='[&>tr]:h-11'>
-              {keys.map((key) => {
-                const revealed = revealedKeys[key.id]
-                const keyGroup = key.group?.trim() || ''
-                const ratioKey =
-                  key.group_id == null ? keyGroup : String(key.group_id)
-                const ratioGroup = snapshot.groups.find(
-                  (group) =>
-                    (key.group_id != null && group.id === key.group_id) ||
-                    (!!keyGroup && group.name.trim() === keyGroup)
-                )
-                const groupName = ratioGroup?.name.trim() || keyGroup
-                const upstreamRatio =
-                  snapshot.ratios[ratioKey] ?? ratioGroup?.ratio
-                const ratio =
-                  typeof upstreamRatio === 'number'
-                    ? upstreamRatio *
-                      getEffectiveUpstreamMultiplier(channel.multiplier)
-                    : undefined
-                let revealIcon = <Eye />
-                if (revealingKeyId === key.id) {
-                  revealIcon = <LoaderCircle className='animate-spin' />
-                } else if (revealed) {
-                  revealIcon = <EyeOff />
-                }
-                return (
-                  <TableRow key={key.id}>
-                    <TableCell className='py-1'>
-                      <Checkbox
-                        checked={selectedKeyIds.has(key.id)}
-                        onCheckedChange={(value) => toggleKey(key.id, !!value)}
-                        aria-label={t('Select key')}
-                      />
-                    </TableCell>
-                    <TableCell className='max-w-48 truncate py-1 font-medium'>
-                      {key.name || '-'}
-                    </TableCell>
-                    <TableCell className='py-1 font-mono text-xs'>
-                      {revealed || key.masked_key || '****'}
-                    </TableCell>
-                    <TableCell className='py-1'>
-                      {groupName || key.group_id || '-'}
-                    </TableCell>
-                    <TableCell className='py-1'>
-                      {typeof ratio === 'number'
-                        ? `×${formatUpstreamBalance(ratio)}`
-                        : '-'}
-                    </TableCell>
-                    <TableCell className='py-1'>{key.status || '-'}</TableCell>
-                    <TableCell className='py-1'>
-                      {key.imported ? t('Yes') : t('No')}
-                    </TableCell>
-                    <TableCell className='py-1'>
-                      <div className='flex justify-end gap-1'>
-                        <Button
-                          variant='ghost'
-                          size='icon-sm'
-                          aria-label={
-                            revealed ? t('Hide key') : t('Reveal key')
+        {keys.length > 0 && (
+          <div className='overflow-x-auto rounded-md border'>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className='h-9 w-10'>
+                    <Checkbox
+                      checked={allSelected}
+                      indeterminate={someSelected}
+                      onCheckedChange={(value) => toggleAll(!!value)}
+                      aria-label={t('Select all keys')}
+                    />
+                  </TableHead>
+                  <TableHead className='h-9'>{t('Name')}</TableHead>
+                  <TableHead className='h-9'>{t('Key')}</TableHead>
+                  <TableHead className='h-9'>{t('Group')}</TableHead>
+                  <TableHead className='h-9'>{t('Multiplier')}</TableHead>
+                  <TableHead className='h-9'>{t('Status')}</TableHead>
+                  <TableHead className='h-9'>{t('Imported')}</TableHead>
+                  <TableHead className='h-9 w-28 text-right'>
+                    {t('Actions')}
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody className='[&>tr]:h-11'>
+                {keys.map((key) => {
+                  const revealed = revealedKeys[key.id]
+                  const keyGroup = key.group?.trim() || ''
+                  const ratioKey =
+                    key.group_id == null ? keyGroup : String(key.group_id)
+                  const ratioGroup = snapshot.groups.find(
+                    (group) =>
+                      (key.group_id != null && group.id === key.group_id) ||
+                      (!!keyGroup && group.name.trim() === keyGroup)
+                  )
+                  const groupName = ratioGroup?.name.trim() || keyGroup
+                  const upstreamRatio =
+                    snapshot.ratios[ratioKey] ?? ratioGroup?.ratio
+                  const ratio =
+                    typeof upstreamRatio === 'number'
+                      ? upstreamRatio *
+                        getEffectiveUpstreamMultiplier(channel.multiplier)
+                      : undefined
+                  let revealIcon = <Eye />
+                  if (revealingKeyId === key.id) {
+                    revealIcon = <LoaderCircle className='animate-spin' />
+                  } else if (revealed) {
+                    revealIcon = <EyeOff />
+                  }
+                  return (
+                    <TableRow key={key.id}>
+                      <TableCell className='py-1'>
+                        <Checkbox
+                          checked={selectedKeyIds.has(key.id)}
+                          onCheckedChange={(value) =>
+                            toggleKey(key.id, !!value)
                           }
-                          onClick={() => void revealKey(key.id)}
-                          disabled={revealingKeyId === key.id}
-                        >
-                          {revealIcon}
-                        </Button>
-                        {revealed && (
+                          aria-label={t('Select key')}
+                        />
+                      </TableCell>
+                      <TableCell className='max-w-48 truncate py-1 font-medium'>
+                        {key.name || '-'}
+                      </TableCell>
+                      <TableCell className='py-1 font-mono text-xs'>
+                        {revealed || key.masked_key || '****'}
+                      </TableCell>
+                      <TableCell className='py-1'>
+                        {groupName || key.group_id || '-'}
+                      </TableCell>
+                      <TableCell className='py-1'>
+                        {typeof ratio === 'number'
+                          ? `×${formatUpstreamBalance(ratio)}`
+                          : '-'}
+                      </TableCell>
+                      <TableCell className='py-1'>
+                        {key.status || '-'}
+                      </TableCell>
+                      <TableCell className='py-1'>
+                        {key.imported ? t('Yes') : t('No')}
+                      </TableCell>
+                      <TableCell className='py-1'>
+                        <div className='flex justify-end gap-1'>
                           <Button
                             variant='ghost'
                             size='icon-sm'
-                            aria-label={t('Copy key')}
-                            onClick={() => void copyKey(key.id)}
+                            aria-label={
+                              revealed ? t('Hide key') : t('Reveal key')
+                            }
+                            onClick={() => void revealKey(key.id)}
+                            disabled={revealingKeyId === key.id}
                           >
-                            <Copy />
+                            {revealIcon}
                           </Button>
-                        )}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        </div>
+                          {revealed && (
+                            <Button
+                              variant='ghost'
+                              size='icon-sm'
+                              aria-label={t('Copy key')}
+                              onClick={() => void copyKey(key.id)}
+                            >
+                              <Copy />
+                            </Button>
+                          )}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        )}
       </div>
       <UpstreamKeyImportDialog
         channel={channel}
