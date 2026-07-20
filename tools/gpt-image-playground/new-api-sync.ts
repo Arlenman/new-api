@@ -95,6 +95,10 @@ interface SyncEntry {
   hash: string
   deleted: boolean
   asset_id?: string
+  pending_asset_id?: string
+  pending_content_sha256?: string
+  pending_size_bytes?: number
+  pending_content_type?: string
   encoded_length?: number
   content_sha256?: string
   thumbnail_version?: number
@@ -125,6 +129,7 @@ interface LocalItem {
   payload: unknown
   createdAt: number
   hash: string
+  syncable?: boolean
   encodedLength?: number
   contentSha256?: string
   thumbnailVersion?: number
@@ -150,6 +155,12 @@ let remoteAppliedHandler: RemoteAppliedHandler | null = null
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function isBrowserOwnedRunningTask(value: unknown): boolean {
+  if (!isRecord(value) || value.status !== 'running') return false
+  const provider = typeof value.apiProvider === 'string' ? value.apiProvider : 'openai'
+  return provider !== 'fal' && !value.customTaskId
 }
 
 const sensitiveSyncFieldNames = new Set([
@@ -416,6 +427,7 @@ export async function canReuseImageSyncEntry(
   thumbnailVersion?: number,
 ): Promise<boolean> {
   if (!metadataEntry || metadataEntry.deleted) return false
+  if (metadataEntry.pending_asset_id) return false
   if (metadataEntry.encoded_length !== dataUrl.length) return false
   if (kind === 'thumbnail' && metadataEntry.thumbnail_version !== thumbnailVersion) return false
   if (!metadataEntry.content_sha256) return false
@@ -484,6 +496,7 @@ async function collectLocalItems(metadata: SyncMetadata): Promise<Map<string, Lo
       payload,
       createdAt: task.createdAt,
       hash: await hashPayload(payload),
+      syncable: !isBrowserOwnedRunningTask(task),
     }
     items.set(entryKey(item.kind, item.key), item)
   }
@@ -553,6 +566,10 @@ async function collectLocalItems(metadata: SyncMetadata): Promise<Map<string, Lo
   return items
 }
 
+function isAssetBackedKind(kind: string): boolean {
+  return kind === 'image' || kind === 'thumbnail'
+}
+
 async function uploadAsset(asset: NonNullable<LocalItem['asset']>): Promise<RemoteAsset> {
   return apiRequest<RemoteAsset>('/api/user-tools/assets/uploads', {
     method: 'POST',
@@ -568,13 +585,31 @@ async function uploadAsset(asset: NonNullable<LocalItem['asset']>): Promise<Remo
 async function buildMutations(localItems: Map<string, LocalItem>, metadata: SyncMetadata): Promise<Mutation[]> {
   const mutations: Mutation[] = []
   for (const [key, item] of localItems) {
+    if (item.syncable === false) continue
     const previous = metadata.entries[key]
-    if (previous && !previous.deleted && previous.hash === item.hash) continue
+    if (previous && !previous.deleted && !previous.pending_asset_id && previous.hash === item.hash) continue
 
     let payload = item.payload
     let assetIds: string[] = []
     if (item.asset) {
-      const asset = await uploadAsset(item.asset)
+      const pendingAsset = previous &&
+        previous.pending_asset_id &&
+        previous.pending_content_sha256 === item.asset.sha256 &&
+        previous.pending_size_bytes === item.asset.blob.size &&
+        previous.pending_content_type === (item.asset.blob.type || 'application/octet-stream')
+        ? { id: previous.pending_asset_id }
+        : null
+      const asset = pendingAsset || await uploadAsset(item.asset)
+      if (!pendingAsset) {
+        metadata.entries[key] = {
+          ...(previous || { revision: 0, hash: '', deleted: false }),
+          pending_asset_id: asset.id,
+          pending_content_sha256: item.asset.sha256,
+          pending_size_bytes: item.asset.blob.size,
+          pending_content_type: item.asset.blob.type || 'application/octet-stream',
+        }
+        writeMetadata(metadata)
+      }
       payload = { ...(isRecord(payload) ? payload : {}), asset_id: asset.id }
       assetIds = [asset.id]
     }
@@ -603,6 +638,7 @@ async function buildMutations(localItems: Map<string, LocalItem>, metadata: Sync
     if (previous.deleted || localItems.has(key)) continue
     const separatorIndex = key.indexOf('\u0000')
     if (separatorIndex < 0) continue
+    if (isAssetBackedKind(key.slice(0, separatorIndex)) && (previous.asset_id || previous.pending_asset_id)) continue
     mutations.push({
       client_mutation_id: `ip_${await sha256Hex(stableStringify({
         kind: key.slice(0, separatorIndex),
@@ -710,6 +746,41 @@ async function downloadAsset(assetId: string): Promise<Blob> {
   return response.blob()
 }
 
+async function restoreMissingImageAssets(metadata: SyncMetadata): Promise<void> {
+  for (const [metadataKey, entry] of Object.entries(metadata.entries)) {
+    if (entry.deleted) continue
+    const separatorIndex = metadataKey.indexOf('\u0000')
+    if (separatorIndex < 0) continue
+    const kind = metadataKey.slice(0, separatorIndex)
+    if (!isAssetBackedKind(kind)) continue
+    const key = metadataKey.slice(separatorIndex + 1)
+    const existing = kind === 'image'
+      ? await getImage(key)
+      : await getStoredImageThumbnail(key)
+    if (existing) continue
+
+    const assetId = entry.pending_asset_id || entry.asset_id
+    if (!assetId) continue
+    try {
+      const dataUrl = await blobToDataUrl(await downloadAsset(assetId))
+      if (kind === 'image') {
+        await putImage({ id: key, dataUrl })
+      } else {
+        await putImageThumbnail({
+          id: key,
+          thumbnailDataUrl: dataUrl,
+          thumbnailVersion: entry.thumbnail_version,
+        })
+      }
+    } catch (error) {
+      console.warn(
+        `New API image playground asset recovery deferred (${kind}/${key}):`,
+        error,
+      )
+    }
+  }
+}
+
 async function applyRemoteItem(
   item: RemoteItem,
   metadata: SyncMetadata,
@@ -791,9 +862,11 @@ async function applyRemoteItemAndUpdateMetadata(
   const known = metadata.entries[key]
   if (!force && known && known.revision >= item.revision) return
 
-  const itemResult = await applyRemoteItem(item, metadata, known?.asset_id)
-  applied.stateChanged ||= itemResult.stateChanged
-  applied.dataChanged ||= itemResult.dataChanged
+  if (!(item.kind === 'task' && isBrowserOwnedRunningTask(item.payload))) {
+    const itemResult = await applyRemoteItem(item, metadata, known?.asset_id)
+    applied.stateChanged ||= itemResult.stateChanged
+    applied.dataChanged ||= itemResult.dataChanged
+  }
   metadata.entries[key] = {
     revision: item.revision,
     hash: await remoteItemHash(item),
@@ -810,6 +883,7 @@ async function performSync(): Promise<ImagePlaygroundSyncResult> {
   if (!userId) return { stateChanged: false, dataChanged: false }
 
   const metadata = readMetadata()
+  await restoreMissingImageAssets(metadata)
   const localItems = await collectLocalItems(metadata)
   const mutations = await buildMutations(localItems, metadata)
   const applied = { stateChanged: false, dataChanged: false }

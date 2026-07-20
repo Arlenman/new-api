@@ -520,6 +520,84 @@ test('first sync restores remote image and task into an empty browser without up
   )
 })
 
+
+test('keeps browser-owned OpenAI running tasks local while syncing recoverable and terminal tasks', async () => {
+  const storedTasks = []
+  const syncBodies = []
+  const localTasks = [
+    { id: 'local-openai-running', status: 'running', apiProvider: 'openai', createdAt: 1 },
+    { id: 'local-fal-running', status: 'running', apiProvider: 'fal', falRequestId: 'fal-1', createdAt: 2 },
+    { id: 'local-custom-running', status: 'running', apiProvider: 'custom', customTaskId: 'custom-1', createdAt: 3 },
+    { id: 'local-done', status: 'done', apiProvider: 'openai', createdAt: 4 },
+  ]
+  const remoteOpenAIRunning = remoteItem({
+    kind: 'task',
+    key: 'remote-openai-running',
+    status: 'running',
+    payload: { id: 'remote-openai-running', status: 'running', apiProvider: 'openai', createdAt: 5 },
+  })
+  const remoteFalRunning = remoteItem({
+    kind: 'task',
+    key: 'remote-fal-running',
+    status: 'running',
+    payload: { id: 'remote-fal-running', status: 'running', apiProvider: 'fal', falRequestId: 'fal-2', createdAt: 6 },
+  })
+  const remoteCustomRunning = remoteItem({
+    kind: 'task',
+    key: 'remote-custom-running',
+    status: 'running',
+    payload: { id: 'remote-custom-running', status: 'running', apiProvider: 'custom', customTaskId: 'custom-2', createdAt: 7 },
+  })
+  const remoteDone = remoteItem({
+    kind: 'task',
+    key: 'remote-done',
+    status: 'done',
+    payload: { id: 'remote-done', status: 'done', apiProvider: 'openai', createdAt: 8 },
+  })
+  const fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url
+    if (url === '/api/user-tools/image-playground/sync') {
+      syncBodies.push(JSON.parse(init.body))
+      return jsonEnvelope({ results: [], cursor: 0 })
+    }
+    if (url.startsWith('/api/user-tools/image-playground/bootstrap?')) {
+      return jsonEnvelope({
+        items: [remoteOpenAIRunning, remoteFalRunning, remoteCustomRunning, remoteDone],
+        assets: [],
+        cursor: 12,
+        next_after_id: '',
+        has_more: false,
+      })
+    }
+    if (url.startsWith('/api/user-tools/image-playground/changes?cursor=12')) {
+      return jsonEnvelope({ items: [], assets: [], next_cursor: 12, has_more: false })
+    }
+    throw new Error(`Unexpected request: ${url}`)
+  }
+  const { module } = loadSyncModule({
+    db: {
+      getAllTasks: async () => localTasks,
+      putTask: async (task) => storedTasks.push(task),
+    },
+    globals: { fetch },
+  })
+
+  const result = await module.initializeNewApiImagePlaygroundSync()
+
+  const taskMutations = syncBodies.flatMap((body) => body.mutations.filter((mutation) => mutation.kind === 'task'))
+  assert.deepEqual(taskMutations.map((mutation) => mutation.key).sort(), [
+    'local-custom-running',
+    'local-done',
+    'local-fal-running',
+  ])
+  assert.deepEqual(storedTasks.map((task) => task.id).sort(), [
+    'remote-custom-running',
+    'remote-done',
+    'remote-fal-running',
+  ])
+  assert.equal(result.dataChanged, true)
+})
+
 test('performSync removes sensitive fields and credential-shaped values from the final sync request body', async () => {
   const metadataKey = 'new-api-image-playground-metadata-user-7'
   const storageKey = 'new-api-image-playground-state-user-7'
@@ -772,4 +850,186 @@ test('performSync removes sensitive fields and credential-shaped values from the
     },
   })
   assert.equal(payloadByKind.state.prompt, 'Ordinary state prompt with https://images.example.test/reference.png')
+})
+
+test('restores a locally evicted image from its server asset without uploading a tombstone', async () => {
+  const dataUrl = 'data:image/png;base64,AA=='
+  const assetId = 'asset-restored-after-local-eviction'
+  const metadataKey = 'new-api-image-playground-metadata-user-7'
+  const localStorage = createLocalStorage({
+    [metadataKey]: JSON.stringify({
+      cursor: 10,
+      entries: {
+        ['image\u0000evicted-image']: {
+          revision: 3,
+          hash: 'server-image-hash',
+          deleted: false,
+          asset_id: assetId,
+          encoded_length: dataUrl.length,
+          content_sha256: sha256(Buffer.from([0])),
+        },
+        ['state\u0000app']: {
+          revision: 1,
+          hash: sha256('{}'),
+          deleted: false,
+        },
+      },
+    }),
+  })
+  const images = new Map()
+  const syncBodies = []
+  const requests = []
+  const fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url
+    requests.push(url)
+    if (url === `/api/user-tools/assets/${assetId}/content`) {
+      return new Response(Uint8Array.from([0]), {
+        headers: { 'Content-Type': 'image/png' },
+      })
+    }
+    if (url === '/api/user-tools/image-playground/sync') {
+      syncBodies.push(JSON.parse(init.body))
+      return jsonEnvelope({ results: [], cursor: 10 })
+    }
+    if (url.startsWith('/api/user-tools/image-playground/changes?cursor=10')) {
+      return jsonEnvelope({
+        items: [],
+        assets: [],
+        next_cursor: 10,
+        has_more: false,
+      })
+    }
+    throw new Error(`Unexpected request: ${url}`)
+  }
+  const { module } = loadSyncModule({
+    db: {
+      getAllImageIds: async () => [...images.keys()],
+      getImage: async (id) => images.get(id),
+      putImage: async (image) => images.set(image.id, image),
+    },
+    globals: { localStorage, fetch },
+  })
+
+  await module.initializeNewApiImagePlaygroundSync()
+
+  assert.equal(images.get('evicted-image').dataUrl, dataUrl)
+  assert.equal(syncBodies.length, 0)
+  assert.deepEqual(requests, [
+    `/api/user-tools/assets/${assetId}/content`,
+    '/api/user-tools/image-playground/changes?cursor=10&limit=500',
+  ])
+})
+
+test('checkpoints successful uploads so a later 429 retry does not re-upload earlier images', async () => {
+  const metadataKey = 'new-api-image-playground-metadata-user-7'
+  const localStorage = createLocalStorage()
+  const images = new Map([
+    ['image-a', { id: 'image-a', dataUrl: 'data:image/png;base64,AA==', createdAt: 1, source: 'generated' }],
+    ['image-b', { id: 'image-b', dataUrl: 'data:image/png;base64,AQ==', createdAt: 2, source: 'generated' }],
+  ])
+  const db = {
+    getAllImageIds: async () => [...images.keys()],
+    getImage: async (id) => images.get(id),
+  }
+  const firstUploadNames = []
+  const firstFetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url
+    if (url === '/api/user-tools/assets/uploads') {
+      firstUploadNames.push(new Headers(init.headers).get('X-File-Name'))
+      if (firstUploadNames.length === 2) return new Response('', { status: 429 })
+      return jsonEnvelope({
+        id: 'asset-image-a',
+        sha256: new Headers(init.headers).get('X-Content-SHA256'),
+        filename: firstUploadNames[0],
+        content_type: new Headers(init.headers).get('Content-Type'),
+        size_bytes: init.body.size,
+        created_at: 1,
+        updated_at: 1,
+      })
+    }
+    throw new Error(`Unexpected request during first sync: ${url}`)
+  }
+  const first = loadSyncModule({ db, globals: { localStorage, fetch: firstFetch } })
+
+  await first.module.initializeNewApiImagePlaygroundSync()
+
+  assert.deepEqual(firstUploadNames, ['image-a.png', 'image-b.png'])
+  const checkpoint = JSON.parse(localStorage.value(metadataKey))
+    .entries['image\u0000image-a']
+  assert.equal(checkpoint.pending_asset_id, 'asset-image-a')
+  assert.equal(checkpoint.pending_content_sha256, sha256(Buffer.from([0])))
+
+  const secondUploadNames = []
+  const syncBodies = []
+  const secondFetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url
+    if (url === '/api/user-tools/assets/uploads') {
+      const filename = new Headers(init.headers).get('X-File-Name')
+      secondUploadNames.push(filename)
+      return jsonEnvelope({
+        id: 'asset-image-b',
+        sha256: new Headers(init.headers).get('X-Content-SHA256'),
+        filename,
+        content_type: new Headers(init.headers).get('Content-Type'),
+        size_bytes: init.body.size,
+        created_at: 2,
+        updated_at: 2,
+      })
+    }
+    if (url === '/api/user-tools/image-playground/sync') {
+      const body = JSON.parse(init.body)
+      syncBodies.push(body)
+      return jsonEnvelope({
+        results: body.mutations.map((mutation) => ({
+          client_mutation_id: mutation.client_mutation_id,
+          kind: mutation.kind,
+          key: mutation.key,
+          result: 'applied',
+          item: remoteItem({
+            kind: mutation.kind,
+            key: mutation.key,
+            revision: 1,
+            status: mutation.status,
+            payload: mutation.payload,
+            asset_ids: mutation.asset_ids,
+            deleted: mutation.deleted,
+          }),
+        })),
+        cursor: 1,
+      })
+    }
+    if (url.startsWith('/api/user-tools/image-playground/bootstrap?')) {
+      return jsonEnvelope({
+        items: [],
+        assets: [],
+        cursor: 1,
+        next_after_id: '',
+        has_more: false,
+      })
+    }
+    if (url.startsWith('/api/user-tools/image-playground/changes?cursor=1')) {
+      return jsonEnvelope({
+        items: [],
+        assets: [],
+        next_cursor: 1,
+        has_more: false,
+      })
+    }
+    throw new Error(`Unexpected request during resumed sync: ${url}`)
+  }
+  const second = loadSyncModule({ db, globals: { localStorage, fetch: secondFetch } })
+
+  await second.module.initializeNewApiImagePlaygroundSync()
+
+  assert.deepEqual(secondUploadNames, ['image-b.png'])
+  assert.equal(syncBodies.length, 1)
+  const imageMutations = syncBodies[0].mutations.filter((mutation) => mutation.kind === 'image')
+  assert.deepEqual(imageMutations.map((mutation) => mutation.asset_ids[0]), [
+    'asset-image-a',
+    'asset-image-b',
+  ])
+  const entries = JSON.parse(localStorage.value(metadataKey)).entries
+  assert.equal(entries['image\u0000image-a'].pending_asset_id, undefined)
+  assert.equal(entries['image\u0000image-a'].asset_id, 'asset-image-a')
+  assert.equal(entries['image\u0000image-b'].asset_id, 'asset-image-b')
 })

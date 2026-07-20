@@ -132,7 +132,7 @@ const DB_CLEAR_IMAGE_COMPLETE_REPLACEMENT = `        tx.objectStore(STORE_IMAGES
 const STORE_IMPORT_MARKER = `import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 `
-const STORE_IMPORT_REPLACEMENT = `${STORE_IMPORT_MARKER}import { getNewApiImagePlaygroundStorageKey, getNewApiImagePlaygroundUserId } from './lib/newApiStorage'
+const STORE_IMPORT_REPLACEMENT = `${STORE_IMPORT_MARKER}import { getNewApiImagePlaygroundStorageKey } from './lib/newApiStorage'
 import { initializeNewApiImagePlaygroundSync, type ImagePlaygroundSyncResult } from './lib/newApiSync'
 `
 const STORE_PERSIST_NAME_MARKER = `      name: 'gpt-image-playground',
@@ -179,12 +179,6 @@ export async function initStore() {
   const initialSyncResult = await initializeNewApiImagePlaygroundSync(refreshNewApiImagePlaygroundStore)
   if (initialSyncResult.stateChanged) await useStore.persist.rehydrate()
   const legacyAgentConversations = normalizeAgentConversations(useStore.getState().agentConversations)
-`
-const STORE_INTERRUPTED_TASKS_MARKER = `  const { tasks: markedTasks, interruptedTasks } = markInterruptedOpenAIRunningTasks(storedTasks)
-`
-const STORE_INTERRUPTED_TASKS_REPLACEMENT = `  const { tasks: markedTasks, interruptedTasks } = getNewApiImagePlaygroundUserId()
-    ? { tasks: storedTasks, interruptedTasks: [] }
-    : markInterruptedOpenAIRunningTasks(storedTasks)
 `
 const SERVICE_WORKER_MARKER = `if ('serviceWorker' in navigator) {
   if (import.meta.env.PROD) {
@@ -1088,14 +1082,8 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
     STORE_REFRESH_REPLACEMENT,
     'store synchronization initialization',
   )
-  const storeWithInterruptedTaskHandling = replaceExactlyOnce(
-    storeWithInitialization,
-    STORE_INTERRUPTED_TASKS_MARKER,
-    STORE_INTERRUPTED_TASKS_REPLACEMENT,
-    'interrupted task handling',
-  )
   const storeWithPersistence = replaceExactlyOnce(
-    storeWithInterruptedTaskHandling,
+    storeWithInitialization,
     PERSISTENCE_MARKER,
     PERSISTENCE_REPLACEMENT,
     'persistence',
