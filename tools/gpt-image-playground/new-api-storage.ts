@@ -1,7 +1,8 @@
 const LEGACY_DATABASE_NAME = 'gpt-image-playground'
 const STORAGE_NAMESPACE = 'new-api-user'
-const USER_ID_STORAGE_KEY = 'uid'
 const MIGRATION_VERSION = 1
+const LEGACY_MIGRATION_OWNER_KEY = `new-api:image-playground:legacy-migration-owner:v${MIGRATION_VERSION}`
+const LEGACY_MIGRATION_MARKER_PATTERN = /^new-api:image-playground:(?:local-storage|indexed-db)-migration:v\d+:(\d+)(?::|$)/
 
 export const NEW_API_IMAGE_PLAYGROUND_STORAGE_CHANGED_EVENT = 'new-api:image-playground:storage-changed'
 
@@ -16,26 +17,72 @@ function getLocalStorage(): Storage | null {
   }
 }
 
+declare global {
+  interface Window {
+    __NEW_API_USER_ID__?: number | string
+  }
+}
+
+function normalizeInjectedUserId(value: unknown): string | null {
+  if (typeof value === 'string' && !/^\d+$/.test(value)) return null
+  if (typeof value !== 'string' && typeof value !== 'number') return null
+
+  const numericValue = Number(value)
+  if (!Number.isSafeInteger(numericValue) || numericValue <= 0) return null
+  return String(numericValue)
+}
+
+function isValidUserId(value: string | null | undefined): value is string {
+  return Boolean(value && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) > 0)
+}
+
+const injectedUserId = typeof window === 'undefined'
+  ? null
+  : normalizeInjectedUserId(window.__NEW_API_USER_ID__)
+
+function requireInjectedUserId(): string {
+  if (!injectedUserId) throw new Error('New API authenticated user identity is required')
+  return injectedUserId
+}
+
+function claimLegacyMigrationOwner(storage: Storage, userId: string): string | null {
+  const savedOwner = storage.getItem(LEGACY_MIGRATION_OWNER_KEY)?.trim()
+  if (isValidUserId(savedOwner)) return savedOwner
+
+  let migratedOwner: string | null = null
+  for (let index = 0; index < storage.length; index += 1) {
+    const key = storage.key(index)
+    if (!key || storage.getItem(key) !== 'done') continue
+    const markerMatch = LEGACY_MIGRATION_MARKER_PATTERN.exec(key)
+    if (markerMatch && isValidUserId(markerMatch[1])) {
+      migratedOwner = markerMatch[1]
+      break
+    }
+  }
+
+  storage.setItem(LEGACY_MIGRATION_OWNER_KEY, migratedOwner ?? userId)
+  const claimedOwner = storage.getItem(LEGACY_MIGRATION_OWNER_KEY)?.trim()
+  return isValidUserId(claimedOwner) ? claimedOwner : null
+}
+
 export function getNewApiImagePlaygroundUserId(): string | null {
-  const value = getLocalStorage()?.getItem(USER_ID_STORAGE_KEY)?.trim()
-  if (!value || !/^\d+$/.test(value) || Number(value) <= 0) return null
-  return value
+  return injectedUserId
 }
 
 export function getNewApiImagePlaygroundDatabaseName(): string {
-  const userId = getNewApiImagePlaygroundUserId()
-  return userId ? `${LEGACY_DATABASE_NAME}:${STORAGE_NAMESPACE}:${userId}` : LEGACY_DATABASE_NAME
+  const userId = requireInjectedUserId()
+  return `${LEGACY_DATABASE_NAME}:${STORAGE_NAMESPACE}:${userId}`
 }
 
 export function getNewApiImagePlaygroundStorageKey(baseKey = LEGACY_DATABASE_NAME): string {
-  const userId = getNewApiImagePlaygroundUserId()
-  if (!userId) return baseKey
+  const userId = requireInjectedUserId()
 
   const storage = getLocalStorage()
   const namespacedKey = `${baseKey}:${STORAGE_NAMESPACE}:${userId}`
   const markerKey = `new-api:image-playground:local-storage-migration:v${MIGRATION_VERSION}:${userId}:${baseKey}`
   if (storage && storage.getItem(markerKey) !== 'done') {
-    if (storage.getItem(namespacedKey) == null) {
+    const migrationOwner = claimLegacyMigrationOwner(storage, userId)
+    if (migrationOwner === userId && storage.getItem(namespacedKey) == null) {
       const legacyValue = storage.getItem(baseKey)
       if (legacyValue != null) storage.setItem(namespacedKey, legacyValue)
     }
@@ -170,6 +217,10 @@ export function ensureLegacyImagePlaygroundIndexedDBMigration(
       ? `new-api:image-playground:indexed-db-migration:v${MIGRATION_VERSION}:${userId}`
       : null
     if (markerKey && storage?.getItem(markerKey) === 'done') return
+    if (!userId || !storage || claimLegacyMigrationOwner(storage, userId) !== userId) {
+      if (markerKey) storage?.setItem(markerKey, 'done')
+      return
+    }
 
     const target = await openDatabase(databaseName, databaseVersion, storeNames)
     try {

@@ -27,8 +27,12 @@ export function isImagePlaygroundPath(pathname: string): boolean {
 }
 
 export function shouldKeepImagePlaygroundMounted(
-  hasMounted: boolean,
+  mountedUserId: number | null,
+  currentUserId: number | null | undefined,
   active: boolean
 ): boolean {
-  return hasMounted || active
+  return Boolean(
+    currentUserId &&
+      (active || mountedUserId === currentUserId)
+  )
 }

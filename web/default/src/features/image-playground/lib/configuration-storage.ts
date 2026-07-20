@@ -16,73 +16,21 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { ImagePlaygroundMode } from './bridge'
-
-interface StoredImagePlaygroundConfiguration {
-  userId: number
-  mode: ImagePlaygroundMode
-  customApiUrl: string
-  customApiKey: string
-}
-
-export interface RememberedImagePlaygroundConfiguration {
-  mode: ImagePlaygroundMode
-  customApiUrl: string
-  customApiKey: string
+interface ImagePlaygroundConfigurationStorage {
+  getItem(key: string): string | null
+  removeItem(key: string): void
 }
 
 export const IMAGE_PLAYGROUND_CONFIGURATION_STORAGE_KEY =
   'new-api:image-playground:configuration'
 
-export function normalizeImagePlaygroundApiUrl(value: string): string | null {
-  const trimmed = value.trim()
-  if (!trimmed) return null
-
-  try {
-    const url = new URL(trimmed)
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
-    return url.toString().replace(/\/+$/, '')
-  } catch {
-    return null
+export function resolveImagePlaygroundHostMode(
+  storage: ImagePlaygroundConfigurationStorage
+): 'new-api' {
+  if (
+    storage.getItem(IMAGE_PLAYGROUND_CONFIGURATION_STORAGE_KEY) !== null
+  ) {
+    storage.removeItem(IMAGE_PLAYGROUND_CONFIGURATION_STORAGE_KEY)
   }
-}
-
-export function serializeImagePlaygroundConfiguration(
-  userId: number,
-  configuration: RememberedImagePlaygroundConfiguration
-): string {
-  return JSON.stringify({
-    userId,
-    mode: configuration.mode,
-    customApiUrl: configuration.customApiUrl.trim(),
-    customApiKey: configuration.customApiKey.trim(),
-  } satisfies StoredImagePlaygroundConfiguration)
-}
-
-export function parseImagePlaygroundConfiguration(
-  value: string | null,
-  userId: number
-): RememberedImagePlaygroundConfiguration | null {
-  if (!value) return null
-
-  try {
-    const parsed = JSON.parse(
-      value
-    ) as Partial<StoredImagePlaygroundConfiguration>
-    if (parsed.userId !== userId) return null
-    if (parsed.mode !== 'new-api' && parsed.mode !== 'tool') return null
-    if (
-      typeof parsed.customApiUrl !== 'string' ||
-      typeof parsed.customApiKey !== 'string'
-    ) {
-      return null
-    }
-    return {
-      mode: parsed.mode,
-      customApiUrl: parsed.customApiUrl,
-      customApiKey: parsed.customApiKey,
-    }
-  } catch {
-    return null
-  }
+  return 'new-api'
 }

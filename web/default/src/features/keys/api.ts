@@ -29,6 +29,7 @@ import type {
   FetchApiKeyIPLocationsItem,
   ApiKeyIPLocationResult,
 } from './types'
+import { loadAllApiKeyPages } from './all-api-keys'
 
 // ============================================================================
 // API Key Management
@@ -41,6 +42,15 @@ export async function getApiKeys(
   const { p = 1, size = 10 } = params
   const res = await api.get(`/api/token/?p=${p}&size=${size}`)
   return res.data
+}
+
+// Load every API key owned by the current user. The backend caps each page at
+// 100 items, so tool integrations must page instead of silently hiding keys
+// beyond the first page.
+export async function getAllApiKeys(): Promise<GetApiKeysResponse> {
+  return loadAllApiKeyPages((page, pageSize) =>
+    getApiKeys({ p: page, size: pageSize })
+  )
 }
 
 // Search API keys by keyword or token (with pagination)

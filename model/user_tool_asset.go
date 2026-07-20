@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"os"
 	"path/filepath"
 	"sort"
@@ -53,47 +54,107 @@ func StoreUserToolAsset(userID int, filename, contentType, claimedSha256 string,
 	}
 
 	var existing UserToolAsset
-	err = DB.Where("user_id = ? AND sha256 = ? AND deleted = ?", userID, digest, false).First(&existing).Error
-	if err == nil {
-		return &existing, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
+	err = DB.Where("user_id = ? AND sha256 = ?", userID, digest).First(&existing).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
 
 	relativePath := filepath.Join(fmt.Sprintf("%d", userID), digest[:2], digest)
 	absolutePath := filepath.Join(root, relativePath)
-	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o750); err != nil {
-		return nil, err
+	assetFileReady := false
+	if fileInfo, statErr := os.Stat(absolutePath); statErr == nil {
+		if !fileInfo.Mode().IsRegular() {
+			return nil, errors.New("asset storage path is not a regular file")
+		}
+		assetFileReady = fileInfo.Size() == written
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return nil, statErr
 	}
-	if _, statErr := os.Stat(absolutePath); errors.Is(statErr, os.ErrNotExist) {
+	if err == nil && !existing.Deleted && existing.StoragePath == relativePath && assetFileReady {
+		return &existing, nil
+	}
+	if !assetFileReady {
+		if err := os.MkdirAll(filepath.Dir(absolutePath), 0o750); err != nil {
+			return nil, err
+		}
 		if err := os.Rename(tempPath, absolutePath); err != nil {
 			return nil, err
 		}
 		if err := os.Chmod(absolutePath, 0o640); err != nil {
 			return nil, err
 		}
-	} else if statErr != nil {
-		return nil, statErr
 	}
 
 	now := time.Now().UnixMilli()
+	filename = sanitizeUserToolAssetFilename(filename)
+	if filename == "" {
+		filename = digest
+	}
+	contentType = NormalizeUserToolAssetContentType(contentType)
+	if err == nil && !existing.Deleted {
+		updateResult := DB.Model(&UserToolAsset{}).
+			Where("id = ? AND user_id = ? AND deleted = ?", existing.ID, userID, false).
+			Updates(map[string]any{
+				"size_bytes":   written,
+				"storage_path": relativePath,
+				"updated_time": now,
+			})
+		if updateResult.Error != nil {
+			return nil, updateResult.Error
+		}
+		if updateResult.RowsAffected == 0 {
+			var active UserToolAsset
+			if lookupErr := DB.Where("user_id = ? AND sha256 = ? AND deleted = ?", userID, digest, false).First(&active).Error; lookupErr == nil {
+				return &active, nil
+			}
+			return nil, errors.New("asset repair raced with another mutation")
+		}
+		existing.SizeBytes = written
+		existing.StoragePath = relativePath
+		existing.UpdatedTime = now
+		return &existing, nil
+	}
+	if err == nil && existing.Deleted {
+		updates := map[string]any{
+			"filename":     filename,
+			"content_type": contentType,
+			"size_bytes":   written,
+			"storage_path": relativePath,
+			"updated_time": now,
+			"deleted":      false,
+		}
+		updateResult := DB.Model(&UserToolAsset{}).
+			Where("id = ? AND user_id = ? AND deleted = ?", existing.ID, userID, true).
+			Updates(updates)
+		if updateResult.Error != nil {
+			return nil, updateResult.Error
+		}
+		if updateResult.RowsAffected == 0 {
+			var active UserToolAsset
+			if lookupErr := DB.Where("user_id = ? AND sha256 = ? AND deleted = ?", userID, digest, false).First(&active).Error; lookupErr == nil {
+				return &active, nil
+			}
+			return nil, errors.New("asset reactivation raced with another upload")
+		}
+		existing.Filename = filename
+		existing.ContentType = contentType
+		existing.SizeBytes = written
+		existing.StoragePath = relativePath
+		existing.UpdatedTime = now
+		existing.Deleted = false
+		return &existing, nil
+	}
+
 	asset := &UserToolAsset{
 		ID:          "uta_" + common.GetUUID(),
 		UserID:      userID,
 		Sha256:      digest,
-		Filename:    sanitizeUserToolAssetFilename(filename),
-		ContentType: strings.TrimSpace(contentType),
+		Filename:    filename,
+		ContentType: contentType,
 		SizeBytes:   written,
 		StoragePath: relativePath,
 		CreatedTime: now,
 		UpdatedTime: now,
-	}
-	if asset.Filename == "" {
-		asset.Filename = digest
-	}
-	if asset.ContentType == "" {
-		asset.ContentType = "application/octet-stream"
 	}
 	if err := DB.Create(asset).Error; err != nil {
 		var raced UserToolAsset
@@ -126,6 +187,23 @@ func ResolveUserToolAsset(userID int, assetID string) (*UserToolAsset, string, e
 	return &asset, absolutePath, nil
 }
 
+func GetUserToolItemAssetIDsByItemIDs(userID int, itemIDs []string) (map[string][]string, error) {
+	result := make(map[string][]string, len(itemIDs))
+	if userID <= 0 || len(itemIDs) == 0 {
+		return result, nil
+	}
+
+	var links []UserToolItemAsset
+	if err := DB.Where("user_id = ? AND item_id IN ?", userID, itemIDs).
+		Order("item_id ASC, asset_id ASC").Find(&links).Error; err != nil {
+		return nil, err
+	}
+	for _, link := range links {
+		result[link.ItemID] = append(result[link.ItemID], link.AssetID)
+	}
+	return result, nil
+}
+
 func GetUserToolAssetsByIDs(userID int, assetIDSet map[string]struct{}) ([]UserToolAsset, error) {
 	if len(assetIDSet) == 0 {
 		return []UserToolAsset{}, nil
@@ -149,8 +227,18 @@ func sanitizeUserToolAssetFilename(filename string) string {
 		}
 		return r
 	}, filename)
-	if len(filename) > 255 {
-		filename = filename[:255]
+	runes := []rune(filename)
+	if len(runes) > 255 {
+		filename = string(runes[:255])
 	}
 	return filename
+}
+
+func NormalizeUserToolAssetContentType(contentType string) string {
+	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(contentType))
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	if err != nil || mediaType == "" || len(mediaType) > 150 {
+		return "application/octet-stream"
+	}
+	return mediaType
 }

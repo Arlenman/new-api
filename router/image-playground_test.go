@@ -98,12 +98,14 @@ func TestImagePlaygroundSessionAuthWorksWithoutDashboardHeaderAndAuthFailuresAre
 	require.Equal(t, http.StatusNoContent, login.Code)
 	require.NotEmpty(t, login.Result().Cookies())
 
-	authenticatedRequest := httptest.NewRequest(http.MethodGet, imagePlaygroundRoute+"/", nil)
+	authenticatedRequest := httptest.NewRequest(http.MethodGet, imagePlaygroundRoute+"/?new_api_user=456", nil)
 	authenticatedRequest.AddCookie(login.Result().Cookies()[0])
 	authenticated := httptest.NewRecorder()
 	engine.ServeHTTP(authenticated, authenticatedRequest)
 
 	assert.Equal(t, http.StatusOK, authenticated.Code)
+	assert.Contains(t, authenticated.Body.String(), "window.__NEW_API_USER_ID__=123")
+	assert.NotContains(t, authenticated.Body.String(), "window.__NEW_API_USER_ID__=456")
 	assert.Equal(t, "no-cache", authenticated.Header().Get("Cache-Control"))
 	assert.Contains(t, authenticated.Body.String(), "tool index")
 }

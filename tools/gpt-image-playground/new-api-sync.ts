@@ -28,7 +28,8 @@ const TOOL = 'image-playground'
 const SCHEMA_VERSION = 1
 const SYNC_DEBOUNCE_MS = 750
 const SYNC_INTERVAL_MS = 30_000
-const MAX_CHANGE_PAGES = 20
+const MAX_SYNC_PAGES = 10_000
+const BOOTSTRAP_PAGE_SIZE = 100
 
 interface ApiEnvelope<T> {
   success: boolean
@@ -60,10 +61,12 @@ interface RemoteAsset {
   updated_at: number
 }
 
-interface RemoteBatch {
+interface BootstrapBatch {
   items: RemoteItem[]
   assets: RemoteAsset[]
   cursor: number
+  next_after_id: string
+  has_more: boolean
 }
 
 interface ChangeBatch {
@@ -74,9 +77,11 @@ interface ChangeBatch {
 }
 
 interface MutationResult {
+  client_mutation_id: string
   kind: string
   key: string
-  conflict: boolean
+  result: 'applied' | 'conflict' | 'error'
+  message?: string
   item?: RemoteItem
 }
 
@@ -90,6 +95,9 @@ interface SyncEntry {
   hash: string
   deleted: boolean
   asset_id?: string
+  encoded_length?: number
+  content_sha256?: string
+  thumbnail_version?: number
 }
 
 interface SyncMetadata {
@@ -98,6 +106,7 @@ interface SyncMetadata {
 }
 
 interface Mutation {
+  client_mutation_id: string
   kind: string
   key: string
   schema_version: number
@@ -116,6 +125,9 @@ interface LocalItem {
   payload: unknown
   createdAt: number
   hash: string
+  encodedLength?: number
+  contentSha256?: string
+  thumbnailVersion?: number
   asset?: {
     blob: Blob
     sha256: string
@@ -138,6 +150,105 @@ let remoteAppliedHandler: RemoteAppliedHandler | null = null
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+const sensitiveSyncFieldNames = new Set([
+  'apikey',
+  'baseurl',
+  'apiurl',
+  'authorization',
+  'accesstoken',
+  'refreshtoken',
+  'token',
+  'idtoken',
+  'authtoken',
+  'agenttoken',
+  'canvasagenttoken',
+  'runtimecredential',
+  'credential',
+  'secret',
+  'clientsecret',
+  'password',
+  'passphrase',
+  'privatekey',
+  'webdavurl',
+  'webdavusername',
+  'webdavpassword',
+  'webdavtoken',
+])
+
+const credentialValuePatterns = [
+  /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{8,}/gi,
+  /\butrs_[A-Za-z0-9._-]{8,}\b/g,
+  /\bsk-[A-Za-z0-9_-]{8,}\b/g,
+]
+
+function normalizedFieldName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+function redactSensitiveDiagnosticText(value: string): string {
+  let sanitized = value
+  for (const pattern of credentialValuePatterns) {
+    sanitized = sanitized.replace(pattern, '[REDACTED]')
+  }
+  return sanitized
+    .replace(/((?:api[-_ ]?key|base[-_ ]?url|api[-_ ]?url|authorization|access[-_ ]?token|refresh[-_ ]?token|agent[-_ ]?token|canvas[-_ ]?agent[-_ ]?token|runtime[-_ ]?credential|credential|password|secret|webdav[-_ ]?(?:url|username|password|token)|private[-_ ]?key)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1[REDACTED]')
+    .replace(/([?&](?:api[-_]?key|base[-_]?url|api[-_]?url|access[-_]?token|refresh[-_]?token|auth(?:orization)?|token|agent[-_]?token|runtime[-_]?credential|credential|password|secret|private[-_]?key|webdav[-_]?(?:url|username|password|token))=)[^&#\s]*/gi, '$1[REDACTED]')
+}
+
+function decodeJsonContainer(value: string): { value: unknown; encoded: boolean } {
+  const trimmed = value.trim()
+  if (!(
+    (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+    (trimmed.startsWith('[') && trimmed.endsWith(']'))
+  )) {
+    return { value, encoded: false }
+  }
+  try {
+    return { value: JSON.parse(value), encoded: true }
+  } catch {
+    return { value, encoded: false }
+  }
+}
+
+function sanitizeStructuredSyncData(value: unknown, redactDiagnostics = false): unknown {
+  if (typeof value === 'string') {
+    const decoded = decodeJsonContainer(value)
+    if (decoded.encoded) {
+      return JSON.stringify(sanitizeStructuredSyncData(decoded.value, redactDiagnostics))
+    }
+    return redactSensitiveDiagnosticText(value)
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeStructuredSyncData(item, redactDiagnostics))
+  }
+  if (!isRecord(value)) return value
+
+  const sanitized: Record<string, unknown> = {}
+  for (const [key, fieldValue] of Object.entries(value)) {
+    const normalizedKey = normalizedFieldName(key)
+    if (sensitiveSyncFieldNames.has(normalizedKey)) continue
+    if (redactDiagnostics && (normalizedKey === 'rawimageurls' || normalizedKey === 'rawresponsepayload')) continue
+    sanitized[key] = sanitizeStructuredSyncData(fieldValue, redactDiagnostics)
+  }
+  return sanitized
+}
+
+function sanitizePersistedInputImages(value: unknown): unknown {
+  if (!Array.isArray(value)) return value
+  return value.map((image) => isRecord(image) && typeof image.id === 'string'
+    ? { id: image.id, dataUrl: '' }
+    : image)
+}
+
+function sanitizePersistedInputDraft(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  return {
+    ...value,
+    inputImages: sanitizePersistedInputImages(value.inputImages),
+    maskDraft: null,
+  }
 }
 
 export function stableStringify(value: unknown): string {
@@ -229,7 +340,21 @@ function readSafePersistedState(): Record<string, unknown> {
     for (const safeKey of safeKeys) {
       if (safeKey in state) safeState[safeKey] = state[safeKey]
     }
-    return safeState
+    if ('inputImages' in safeState) {
+      safeState.inputImages = sanitizePersistedInputImages(safeState.inputImages)
+    }
+    if ('galleryInputDraft' in safeState) {
+      safeState.galleryInputDraft = sanitizePersistedInputDraft(safeState.galleryInputDraft)
+    }
+    if (isRecord(safeState.agentInputDrafts)) {
+      safeState.agentInputDrafts = Object.fromEntries(
+        Object.entries(safeState.agentInputDrafts).map(([conversationId, draft]) => [
+          conversationId,
+          sanitizePersistedInputDraft(draft),
+        ]),
+      )
+    }
+    return sanitizeStructuredSyncData(safeState) as Record<string, unknown>
   } catch {
     return {}
   }
@@ -284,6 +409,19 @@ function extensionForContentType(contentType: string) {
   return subtype.replace(/[^a-z0-9]+/g, '') || 'bin'
 }
 
+export async function canReuseImageSyncEntry(
+  kind: 'image' | 'thumbnail',
+  dataUrl: string,
+  metadataEntry: SyncEntry | undefined,
+  thumbnailVersion?: number,
+): Promise<boolean> {
+  if (!metadataEntry || metadataEntry.deleted) return false
+  if (metadataEntry.encoded_length !== dataUrl.length) return false
+  if (kind === 'thumbnail' && metadataEntry.thumbnail_version !== thumbnailVersion) return false
+  if (!metadataEntry.content_sha256) return false
+  return (await sha256Hex(dataUrlToBlob(dataUrl))) === metadataEntry.content_sha256
+}
+
 async function createImageItem(kind: 'image' | 'thumbnail', key: string, record: StoredImage | StoredImageThumbnail): Promise<LocalItem> {
   const dataUrl = kind === 'image'
     ? (record as StoredImage).dataUrl
@@ -299,6 +437,7 @@ async function createImageItem(kind: 'image' | 'thumbnail', key: string, record:
         height: record.height,
         content_sha256: contentSha256,
         content_type: blob.type || 'application/octet-stream',
+        encoded_length: dataUrl.length,
       }
     : {
         id: key,
@@ -307,6 +446,7 @@ async function createImageItem(kind: 'image' | 'thumbnail', key: string, record:
         thumbnailVersion: (record as StoredImageThumbnail).thumbnailVersion,
         content_sha256: contentSha256,
         content_type: blob.type || 'application/octet-stream',
+        encoded_length: dataUrl.length,
       }
   return {
     kind,
@@ -315,6 +455,9 @@ async function createImageItem(kind: 'image' | 'thumbnail', key: string, record:
     payload,
     createdAt: kind === 'image' ? (record as StoredImage).createdAt ?? Date.now() : Date.now(),
     hash: await hashPayload(payload),
+    encodedLength: dataUrl.length,
+    contentSha256,
+    thumbnailVersion: kind === 'thumbnail' ? (record as StoredImageThumbnail).thumbnailVersion : undefined,
     asset: {
       blob,
       sha256: contentSha256,
@@ -333,31 +476,34 @@ async function collectLocalItems(metadata: SyncMetadata): Promise<Map<string, Lo
   ])
 
   for (const task of tasks) {
+    const payload = sanitizeStructuredSyncData(task, true)
     const item: LocalItem = {
       kind: 'task',
       key: task.id,
       status: task.status,
-      payload: task,
+      payload,
       createdAt: task.createdAt,
-      hash: await hashPayload(task),
+      hash: await hashPayload(payload),
     }
     items.set(entryKey(item.kind, item.key), item)
   }
   for (const conversation of conversations) {
+    const payload = sanitizeStructuredSyncData(conversation)
     const item: LocalItem = {
       kind: 'agent-conversation',
       key: conversation.id,
       status: 'active',
-      payload: conversation,
+      payload,
       createdAt: conversation.createdAt,
-      hash: await hashPayload(conversation),
+      hash: await hashPayload(payload),
     }
     items.set(entryKey(item.kind, item.key), item)
   }
 
   for (const imageId of imageIds) {
     const metadataEntry = metadata.entries[entryKey('image', imageId)]
-    if (metadataEntry && !metadataEntry.deleted) {
+    const image = await getImage(imageId)
+    if (image && await canReuseImageSyncEntry('image', image.dataUrl, metadataEntry)) {
       items.set(entryKey('image', imageId), {
         kind: 'image',
         key: imageId,
@@ -368,7 +514,6 @@ async function collectLocalItems(metadata: SyncMetadata): Promise<Map<string, Lo
       })
       continue
     }
-    const image = await getImage(imageId)
     if (image) {
       const item = await createImageItem('image', imageId, image)
       items.set(entryKey(item.kind, item.key), item)
@@ -377,7 +522,8 @@ async function collectLocalItems(metadata: SyncMetadata): Promise<Map<string, Lo
 
   for (const imageId of thumbnailIds) {
     const metadataEntry = metadata.entries[entryKey('thumbnail', imageId)]
-    if (metadataEntry && !metadataEntry.deleted) {
+    const thumbnail = await getStoredImageThumbnail(imageId)
+    if (thumbnail && await canReuseImageSyncEntry('thumbnail', thumbnail.thumbnailDataUrl, metadataEntry, thumbnail.thumbnailVersion)) {
       items.set(entryKey('thumbnail', imageId), {
         kind: 'thumbnail',
         key: imageId,
@@ -388,7 +534,6 @@ async function collectLocalItems(metadata: SyncMetadata): Promise<Map<string, Lo
       })
       continue
     }
-    const thumbnail = await getStoredImageThumbnail(imageId)
     if (thumbnail) {
       const item = await createImageItem('thumbnail', imageId, thumbnail)
       items.set(entryKey(item.kind, item.key), item)
@@ -433,11 +578,19 @@ async function buildMutations(localItems: Map<string, LocalItem>, metadata: Sync
       payload = { ...(isRecord(payload) ? payload : {}), asset_id: asset.id }
       assetIds = [asset.id]
     }
+    const baseRevision = previous?.revision ?? 0
     mutations.push({
+      client_mutation_id: `ip_${await sha256Hex(stableStringify({
+        kind: item.kind,
+        key: item.key,
+        baseRevision,
+        hash: item.hash,
+        deleted: false,
+      }))}`,
       kind: item.kind,
       key: item.key,
       schema_version: SCHEMA_VERSION,
-      base_revision: previous?.revision ?? 0,
+      base_revision: baseRevision,
       status: item.status,
       payload,
       asset_ids: assetIds,
@@ -451,6 +604,13 @@ async function buildMutations(localItems: Map<string, LocalItem>, metadata: Sync
     const separatorIndex = key.indexOf('\u0000')
     if (separatorIndex < 0) continue
     mutations.push({
+      client_mutation_id: `ip_${await sha256Hex(stableStringify({
+        kind: key.slice(0, separatorIndex),
+        key: key.slice(separatorIndex + 1),
+        baseRevision: previous.revision,
+        hash: '',
+        deleted: true,
+      }))}`,
       kind: key.slice(0, separatorIndex),
       key: key.slice(separatorIndex + 1),
       schema_version: SCHEMA_VERSION,
@@ -465,34 +625,80 @@ async function buildMutations(localItems: Map<string, LocalItem>, metadata: Sync
   return mutations
 }
 
-async function fetchRemoteDelta(cursor: number): Promise<RemoteBatch> {
-  if (cursor === 0) {
-    const bootstrap = await apiRequest<RemoteBatch>(`/api/user-tools/${TOOL}/bootstrap`)
-    return bootstrap
+async function streamRemoteItems(
+  cursor: number,
+  applyBatch: (items: RemoteItem[]) => Promise<void>,
+): Promise<number> {
+  let nextCursor = cursor
+  if (nextCursor === 0) {
+    let afterId = ''
+    let snapshotCursor: number | null = null
+    const seenAfterIds = new Set<string>()
+    let completed = false
+
+    for (let page = 0; page < MAX_SYNC_PAGES; page += 1) {
+      const query = new URLSearchParams({ limit: String(BOOTSTRAP_PAGE_SIZE) })
+      if (afterId) query.set('after_id', afterId)
+      if (snapshotCursor !== null) query.set('snapshot_cursor', String(snapshotCursor))
+      const batch = await apiRequest<BootstrapBatch>(`/api/user-tools/${TOOL}/bootstrap?${query}`)
+      if (snapshotCursor === null) snapshotCursor = batch.cursor
+      else if (batch.cursor !== snapshotCursor) throw new Error('New API bootstrap snapshot changed during pagination')
+
+      await applyBatch(batch.items)
+      if (!batch.has_more) {
+        nextCursor = snapshotCursor
+        completed = true
+        break
+      }
+      if (!batch.next_after_id || batch.next_after_id === afterId || seenAfterIds.has(batch.next_after_id)) {
+        throw new Error('New API bootstrap pagination did not advance')
+      }
+      seenAfterIds.add(batch.next_after_id)
+      afterId = batch.next_after_id
+    }
+    if (!completed) throw new Error('New API bootstrap has too many pages')
   }
 
-  const items: RemoteItem[] = []
-  const assets = new Map<string, RemoteAsset>()
-  let nextCursor = cursor
-  for (let page = 0; page < MAX_CHANGE_PAGES; page += 1) {
+  for (let page = 0; page < MAX_SYNC_PAGES; page += 1) {
     const batch = await apiRequest<ChangeBatch>(`/api/user-tools/${TOOL}/changes?cursor=${nextCursor}&limit=500`)
-    items.push(...batch.items)
-    for (const asset of batch.assets) assets.set(asset.id, asset)
+    await applyBatch(batch.items)
+    if (!batch.has_more) return batch.next_cursor
+    if (batch.next_cursor <= nextCursor) throw new Error('New API change pagination did not advance')
     nextCursor = batch.next_cursor
-    if (!batch.has_more) break
-    if (page === MAX_CHANGE_PAGES - 1) throw new Error('New API sync change backlog is too large')
   }
-  return { items, assets: Array.from(assets.values()), cursor: nextCursor }
+  throw new Error('New API sync change backlog is too large')
 }
 
-async function downloadAsset(assetId: string): Promise<Blob> {
+function createAssetRequest(assetId: string): Request {
   const userId = getNewApiImagePlaygroundUserId()
   if (!userId) throw new Error('New API user context is unavailable')
-  const url = `/api/user-tools/assets/${encodeURIComponent(assetId)}/content`
-  const request = new Request(url, {
+  return new Request(`/api/user-tools/assets/${encodeURIComponent(assetId)}/content`, {
     headers: { 'New-Api-User': userId },
     credentials: 'same-origin',
   })
+}
+
+async function deleteCachedAsset(assetId: string | undefined): Promise<void> {
+  const cacheName = getNewApiImagePlaygroundAssetCacheName()
+  if (!assetId || !cacheName || !('caches' in window)) return
+  const cache = await caches.open(cacheName)
+  await cache.delete(createAssetRequest(assetId))
+}
+
+async function deleteCachedAssetIfUnreferenced(
+  metadata: SyncMetadata,
+  currentKey: string,
+  assetId: string | undefined,
+): Promise<void> {
+  if (!assetId) return
+  const hasOtherLiveReference = Object.entries(metadata.entries).some(([key, entry]) => (
+    key !== currentKey && !entry.deleted && entry.asset_id === assetId
+  ))
+  if (!hasOtherLiveReference) await deleteCachedAsset(assetId)
+}
+
+async function downloadAsset(assetId: string): Promise<Blob> {
+  const request = createAssetRequest(assetId)
   const cacheName = getNewApiImagePlaygroundAssetCacheName()
   const cache = cacheName && 'caches' in window ? await caches.open(cacheName) : null
   const cached = await cache?.match(request)
@@ -504,8 +710,13 @@ async function downloadAsset(assetId: string): Promise<Blob> {
   return response.blob()
 }
 
-async function applyRemoteItem(item: RemoteItem): Promise<ImagePlaygroundSyncResult> {
+async function applyRemoteItem(
+  item: RemoteItem,
+  metadata: SyncMetadata,
+  previousAssetId?: string,
+): Promise<ImagePlaygroundSyncResult> {
   const result = { stateChanged: false, dataChanged: false }
+  const currentKey = entryKey(item.kind, item.key)
   if (item.kind === 'state') {
     if (!item.deleted) result.stateChanged = writeSafePersistedState(item.payload)
     return result
@@ -517,6 +728,12 @@ async function applyRemoteItem(item: RemoteItem): Promise<ImagePlaygroundSyncRes
     else if (item.kind === 'agent-conversation') await deleteAgentConversation(item.key)
     else if (item.kind === 'image') await deleteImage(item.key)
     else if (item.kind === 'thumbnail') await deleteImageThumbnail(item.key)
+    if (item.kind === 'image' || item.kind === 'thumbnail') {
+      await deleteCachedAssetIfUnreferenced(metadata, currentKey, previousAssetId)
+      for (const assetId of item.asset_ids) {
+        await deleteCachedAssetIfUnreferenced(metadata, currentKey, assetId)
+      }
+    }
     return result
   }
 
@@ -527,6 +744,9 @@ async function applyRemoteItem(item: RemoteItem): Promise<ImagePlaygroundSyncRes
   } else if ((item.kind === 'image' || item.kind === 'thumbnail') && isRecord(item.payload)) {
     const assetId = typeof item.payload.asset_id === 'string' ? item.payload.asset_id : item.asset_ids[0]
     if (!assetId) throw new Error(`Missing asset for ${item.kind}/${item.key}`)
+    if (previousAssetId && previousAssetId !== assetId) {
+      await deleteCachedAssetIfUnreferenced(metadata, currentKey, previousAssetId)
+    }
     const dataUrl = await blobToDataUrl(await downloadAsset(assetId))
     if (item.kind === 'image') {
       await putImage({
@@ -561,15 +781,38 @@ async function remoteItemHash(item: RemoteItem): Promise<string> {
   return hashPayload(item.payload)
 }
 
+async function applyRemoteItemAndUpdateMetadata(
+  item: RemoteItem,
+  metadata: SyncMetadata,
+  applied: ImagePlaygroundSyncResult,
+  force: boolean,
+): Promise<void> {
+  const key = entryKey(item.kind, item.key)
+  const known = metadata.entries[key]
+  if (!force && known && known.revision >= item.revision) return
+
+  const itemResult = await applyRemoteItem(item, metadata, known?.asset_id)
+  applied.stateChanged ||= itemResult.stateChanged
+  applied.dataChanged ||= itemResult.dataChanged
+  metadata.entries[key] = {
+    revision: item.revision,
+    hash: await remoteItemHash(item),
+    deleted: item.deleted,
+    asset_id: item.asset_ids[0],
+    encoded_length: isRecord(item.payload) && typeof item.payload.encoded_length === 'number' ? item.payload.encoded_length : undefined,
+    content_sha256: isRecord(item.payload) && typeof item.payload.content_sha256 === 'string' ? item.payload.content_sha256 : undefined,
+    thumbnail_version: isRecord(item.payload) && typeof item.payload.thumbnailVersion === 'number' ? item.payload.thumbnailVersion : undefined,
+  }
+}
+
 async function performSync(): Promise<ImagePlaygroundSyncResult> {
   const userId = getNewApiImagePlaygroundUserId()
   if (!userId) return { stateChanged: false, dataChanged: false }
 
   const metadata = readMetadata()
-  const remoteDelta = await fetchRemoteDelta(metadata.cursor)
   const localItems = await collectLocalItems(metadata)
   const mutations = await buildMutations(localItems, metadata)
-  const resultItems: RemoteItem[] = []
+  const applied = { stateChanged: false, dataChanged: false }
 
   if (mutations.length > 0) {
     for (let offset = 0; offset < mutations.length; offset += 500) {
@@ -578,48 +821,45 @@ async function performSync(): Promise<ImagePlaygroundSyncResult> {
         method: 'POST',
         body: JSON.stringify({ mutations: mutationBatch }),
       })
-      remoteDelta.cursor = Math.max(remoteDelta.cursor, response.cursor)
       for (const mutationResult of response.results) {
-        if (mutationResult.item) resultItems.push(mutationResult.item)
+        if (mutationResult.result === 'error') {
+          console.error(
+            `New API image playground mutation failed (${mutationResult.kind}/${mutationResult.key}):`,
+            mutationResult.message || 'unknown error',
+          )
+          continue
+        }
         const localKey = entryKey(mutationResult.kind, mutationResult.key)
         const localItem = localItems.get(localKey)
-        if (!mutationResult.conflict && mutationResult.item && localItem) {
+        if (mutationResult.result === 'applied' && mutationResult.item && localItem) {
           metadata.entries[localKey] = {
             revision: mutationResult.item.revision,
             hash: localItem.hash,
             deleted: mutationResult.item.deleted,
             asset_id: mutationResult.item.asset_ids[0],
+            encoded_length: localItem.encodedLength,
+            content_sha256: localItem.contentSha256,
+            thumbnail_version: localItem.thumbnailVersion,
           }
+        } else if (mutationResult.result === 'conflict' && mutationResult.item) {
+          await runWithoutNewApiImagePlaygroundSyncNotifications(async () => {
+            await applyRemoteItemAndUpdateMetadata(mutationResult.item!, metadata, applied, true)
+          })
         }
       }
+      writeMetadata(metadata)
     }
   }
 
-  const newestRemoteItems = new Map<string, RemoteItem>()
-  for (const item of [...remoteDelta.items, ...resultItems]) {
-    const key = entryKey(item.kind, item.key)
-    const existing = newestRemoteItems.get(key)
-    if (!existing || item.revision >= existing.revision) newestRemoteItems.set(key, item)
-  }
-
-  const applied = { stateChanged: false, dataChanged: false }
   await runWithoutNewApiImagePlaygroundSyncNotifications(async () => {
-    for (const [key, item] of newestRemoteItems) {
-      const known = metadata.entries[key]
-      if (known && known.revision >= item.revision) continue
-      const itemResult = await applyRemoteItem(item)
-      applied.stateChanged ||= itemResult.stateChanged
-      applied.dataChanged ||= itemResult.dataChanged
-      metadata.entries[key] = {
-        revision: item.revision,
-        hash: await remoteItemHash(item),
-        deleted: item.deleted,
-        asset_id: item.asset_ids[0],
+    metadata.cursor = await streamRemoteItems(metadata.cursor, async (items) => {
+      for (const item of items) {
+        await applyRemoteItemAndUpdateMetadata(item, metadata, applied, false)
       }
-    }
+      writeMetadata(metadata)
+    })
   })
 
-  metadata.cursor = Math.max(metadata.cursor, remoteDelta.cursor)
   writeMetadata(metadata)
   return applied
 }

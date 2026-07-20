@@ -25,6 +25,7 @@ const (
 	MaxUserToolClientMutationIDLength = 128
 	MaxUserToolMutationAssetIDs       = 64
 	MaxUserToolMutationPayloadBytes   = 8 * 1024 * 1024
+	MaxUserToolChangePageSize         = 1000
 
 	defaultUserToolAssetDir = "data/user-tool-assets"
 	userToolRuntimeTTL      = 15 * time.Minute
@@ -38,9 +39,9 @@ var supportedUserTools = map[string]struct{}{
 // UserToolItem stores the account-owned metadata/state for one embedded tool item.
 // Payload is deliberately TEXT-compatible JSON so all supported databases behave alike.
 type UserToolItem struct {
-	ID            string    `json:"id" gorm:"primaryKey;type:varchar(64)"`
-	UserID        int       `json:"user_id" gorm:"index;uniqueIndex:uq_user_tool_item,priority:1"`
-	Tool          string    `json:"tool" gorm:"type:varchar(64);uniqueIndex:uq_user_tool_item,priority:2;index:idx_user_tool_updated,priority:2"`
+	ID            string    `json:"id" gorm:"primaryKey;type:varchar(64);index:idx_user_tool_page,priority:3"`
+	UserID        int       `json:"user_id" gorm:"index;uniqueIndex:uq_user_tool_item,priority:1;index:idx_user_tool_page,priority:1"`
+	Tool          string    `json:"tool" gorm:"type:varchar(64);uniqueIndex:uq_user_tool_item,priority:2;index:idx_user_tool_updated,priority:2;index:idx_user_tool_page,priority:2"`
 	Kind          string    `json:"kind" gorm:"type:varchar(64);uniqueIndex:uq_user_tool_item,priority:3"`
 	ItemKey       string    `json:"key" gorm:"type:varchar(255);uniqueIndex:uq_user_tool_item,priority:4"`
 	SchemaVersion int       `json:"schema_version"`
@@ -232,8 +233,58 @@ func ListUserToolItems(userID int, tool string, includeDeleted bool) ([]UserTool
 	return items, nil
 }
 
+func ListUserToolItemsPage(userID int, tool string, includeDeleted bool, afterID string, limit, payloadByteLimit int) ([]UserToolItem, bool, error) {
+	if userID <= 0 || !IsSupportedUserTool(tool) || len(afterID) > 64 {
+		return nil, false, errors.New("invalid user tool item page")
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	if payloadByteLimit <= 0 {
+		payloadByteLimit = 4 * 1024 * 1024
+	}
+
+	query := DB.Model(&UserToolItem{}).
+		Where("user_id = ? AND tool = ?", userID, tool).
+		Order("id ASC").
+		Limit(limit + 1)
+	if !includeDeleted {
+		query = query.Where("deleted = ?", false)
+	}
+	if afterID != "" {
+		query = query.Where("id > ?", afterID)
+	}
+
+	rows, err := query.Rows()
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+
+	items := make([]UserToolItem, 0, limit)
+	payloadBytes := 0
+	hasMore := false
+	for rows.Next() {
+		var item UserToolItem
+		if err := DB.ScanRows(rows, &item); err != nil {
+			return nil, false, err
+		}
+		itemBytes := len(item.Payload) + len(item.ID) + len(item.Kind) + len(item.ItemKey) + len(item.Status) + 256
+		if len(items) >= limit || (len(items) > 0 && payloadBytes+itemBytes > payloadByteLimit) {
+			hasMore = true
+			break
+		}
+		items = append(items, item)
+		payloadBytes += itemBytes
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	return items, hasMore, nil
+}
+
 func ListUserToolChanges(userID int, tool string, cursor int64, limit int) ([]UserToolChange, error) {
-	if limit <= 0 || limit > 1000 {
+	if limit <= 0 || limit > MaxUserToolChangePageSize+1 {
 		limit = 500
 	}
 	var changes []UserToolChange

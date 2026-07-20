@@ -18,8 +18,11 @@ import (
 )
 
 const (
-	maxUserToolSyncRequestBytes = 32 * 1024 * 1024
-	maxUserToolMutations        = 500
+	maxUserToolSyncRequestBytes       = 32 * 1024 * 1024
+	maxUserToolMutations              = 500
+	defaultUserToolBootstrapPageItems = 100
+	maxUserToolBootstrapPageItems     = 200
+	maxUserToolBootstrapPayloadBytes  = 4 * 1024 * 1024
 )
 
 type userToolMutationRequest struct {
@@ -81,9 +84,11 @@ type userToolMutationResponse struct {
 }
 
 type userToolTokenResponse struct {
-	ID        int    `json:"id"`
-	Name      string `json:"name"`
-	MaskedKey string `json:"masked_key"`
+	ID           int    `json:"id"`
+	Name         string `json:"name"`
+	MaskedKey    string `json:"masked_key"`
+	Group        string `json:"group"`
+	DisplayLabel string `json:"display_label"`
 }
 
 func GetUserToolBootstrap(c *gin.Context) {
@@ -91,7 +96,33 @@ func GetUserToolBootstrap(c *gin.Context) {
 	if !ok {
 		return
 	}
-	items, err := model.ListUserToolItems(userID, tool, true)
+	afterID := strings.TrimSpace(c.Query("after_id"))
+	if len(afterID) > 64 {
+		common.ApiErrorMsg(c, "invalid bootstrap cursor")
+		return
+	}
+	limit, err := strconv.Atoi(strings.TrimSpace(c.DefaultQuery("limit", strconv.Itoa(defaultUserToolBootstrapPageItems))))
+	if err != nil || limit <= 0 || limit > maxUserToolBootstrapPageItems {
+		common.ApiErrorMsg(c, "invalid bootstrap limit")
+		return
+	}
+
+	snapshotCursor := int64(0)
+	if rawSnapshotCursor, exists := c.GetQuery("snapshot_cursor"); exists {
+		snapshotCursor, err = strconv.ParseInt(strings.TrimSpace(rawSnapshotCursor), 10, 64)
+		if err != nil || snapshotCursor < 0 {
+			common.ApiErrorMsg(c, "invalid bootstrap snapshot cursor")
+			return
+		}
+	} else {
+		snapshotCursor, err = model.MaxUserToolChangeID(userID, tool)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+
+	items, hasMore, err := model.ListUserToolItemsPage(userID, tool, true, afterID, limit, maxUserToolBootstrapPayloadBytes)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -101,21 +132,22 @@ func GetUserToolBootstrap(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	cursor, err := model.MaxUserToolChangeID(userID, tool)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
 	preference, err := model.GetUserToolPreference(userID, tool)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	nextAfterID := ""
+	if len(items) > 0 {
+		nextAfterID = items[len(items)-1].ID
+	}
 	common.ApiSuccess(c, gin.H{
-		"items":      itemResponses,
-		"assets":     assets,
-		"cursor":     cursor,
-		"preference": gin.H{"selected_token_id": preference.SelectedTokenID, "updated_at": preference.UpdatedTime},
+		"items":         itemResponses,
+		"assets":        assets,
+		"cursor":        snapshotCursor,
+		"next_after_id": nextAfterID,
+		"has_more":      hasMore,
+		"preference":    gin.H{"selected_token_id": preference.SelectedTokenID, "updated_at": preference.UpdatedTime},
 	})
 }
 
@@ -130,7 +162,7 @@ func GetUserToolChanges(c *gin.Context) {
 		return
 	}
 	limit, err := strconv.Atoi(strings.TrimSpace(c.DefaultQuery("limit", "500")))
-	if err != nil || limit <= 0 || limit > 1000 {
+	if err != nil || limit <= 0 || limit > model.MaxUserToolChangePageSize {
 		common.ApiErrorMsg(c, "invalid change limit")
 		return
 	}
@@ -144,9 +176,13 @@ func GetUserToolChanges(c *gin.Context) {
 		changes = changes[:limit]
 	}
 	itemIDs := make([]string, 0, len(changes))
+	itemIDSet := make(map[string]struct{}, len(changes))
 	nextCursor := cursor
 	for _, change := range changes {
-		itemIDs = append(itemIDs, change.ItemID)
+		if _, exists := itemIDSet[change.ItemID]; !exists {
+			itemIDSet[change.ItemID] = struct{}{}
+			itemIDs = append(itemIDs, change.ItemID)
+		}
 		if change.ID > nextCursor {
 			nextCursor = change.ID
 		}
@@ -306,10 +342,25 @@ func CreateUserToolRuntimeSession(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	displayName := strings.TrimSpace(token.Name)
+	if displayName == "" {
+		displayName = token.GetMaskedKey()
+	}
+	displayGroup := strings.TrimSpace(token.Group)
+	displayLabel := displayName
+	if displayGroup != "" {
+		displayLabel += " · " + displayGroup
+	}
 	common.ApiSuccess(c, gin.H{
 		"credential": credential,
 		"expires_at": session.ExpiresAt,
-		"token":      userToolTokenResponse{ID: token.Id, Name: token.Name, MaskedKey: token.GetMaskedKey()},
+		"token": userToolTokenResponse{
+			ID:           token.Id,
+			Name:         token.Name,
+			MaskedKey:    token.GetMaskedKey(),
+			Group:        token.Group,
+			DisplayLabel: displayLabel,
+		},
 	})
 }
 
@@ -362,14 +413,18 @@ func GetUserToolAssetContent(c *gin.Context) {
 
 	etag := `"` + asset.Sha256 + `"`
 	c.Header("ETag", etag)
-	c.Header("Cache-Control", "private, max-age=31536000, immutable")
+	c.Header("Cache-Control", "private, max-age=0, must-revalidate")
 	c.Header("X-Content-Type-Options", "nosniff")
-	if disposition := mime.FormatMediaType("inline", map[string]string{"filename": asset.Filename}); disposition != "" {
+	contentType := model.NormalizeUserToolAssetContentType(asset.ContentType)
+	dispositionType := "attachment"
+	if (strings.HasPrefix(contentType, "image/") && contentType != "image/svg+xml") ||
+		strings.HasPrefix(contentType, "audio/") || strings.HasPrefix(contentType, "video/") {
+		dispositionType = "inline"
+	}
+	if disposition := mime.FormatMediaType(dispositionType, map[string]string{"filename": asset.Filename}); disposition != "" {
 		c.Header("Content-Disposition", disposition)
 	}
-	if asset.ContentType != "" {
-		c.Header("Content-Type", asset.ContentType)
-	}
+	c.Header("Content-Type", contentType)
 	if strings.TrimSpace(c.GetHeader("If-None-Match")) == etag {
 		c.Status(http.StatusNotModified)
 		c.Writer.WriteHeaderNow()
@@ -389,13 +444,19 @@ func userToolRequestScope(c *gin.Context) (int, string, bool) {
 }
 
 func buildUserToolItemResponses(userID int, items []model.UserToolItem) ([]userToolItemResponse, []userToolAssetResponse, error) {
+	itemIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		itemIDs = append(itemIDs, item.ID)
+	}
+	itemAssetIDs, err := model.GetUserToolItemAssetIDsByItemIDs(userID, itemIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	responses := make([]userToolItemResponse, 0, len(items))
 	assetIDs := make(map[string]struct{})
 	for _, item := range items {
-		ids, err := model.GetUserToolItemAssetIDs(userID, item.ID)
-		if err != nil {
-			return nil, nil, err
-		}
+		ids := itemAssetIDs[item.ID]
 		for _, assetID := range ids {
 			assetIDs[assetID] = struct{}{}
 		}

@@ -25,6 +25,7 @@ import {
   FlaskConical,
   Gauge,
   Image,
+  Infinity as InfinityIcon,
   Key,
   LayoutDashboard,
   ListTodo,
@@ -75,6 +76,15 @@ export function useSidebarData(): SidebarData {
                 title: t('Image Playground'),
                 url: '/image-playground',
                 icon: Image,
+              },
+            ]
+          : []),
+        ...(status?.infinite_canvas_available === true
+          ? [
+              {
+                title: t('Infinite Canvas'),
+                url: '/infinite-canvas',
+                icon: InfinityIcon,
               },
             ]
           : []),

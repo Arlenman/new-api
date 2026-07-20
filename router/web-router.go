@@ -50,10 +50,29 @@ func SetWebRouter(router *gin.Engine, assets ThemeAssets) {
 		}
 	}
 
+	common.SetInfiniteCanvasStatus(common.InfiniteCanvasStatus{})
+	if dist := strings.TrimSpace(os.Getenv("INFINITE_CANVAS_DIST")); dist != "" {
+		tool, err := loadInfiniteCanvas(dist)
+		if err != nil {
+			common.SysError("infinite canvas disabled: " + err.Error())
+		} else {
+			common.SetInfiniteCanvasStatus(common.InfiniteCanvasStatus{
+				Available: true,
+				Version:   tool.buildInfo.Version,
+				Commit:    tool.buildInfo.Commit,
+				BuiltAt:   tool.buildInfo.BuiltAt,
+			})
+			router.GET(infiniteCanvasRoute, middleware.DisableCache(), middleware.TokenOrUserAuth(), func(c *gin.Context) {
+				c.Redirect(http.StatusTemporaryRedirect, infiniteCanvasRoute+"/")
+			})
+			router.GET(infiniteCanvasRoute+"/*filepath", middleware.DisableCache(), middleware.TokenOrUserAuth(), tool.serve)
+		}
+	}
+
 	router.Use(static.Serve("/", themeFS))
 	router.NoRoute(func(c *gin.Context) {
 		c.Set(middleware.RouteTagKey, "web")
-		if strings.HasPrefix(c.Request.RequestURI, "/v1") || strings.HasPrefix(c.Request.RequestURI, "/api") || strings.HasPrefix(c.Request.RequestURI, "/assets") || strings.HasPrefix(c.Request.RequestURI, imagePlaygroundRoute) {
+		if strings.HasPrefix(c.Request.RequestURI, "/v1") || strings.HasPrefix(c.Request.RequestURI, "/api") || strings.HasPrefix(c.Request.RequestURI, "/assets") || strings.HasPrefix(c.Request.RequestURI, imagePlaygroundRoute) || strings.HasPrefix(c.Request.RequestURI, infiniteCanvasRoute) {
 			controller.RelayNotFound(c)
 			return
 		}

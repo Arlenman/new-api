@@ -17,7 +17,7 @@ func registerUserToolRoutes(apiRouter *gin.RouterGroup) {
 		userToolRoute.GET("/:tool/preferences", controller.GetUserToolPreferences)
 		userToolRoute.PUT("/:tool/preferences", controller.UpdateUserToolPreferences)
 		userToolRoute.POST("/:tool/runtime-session", controller.CreateUserToolRuntimeSession)
-		userToolRoute.POST("/assets/uploads", controller.UploadUserToolAsset)
+		userToolRoute.POST("/assets/uploads", middleware.UserUploadRateLimit(), controller.UploadUserToolAsset)
 		userToolRoute.GET("/assets/:id/content", controller.GetUserToolAssetContent)
 	}
 }

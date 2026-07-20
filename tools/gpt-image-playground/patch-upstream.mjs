@@ -4,6 +4,188 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const IMPORT_MARKER = "import App from './App'\n"
 const INSTALL_MARKER = 'installMobileViewportGuards()\n'
+const DB_IMPORT_MARKER = "import type { AgentConversation, TaskRecord, StoredImage, StoredImageThumbnail } from '../types'\n"
+const DB_IMPORT_REPLACEMENT = `${DB_IMPORT_MARKER}import {\n  ensureLegacyImagePlaygroundIndexedDBMigration,\n  getNewApiImagePlaygroundDatabaseName,\n  notifyNewApiImagePlaygroundStorageChanged,\n} from './newApiStorage'\n`
+const DB_NAME_MARKER = "const DB_NAME = 'gpt-image-playground'\n"
+const DB_NAME_REPLACEMENT = 'const DB_NAME = getNewApiImagePlaygroundDatabaseName()\n'
+const DB_OPEN_MARKER = `function openDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION)
+`
+const DB_OPEN_REPLACEMENT = `async function openDB(): Promise<IDBDatabase> {
+  await ensureLegacyImagePlaygroundIndexedDBMigration(DB_NAME, DB_VERSION, [
+    STORE_TASKS,
+    STORE_IMAGES,
+    STORE_THUMBNAILS,
+    STORE_AGENT_CONVERSATIONS,
+  ])
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION)
+`
+const DB_TRANSACTION_MARKER = `function dbTransaction<T>(
+  storeName: string,
+  mode: IDBTransactionMode,
+  fn: (store: IDBObjectStore) => IDBRequest<T>,
+): Promise<T> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, mode)
+        const store = tx.objectStore(storeName)
+        const req = fn(store)
+        req.onsuccess = () => resolve(req.result)
+        req.onerror = () => reject(req.error)
+      }),
+  )
+}
+`
+const DB_TRANSACTION_REPLACEMENT = `function dbTransaction<T>(
+  storeName: string,
+  mode: IDBTransactionMode,
+  fn: (store: IDBObjectStore) => IDBRequest<T>,
+): Promise<T> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, mode)
+        const store = tx.objectStore(storeName)
+        const req = fn(store)
+        let requestResult: T
+        req.onsuccess = () => {
+          requestResult = req.result
+        }
+        req.onerror = () => reject(req.error)
+        tx.oncomplete = () => {
+          if (mode === 'readwrite') notifyNewApiImagePlaygroundStorageChanged()
+          resolve(requestResult)
+        }
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'))
+      }),
+  )
+}
+`
+const DB_AGENT_DELETE_MARKER = `export function putAgentConversation(conversation: AgentConversation): Promise<IDBValidKey> {
+  return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.put(conversation))
+}
+`
+const DB_AGENT_DELETE_REPLACEMENT = `${DB_AGENT_DELETE_MARKER}
+export function deleteAgentConversation(id: string): Promise<undefined> {
+  return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.delete(id))
+}
+`
+const DB_THUMBNAIL_IDS_MARKER = `export function getStoredImageThumbnail(id: string): Promise<StoredImageThumbnail | undefined> {
+  return dbTransaction(STORE_THUMBNAILS, 'readonly', (s) => s.get(id))
+}
+`
+const DB_THUMBNAIL_IDS_REPLACEMENT = `${DB_THUMBNAIL_IDS_MARKER}
+export function getAllStoredImageThumbnailIds(): Promise<string[]> {
+  return dbTransaction(STORE_THUMBNAILS, 'readonly', (s) => s.getAllKeys()).then((keys) => keys.map(String))
+}
+`
+const DB_THUMBNAIL_DELETE_MARKER = `export function putImageThumbnail(thumbnail: StoredImageThumbnail): Promise<IDBValidKey> {
+  return dbTransaction(STORE_THUMBNAILS, 'readwrite', (s) => s.put(thumbnail))
+}
+`
+const DB_THUMBNAIL_DELETE_REPLACEMENT = `${DB_THUMBNAIL_DELETE_MARKER}
+export function deleteImageThumbnail(id: string): Promise<undefined> {
+  return dbTransaction(STORE_THUMBNAILS, 'readwrite', (s) => s.delete(id))
+}
+`
+const DB_REPLACE_AGENT_COMPLETE_MARKER = `        tx.oncomplete = () => resolve(undefined)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+`
+const DB_REPLACE_AGENT_COMPLETE_REPLACEMENT = `        tx.oncomplete = () => {
+          notifyNewApiImagePlaygroundStorageChanged()
+          resolve(undefined)
+        }
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+`
+const DB_DELETE_IMAGE_COMPLETE_MARKER = `        tx.objectStore(STORE_IMAGES).delete(id)
+        tx.objectStore(STORE_THUMBNAILS).delete(id)
+        tx.oncomplete = () => resolve(undefined)
+        tx.onerror = () => reject(tx.error)
+`
+const DB_DELETE_IMAGE_COMPLETE_REPLACEMENT = `        tx.objectStore(STORE_IMAGES).delete(id)
+        tx.objectStore(STORE_THUMBNAILS).delete(id)
+        tx.oncomplete = () => {
+          notifyNewApiImagePlaygroundStorageChanged()
+          resolve(undefined)
+        }
+        tx.onerror = () => reject(tx.error)
+`
+const DB_CLEAR_IMAGE_COMPLETE_MARKER = `        tx.objectStore(STORE_IMAGES).clear()
+        tx.objectStore(STORE_THUMBNAILS).clear()
+        tx.oncomplete = () => resolve(undefined)
+        tx.onerror = () => reject(tx.error)
+`
+const DB_CLEAR_IMAGE_COMPLETE_REPLACEMENT = `        tx.objectStore(STORE_IMAGES).clear()
+        tx.objectStore(STORE_THUMBNAILS).clear()
+        tx.oncomplete = () => {
+          notifyNewApiImagePlaygroundStorageChanged()
+          resolve(undefined)
+        }
+        tx.onerror = () => reject(tx.error)
+`
+const STORE_IMPORT_MARKER = `import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
+`
+const STORE_IMPORT_REPLACEMENT = `${STORE_IMPORT_MARKER}import { getNewApiImagePlaygroundStorageKey, getNewApiImagePlaygroundUserId } from './lib/newApiStorage'
+import { initializeNewApiImagePlaygroundSync, type ImagePlaygroundSyncResult } from './lib/newApiSync'
+`
+const STORE_PERSIST_NAME_MARKER = `      name: 'gpt-image-playground',
+`
+const STORE_PERSIST_NAME_REPLACEMENT = `      name: getNewApiImagePlaygroundStorageKey(),
+`
+const STORE_INIT_MARKER = `export async function initStore() {
+  const legacyAgentConversations = normalizeAgentConversations(useStore.getState().agentConversations)
+`
+const STORE_REFRESH_REPLACEMENT = `async function refreshNewApiImagePlaygroundStore(result: ImagePlaygroundSyncResult) {
+  if (result.stateChanged) await useStore.persist.rehydrate()
+  if (!result.dataChanged) return
+
+  const [storedTasks, storedConversations] = await Promise.all([
+    getAllTasks(),
+    getAllAgentConversations(),
+  ])
+  const conversations = normalizeAgentConversations(storedConversations)
+  const currentActiveConversationId = useStore.getState().activeAgentConversationId
+  const activeAgentConversationId = currentActiveConversationId
+    && conversations.some((conversation) => conversation.id === currentActiveConversationId)
+    ? currentActiveConversationId
+    : conversations[0]?.id ?? null
+  lastStoredAgentConversations = conversations
+  imageCache.clear()
+  thumbnailCache.clear()
+  useStore.setState((state) => {
+    const agentInputDrafts = cleanStaleAgentInputDrafts(
+      normalizeAgentInputDrafts(state.agentInputDrafts, conversations),
+      activeAgentConversationId,
+    )
+    return {
+      tasks: storedTasks,
+      agentConversations: conversations,
+      agentConversationsLoaded: true,
+      activeAgentConversationId,
+      agentInputDrafts,
+      ...(state.appMode === 'agent' ? restoreAgentInputDraftState(agentInputDrafts, activeAgentConversationId) : {}),
+    }
+  })
+}
+
+export async function initStore() {
+  const initialSyncResult = await initializeNewApiImagePlaygroundSync(refreshNewApiImagePlaygroundStore)
+  if (initialSyncResult.stateChanged) await useStore.persist.rehydrate()
+  const legacyAgentConversations = normalizeAgentConversations(useStore.getState().agentConversations)
+`
+const STORE_INTERRUPTED_TASKS_MARKER = `  const { tasks: markedTasks, interruptedTasks } = markInterruptedOpenAIRunningTasks(storedTasks)
+`
+const STORE_INTERRUPTED_TASKS_REPLACEMENT = `  const { tasks: markedTasks, interruptedTasks } = getNewApiImagePlaygroundUserId()
+    ? { tasks: storedTasks, interruptedTasks: [] }
+    : markInterruptedOpenAIRunningTasks(storedTasks)
+`
 const SERVICE_WORKER_MARKER = `if ('serviceWorker' in navigator) {
   if (import.meta.env.PROD) {
     window.addEventListener('load', () => {
@@ -606,6 +788,176 @@ const PERSISTENCE_REPLACEMENT = `export function getPersistedState(state: AppSta
   })
 `
 
+const SETTINGS_MANAGED_STATE_MARKER = `  const activeProfile = draft.profiles.find((profile) => profile.id === draft.activeProfileId) ?? draft.profiles[0] ?? getActiveApiProfile(draft)
+`
+const SETTINGS_MANAGED_STATE_REPLACEMENT = `${SETTINGS_MANAGED_STATE_MARKER}  const managedProfileIds = new Set([
+    'new-api-managed',
+    'new-api-managed-agent',
+  ])
+  const managedProfileActive = managedProfileIds.has(draft.activeProfileId) &&
+    draft.profiles.some((profile) => profile.id === 'new-api-managed')
+  const managedSettingsActive = managedProfileIds.has(settings.activeProfileId) &&
+    settings.profiles.some((profile) => profile.id === 'new-api-managed')
+  const managedProfile = draft.profiles.find((profile) => profile.id === 'new-api-managed')
+    ?? settings.profiles.find((profile) => profile.id === 'new-api-managed')
+  const managedModeActive = Boolean(managedProfile) && managedProfileActive
+  const userProfiles = draft.profiles.filter((profile) => !managedProfileIds.has(profile.id))
+`
+const SETTINGS_MANAGED_HYDRATION_MARKER = `    if (wasSettingsOpenRef.current) return
+`
+const SETTINGS_MANAGED_HYDRATION_REPLACEMENT = `    if (wasSettingsOpenRef.current && !managedProfileActive) return
+`
+const SETTINGS_MANAGED_API_PANEL_MARKER = `            {activeTab === 'api' && (
+              <div className="space-y-4">
+`
+const SETTINGS_MANAGED_API_PANEL_REPLACEMENT = `            {activeTab === 'api' && (
+              managedModeActive ? (
+                <div className="space-y-4">
+                  <div className="rounded-2xl border border-blue-200/70 bg-blue-50/70 p-5 shadow-sm dark:border-blue-400/20 dark:bg-blue-400/10">
+                    <div className="flex items-start gap-3">
+                      <svg className="mt-0.5 h-5 w-5 shrink-0 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                      </svg>
+                      <div className="min-w-0 space-y-3">
+                        <div>
+                          <h4 className="text-sm font-bold text-gray-800 dark:text-gray-100">当前由 New API 托管</h4>
+                          <p className="mt-1 break-words text-sm text-gray-600 dark:text-gray-300">{managedProfile?.name ?? 'New API'}</p>
+                        </div>
+                        <p className="text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                          Images、Responses 与 Agent 使用同一个 New API 托管密钥，并通过同源 <code className="rounded bg-white/70 px-1 py-0.5 dark:bg-white/10">/pg</code> 请求。
+                        </p>
+                        <p className="text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                          如需切换密钥，请使用页面顶部的 New API 密钥下拉；此处无需也不能重新填写 API URL 或 API Key。
+                        </p>
+                        <div className="border-t border-blue-200/70 pt-3 dark:border-blue-400/20">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-sm font-semibold text-gray-700 dark:text-gray-200">第三方 API 配置</span>
+                            <button
+                              type="button"
+                              disabled={defaultConfigOnly}
+                              onClick={createNewProfile}
+                              className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-white/70 px-2.5 py-1.5 text-xs font-medium text-blue-700 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-400/30 dark:bg-white/10 dark:text-blue-200 dark:hover:bg-white/20"
+                            >
+                              <PlusIcon className="h-3.5 w-3.5" />
+                              新增第三方配置
+                            </button>
+                          </div>
+                          {userProfiles.length > 0 ? (
+                            <div className="mt-2 space-y-1.5">
+                              {userProfiles.map((profile) => (
+                                <button
+                                  key={profile.id}
+                                  type="button"
+                                  onClick={() => switchProfile(profile.id)}
+                                  className="flex w-full items-center justify-between gap-3 rounded-lg border border-blue-200/70 bg-white/60 px-3 py-2 text-left text-xs text-gray-700 transition hover:bg-white dark:border-blue-400/20 dark:bg-white/[0.04] dark:text-gray-200 dark:hover:bg-white/[0.08]"
+                                >
+                                  <span className="min-w-0 truncate">{profile.name}</span>
+                                  <span className="shrink-0 text-gray-500 dark:text-gray-400">{getApiProviderLabel(draft, profile.provider)}</span>
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">尚未添加第三方配置；新增后可在此切换，并在自定义模式下编辑或删除。</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+              <div className="space-y-4">
+`
+const SETTINGS_MANAGED_API_PANEL_END_MARKER = `            </div>
+            )}
+${'            '}
+            {activeTab === 'data' && (
+`
+const SETTINGS_MANAGED_API_PANEL_END_REPLACEMENT = `            </div>
+              )
+            )}
+
+            {activeTab === 'data' && (
+`
+
+
+const SETTINGS_MANAGED_AGENT_PROP_MARKER = `              <AgentSettingsTab
+                draft={draft}
+`
+const SETTINGS_MANAGED_AGENT_PROP_REPLACEMENT = `              <AgentSettingsTab
+                draft={draft}
+                managedProfileName={managedModeActive ? (managedProfile?.name ?? 'New API') : null}
+`
+const AGENT_SETTINGS_MANAGED_PROP_MARKER = `interface AgentSettingsTabProps {
+  draft: AppSettings
+`
+const AGENT_SETTINGS_MANAGED_PROP_REPLACEMENT = `interface AgentSettingsTabProps {
+  draft: AppSettings
+  managedProfileName: string | null
+`
+const AGENT_SETTINGS_MANAGED_DESTRUCTURE_MARKER = `export default function AgentSettingsTab({
+  draft,
+`
+const AGENT_SETTINGS_MANAGED_DESTRUCTURE_REPLACEMENT = `export default function AgentSettingsTab({
+  draft,
+  managedProfileName,
+`
+const AGENT_SETTINGS_MANAGED_PANEL_MARKER = `  return (
+    <div className="space-y-4">
+      <div className="block">
+`
+const AGENT_SETTINGS_MANAGED_PANEL_REPLACEMENT = `  return (
+    <div className="space-y-4">
+      {managedProfileName ? (
+        <div className="rounded-2xl border border-blue-200/70 bg-blue-50/70 p-5 shadow-sm dark:border-blue-400/20 dark:bg-blue-400/10">
+          <div className="flex items-start gap-3">
+            <svg className="mt-0.5 h-5 w-5 shrink-0 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            </svg>
+            <div className="min-w-0 space-y-3">
+              <div>
+                <h4 className="text-sm font-bold text-gray-800 dark:text-gray-100">Agent 连接由 New API 托管</h4>
+                <p className="mt-1 break-words text-sm text-gray-600 dark:text-gray-300">{managedProfileName}</p>
+              </div>
+              <p className="text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                Responses 对话与 Images 生图均使用宿主在页面顶部选中的 New API 密钥。
+              </p>
+              <p className="text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                切换密钥请使用页面顶部下拉；此处不接受 API URL 或 API Key，也不会覆盖宿主管理的连接配置。
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="block">
+`
+const AGENT_SETTINGS_MANAGED_PANEL_END_MARKER = `      )}
+      <label className="block">
+`
+const AGENT_SETTINGS_MANAGED_PANEL_END_REPLACEMENT = `      )}
+        </>
+      )}
+      <label className="block">
+`
+const SETTINGS_MANAGED_DUPLICATE_GUARD_MARKER = `  const duplicateActiveProfile = () => {
+    if (defaultConfigOnly) return
+`
+const SETTINGS_MANAGED_DUPLICATE_GUARD_REPLACEMENT = `  const duplicateActiveProfile = () => {
+    if (defaultConfigOnly || managedProfileIds.has(activeProfile.id)) return
+`
+const SETTINGS_MANAGED_DELETE_GUARD_MARKER = `  const deleteProfile = (id: string) => {
+    if (draft.profiles.length <= 1) return
+`
+const SETTINGS_MANAGED_DELETE_GUARD_REPLACEMENT = `  const deleteProfile = (id: string) => {
+    if (managedProfileIds.has(id) || draft.profiles.length <= 1) return
+`
+const SETTINGS_MANAGED_COPY_GUARD_MARKER = `  const confirmCopyProfileImportUrl = (profile: ApiProfile) => {
+    setShowProfileMenu(false)
+`
+const SETTINGS_MANAGED_COPY_GUARD_REPLACEMENT = `  const confirmCopyProfileImportUrl = (profile: ApiProfile) => {
+    if (managedProfileIds.has(profile.id)) return
+    setShowProfileMenu(false)
+`
 function replaceExactlyOnce(source, marker, replacement, markerName = 'entry') {
   const firstIndex = source.indexOf(marker)
   const lastIndex = source.lastIndexOf(marker)
@@ -618,17 +970,30 @@ function replaceExactlyOnce(source, marker, replacement, markerName = 'entry') {
 export async function applyUpstreamPatch(upstreamRoot, options = {}) {
   const mainPath = path.join(upstreamRoot, 'src', 'main.tsx')
   const bridgePath = path.join(upstreamRoot, 'src', 'lib', 'newApiBridge.ts')
+  const storagePath = path.join(upstreamRoot, 'src', 'lib', 'newApiStorage.ts')
+  const syncPath = path.join(upstreamRoot, 'src', 'lib', 'newApiSync.ts')
+  const dbPath = path.join(upstreamRoot, 'src', 'lib', 'db.ts')
   const storePath = path.join(upstreamRoot, 'src', 'store.ts')
   const appPath = path.join(upstreamRoot, 'src', 'App.tsx')
   const inputBarPath = path.join(upstreamRoot, 'src', 'components', 'InputBar.tsx')
   const agentWorkspacePath = path.join(upstreamRoot, 'src', 'components', 'AgentWorkspace.tsx')
-  const defaultBridgePath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'new-api-bridge.ts')
+  const settingsModalPath = path.join(upstreamRoot, 'src', 'components', 'SettingsModal.tsx')
+  const agentSettingsPath = path.join(upstreamRoot, 'src', 'components', 'settings', 'AgentSettingsTab.tsx')
+  const toolRoot = path.dirname(fileURLToPath(import.meta.url))
+  const defaultBridgePath = path.join(toolRoot, 'new-api-bridge.ts')
+  const defaultStoragePath = path.join(toolRoot, 'new-api-storage.ts')
+  const defaultSyncPath = path.join(toolRoot, 'new-api-sync.ts')
   const bridgeSource = options.bridgeSource ?? await readFile(defaultBridgePath, 'utf8')
+  const storageSource = options.storageSource ?? await readFile(defaultStoragePath, 'utf8')
+  const syncSource = options.syncSource ?? await readFile(defaultSyncPath, 'utf8')
   const mainSource = await readFile(mainPath, 'utf8')
+  const dbSource = await readFile(dbPath, 'utf8')
   const storeSource = await readFile(storePath, 'utf8')
   const appSource = await readFile(appPath, 'utf8')
   const inputBarSource = await readFile(inputBarPath, 'utf8')
   const agentWorkspaceSource = await readFile(agentWorkspacePath, 'utf8')
+  const settingsModalSource = await readFile(settingsModalPath, 'utf8')
+  const agentSettingsSource = await readFile(agentSettingsPath, 'utf8')
   const withImport = replaceExactlyOnce(
     mainSource,
     IMPORT_MARKER,
@@ -645,8 +1010,92 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
     SERVICE_WORKER_REPLACEMENT,
     'service worker',
   )
-  const storeWithPersistence = replaceExactlyOnce(
+  const dbWithImport = replaceExactlyOnce(
+    dbSource,
+    DB_IMPORT_MARKER,
+    DB_IMPORT_REPLACEMENT,
+    'database import',
+  )
+  const dbWithName = replaceExactlyOnce(
+    dbWithImport,
+    DB_NAME_MARKER,
+    DB_NAME_REPLACEMENT,
+    'database name',
+  )
+  const dbWithOpen = replaceExactlyOnce(
+    dbWithName,
+    DB_OPEN_MARKER,
+    DB_OPEN_REPLACEMENT,
+    'database open',
+  )
+  const dbWithTransaction = replaceExactlyOnce(
+    dbWithOpen,
+    DB_TRANSACTION_MARKER,
+    DB_TRANSACTION_REPLACEMENT,
+    'database transaction',
+  )
+  const dbWithAgentDelete = replaceExactlyOnce(
+    dbWithTransaction,
+    DB_AGENT_DELETE_MARKER,
+    DB_AGENT_DELETE_REPLACEMENT,
+    'Agent conversation delete',
+  )
+  const dbWithThumbnailIds = replaceExactlyOnce(
+    dbWithAgentDelete,
+    DB_THUMBNAIL_IDS_MARKER,
+    DB_THUMBNAIL_IDS_REPLACEMENT,
+    'thumbnail ids',
+  )
+  const dbWithThumbnailDelete = replaceExactlyOnce(
+    dbWithThumbnailIds,
+    DB_THUMBNAIL_DELETE_MARKER,
+    DB_THUMBNAIL_DELETE_REPLACEMENT,
+    'thumbnail delete',
+  )
+  const dbWithAgentNotification = replaceExactlyOnce(
+    dbWithThumbnailDelete,
+    DB_REPLACE_AGENT_COMPLETE_MARKER,
+    DB_REPLACE_AGENT_COMPLETE_REPLACEMENT,
+    'Agent conversation replacement completion',
+  )
+  const dbWithDeleteNotification = replaceExactlyOnce(
+    dbWithAgentNotification,
+    DB_DELETE_IMAGE_COMPLETE_MARKER,
+    DB_DELETE_IMAGE_COMPLETE_REPLACEMENT,
+    'image delete completion',
+  )
+  const patchedDbSource = replaceExactlyOnce(
+    dbWithDeleteNotification,
+    DB_CLEAR_IMAGE_COMPLETE_MARKER,
+    DB_CLEAR_IMAGE_COMPLETE_REPLACEMENT,
+    'image clear completion',
+  )
+  const storeWithImport = replaceExactlyOnce(
     storeSource,
+    STORE_IMPORT_MARKER,
+    STORE_IMPORT_REPLACEMENT,
+    'store synchronization import',
+  )
+  const storeWithPersistenceName = replaceExactlyOnce(
+    storeWithImport,
+    STORE_PERSIST_NAME_MARKER,
+    STORE_PERSIST_NAME_REPLACEMENT,
+    'store persistence name',
+  )
+  const storeWithInitialization = replaceExactlyOnce(
+    storeWithPersistenceName,
+    STORE_INIT_MARKER,
+    STORE_REFRESH_REPLACEMENT,
+    'store synchronization initialization',
+  )
+  const storeWithInterruptedTaskHandling = replaceExactlyOnce(
+    storeWithInitialization,
+    STORE_INTERRUPTED_TASKS_MARKER,
+    STORE_INTERRUPTED_TASKS_REPLACEMENT,
+    'interrupted task handling',
+  )
+  const storeWithPersistence = replaceExactlyOnce(
+    storeWithInterruptedTaskHandling,
     PERSISTENCE_MARKER,
     PERSISTENCE_REPLACEMENT,
     'persistence',
@@ -771,12 +1220,90 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
     AGENT_SCROLL_STYLE_REPLACEMENT,
     'Agent scroll button position',
   )
+  const settingsModalWithManagedState = replaceExactlyOnce(
+    settingsModalSource,
+    SETTINGS_MANAGED_STATE_MARKER,
+    SETTINGS_MANAGED_STATE_REPLACEMENT,
+    'SettingsModal managed state',
+  )
+  const settingsModalWithManagedHydration = replaceExactlyOnce(
+    settingsModalWithManagedState,
+    SETTINGS_MANAGED_HYDRATION_MARKER,
+    SETTINGS_MANAGED_HYDRATION_REPLACEMENT,
+    'SettingsModal managed hydration',
+  )
+  const settingsModalWithManagedApiPanel = replaceExactlyOnce(
+    settingsModalWithManagedHydration,
+    SETTINGS_MANAGED_API_PANEL_MARKER,
+    SETTINGS_MANAGED_API_PANEL_REPLACEMENT,
+    'SettingsModal managed API panel',
+  )
+  const settingsModalWithManagedApiPanelEnd = replaceExactlyOnce(
+    settingsModalWithManagedApiPanel,
+    SETTINGS_MANAGED_API_PANEL_END_MARKER,
+    SETTINGS_MANAGED_API_PANEL_END_REPLACEMENT,
+    'SettingsModal managed API panel end',
+  )
+  const settingsModalWithManagedAgentProp = replaceExactlyOnce(
+    settingsModalWithManagedApiPanelEnd,
+    SETTINGS_MANAGED_AGENT_PROP_MARKER,
+    SETTINGS_MANAGED_AGENT_PROP_REPLACEMENT,
+    'SettingsModal managed Agent property',
+  )
+  const settingsModalWithManagedDuplicateGuard = replaceExactlyOnce(
+    settingsModalWithManagedAgentProp,
+    SETTINGS_MANAGED_DUPLICATE_GUARD_MARKER,
+    SETTINGS_MANAGED_DUPLICATE_GUARD_REPLACEMENT,
+    'SettingsModal managed duplicate guard',
+  )
+  const settingsModalWithManagedDeleteGuard = replaceExactlyOnce(
+    settingsModalWithManagedDuplicateGuard,
+    SETTINGS_MANAGED_DELETE_GUARD_MARKER,
+    SETTINGS_MANAGED_DELETE_GUARD_REPLACEMENT,
+    'SettingsModal managed delete guard',
+  )
+  const settingsModalWithManagedCopyGuard = replaceExactlyOnce(
+    settingsModalWithManagedDeleteGuard,
+    SETTINGS_MANAGED_COPY_GUARD_MARKER,
+    SETTINGS_MANAGED_COPY_GUARD_REPLACEMENT,
+    'SettingsModal managed copy guard',
+  )
+  const patchedSettingsModalSource = settingsModalWithManagedCopyGuard
+  const agentSettingsWithManagedProp = replaceExactlyOnce(
+    agentSettingsSource,
+    AGENT_SETTINGS_MANAGED_PROP_MARKER,
+    AGENT_SETTINGS_MANAGED_PROP_REPLACEMENT,
+    'AgentSettings managed property',
+  )
+  const agentSettingsWithManagedDestructure = replaceExactlyOnce(
+    agentSettingsWithManagedProp,
+    AGENT_SETTINGS_MANAGED_DESTRUCTURE_MARKER,
+    AGENT_SETTINGS_MANAGED_DESTRUCTURE_REPLACEMENT,
+    'AgentSettings managed property destructuring',
+  )
+  const agentSettingsWithManagedPanel = replaceExactlyOnce(
+    agentSettingsWithManagedDestructure,
+    AGENT_SETTINGS_MANAGED_PANEL_MARKER,
+    AGENT_SETTINGS_MANAGED_PANEL_REPLACEMENT,
+    'AgentSettings managed panel',
+  )
+  const patchedAgentSettingsSource = replaceExactlyOnce(
+    agentSettingsWithManagedPanel,
+    AGENT_SETTINGS_MANAGED_PANEL_END_MARKER,
+    AGENT_SETTINGS_MANAGED_PANEL_END_REPLACEMENT,
+    'AgentSettings managed panel end',
+  )
 
   await writeFile(mainPath, patchedSource)
+  await writeFile(storagePath, storageSource)
+  await writeFile(syncPath, syncSource)
+  await writeFile(dbPath, patchedDbSource)
   await writeFile(storePath, patchedStoreSource)
   await writeFile(appPath, patchedAppSource)
   await writeFile(inputBarPath, patchedInputBarSource)
   await writeFile(agentWorkspacePath, patchedAgentWorkspaceSource)
+  await writeFile(settingsModalPath, patchedSettingsModalSource)
+  await writeFile(agentSettingsPath, patchedAgentSettingsSource)
   await writeFile(bridgePath, bridgeSource)
 }
 

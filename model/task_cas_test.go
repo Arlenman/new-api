@@ -64,6 +64,7 @@ func TestMain(m *testing.M) {
 		&UserToolChange{},
 		&UserToolMutationReceipt{},
 		&UserToolRuntimeSession{},
+		&UserToolImageTask{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
 	}
@@ -102,6 +103,7 @@ func truncateTables(t *testing.T) {
 		DB.Exec("DELETE FROM user_tool_runtime_sessions")
 		DB.Exec("DELETE FROM user_tool_preferences")
 		DB.Exec("DELETE FROM user_tool_assets")
+		DB.Exec("DELETE FROM user_tool_image_tasks")
 		DB.Exec("DELETE FROM user_tool_items")
 	})
 }

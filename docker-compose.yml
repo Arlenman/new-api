@@ -16,7 +16,10 @@ version: '3.4' # For compatibility with older Docker versions
 
 services:
   new-api:
-    image: calciumion/new-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: new-api-with-tools:local
     container_name: new-api
     restart: always
     command: --log-dir /app/logs
@@ -35,6 +38,7 @@ services:
 #      - LOG_SQL_CLICKHOUSE_TTL_DAYS=0 # OPTIONAL: ClickHouse log retention days. Unset or 0 disables automatic deletion; set to e.g. 30 to keep 30 days
       - REDIS_CONN_STRING=redis://:48b32c8351ae10bca1c2980dd3aa28659fd7980e14787508@redis:6379 # ⚠️ IMPORTANT: Change the password in production!
       - TZ=Asia/Shanghai
+      - USER_TOOL_ASSET_DIR=/data/user-tool-assets
       - SESSION_SECRET=9ad5b7d2e69d43f8a6130bf8904f4c39a4f64ac64b0b4e31a7b92e62f76aab26
       - GODEBUG=http2client=0
       - RELAY_TIMEOUT=600

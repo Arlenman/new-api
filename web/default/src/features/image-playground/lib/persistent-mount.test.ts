@@ -25,18 +25,20 @@ import {
 } from './persistent-mount.ts'
 
 describe('persistent image playground lifecycle', () => {
-  test('does not load the tool before the route is visited', () => {
-    assert.equal(shouldKeepImagePlaygroundMounted(false, false), false)
+  test('does not load the tool before the current account visits the route', () => {
+    assert.equal(shouldKeepImagePlaygroundMounted(null, 101, false), false)
   })
 
-  test('keeps the tool mounted after leaving the route', () => {
-    let hasMounted = false
+  test('keeps only the current account tool mounted after leaving the route', () => {
+    assert.equal(shouldKeepImagePlaygroundMounted(101, 101, false), true)
+    assert.equal(shouldKeepImagePlaygroundMounted(101, 202, false), false)
+    assert.equal(shouldKeepImagePlaygroundMounted(101, undefined, false), false)
+  })
 
-    hasMounted = shouldKeepImagePlaygroundMounted(hasMounted, true)
-    assert.equal(hasMounted, true)
-
-    hasMounted = shouldKeepImagePlaygroundMounted(hasMounted, false)
-    assert.equal(hasMounted, true)
+  test('forces an A to B to A lifecycle to render only the active account', () => {
+    assert.equal(shouldKeepImagePlaygroundMounted(101, 202, true), true)
+    assert.equal(shouldKeepImagePlaygroundMounted(202, 101, false), false)
+    assert.equal(shouldKeepImagePlaygroundMounted(202, 101, true), true)
   })
 })
 

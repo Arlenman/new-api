@@ -6,6 +6,94 @@ import test from 'node:test'
 
 import { applyUpstreamPatch } from './patch-upstream.mjs'
 
+const DB_SOURCE = `import type { AgentConversation, TaskRecord, StoredImage, StoredImageThumbnail } from '../types'
+
+const DB_NAME = 'gpt-image-playground'
+const DB_VERSION = 3
+const STORE_TASKS = 'tasks'
+const STORE_IMAGES = 'images'
+const STORE_THUMBNAILS = 'thumbnails'
+const STORE_AGENT_CONVERSATIONS = 'agentConversations'
+
+function openDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION)
+    req.onsuccess = () => resolve(req.result)
+    req.onerror = () => reject(req.error)
+  })
+}
+
+function dbTransaction<T>(
+  storeName: string,
+  mode: IDBTransactionMode,
+  fn: (store: IDBObjectStore) => IDBRequest<T>,
+): Promise<T> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, mode)
+        const store = tx.objectStore(storeName)
+        const req = fn(store)
+        req.onsuccess = () => resolve(req.result)
+        req.onerror = () => reject(req.error)
+      }),
+  )
+}
+
+export function putAgentConversation(conversation: AgentConversation): Promise<IDBValidKey> {
+  return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.put(conversation))
+}
+
+export function replaceAgentConversations(conversations: AgentConversation[]): Promise<undefined> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_AGENT_CONVERSATIONS, 'readwrite')
+        const store = tx.objectStore(STORE_AGENT_CONVERSATIONS)
+        store.clear()
+        for (const conversation of conversations) store.put(conversation)
+        tx.oncomplete = () => resolve(undefined)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+      }),
+  )
+}
+
+export function getStoredImageThumbnail(id: string): Promise<StoredImageThumbnail | undefined> {
+  return dbTransaction(STORE_THUMBNAILS, 'readonly', (s) => s.get(id))
+}
+
+export function putImageThumbnail(thumbnail: StoredImageThumbnail): Promise<IDBValidKey> {
+  return dbTransaction(STORE_THUMBNAILS, 'readwrite', (s) => s.put(thumbnail))
+}
+
+export function deleteImage(id: string): Promise<undefined> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction([STORE_IMAGES, STORE_THUMBNAILS], 'readwrite')
+        tx.objectStore(STORE_IMAGES).delete(id)
+        tx.objectStore(STORE_THUMBNAILS).delete(id)
+        tx.oncomplete = () => resolve(undefined)
+        tx.onerror = () => reject(tx.error)
+      }),
+  )
+}
+
+export function clearImages(): Promise<undefined> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction([STORE_IMAGES, STORE_THUMBNAILS], 'readwrite')
+        tx.objectStore(STORE_IMAGES).clear()
+        tx.objectStore(STORE_THUMBNAILS).clear()
+        tx.oncomplete = () => resolve(undefined)
+        tx.onerror = () => reject(tx.error)
+      }),
+  )
+}
+`
+
 const MAIN_SOURCE = `import 'core-js/actual/array/at'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -32,7 +120,10 @@ if ('serviceWorker' in navigator) {
 }
 `
 
-const STORE_SOURCE = `function normalizeSettings(settings: unknown) {
+const STORE_SOURCE = `import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
+
+function normalizeSettings(settings: unknown) {
   return settings
 }
 
@@ -43,6 +134,12 @@ export function getPersistedState(state: AppState) {
     params: state.params,
   }
 }
+
+const useStore = create(
+  persist(() => ({}), {
+      name: 'gpt-image-playground',
+  }),
+)
 
 function mergeResponseOutputItems(previous: ResponsesOutputItem[], next: ResponsesOutputItem[]) {
   const merged = [...previous]
@@ -143,6 +240,13 @@ export async function retryTask(task: TaskRecord) {
 
   executeTask(taskId)
 }
+
+export async function initStore() {
+  const legacyAgentConversations = normalizeAgentConversations(useStore.getState().agentConversations)
+  const storedTasks = await getAllTasks()
+  const { tasks: markedTasks, interruptedTasks } = markInterruptedOpenAIRunningTasks(storedTasks)
+  return { legacyAgentConversations, markedTasks, interruptedTasks }
+}
 `
 
 const APP_SOURCE = `export default function App() {
@@ -197,21 +301,176 @@ const AGENT_WORKSPACE_SOURCE = `export default function AgentWorkspace() {
 }
 `.replaceAll('§', '`').replaceAll('¤', '$')
 
+const SETTINGS_MODAL_SOURCE = `export default function SettingsModal() {
+  const showSettings = useStore((s) => s.showSettings)
+  const settings = useStore((s) => s.settings)
+  const reusedTaskApiProfileId = useStore((s) => s.reusedTaskApiProfileId)
+  const apiProxyAvailable = true
+  const apiProxyLocked = false
+  const [draft, setDraft] = useState<AppSettings>(normalizeSettings(settings))
+  const [timeoutInput, setTimeoutInput] = useState(String(getActiveApiProfile(settings).timeout))
+  const [agentMaxToolRoundsInput, setAgentMaxToolRoundsInput] = useState(String(settings.agentMaxToolRounds))
+  const [activeTab] = useState<SettingsTab>('api')
+  const activeProfile = draft.profiles.find((profile) => profile.id === draft.activeProfileId) ?? draft.profiles[0] ?? getActiveApiProfile(draft)
+
+  const wasSettingsOpenRef = useRef(false)
+
+  useEffect(() => {
+    if (!showSettings) {
+      wasSettingsOpenRef.current = false
+      return
+    }
+    if (wasSettingsOpenRef.current) return
+
+    wasSettingsOpenRef.current = true
+    const normalizedSettings = normalizeSettings(settings)
+    const displaySettings = normalizedSettings.reuseTaskApiProfileTemporarily && reusedTaskApiProfileId && normalizedSettings.profiles.some((profile) => profile.id === reusedTaskApiProfileId)
+      ? normalizeSettings({ ...normalizedSettings, activeProfileId: reusedTaskApiProfileId })
+      : normalizedSettings
+    const nextDraft = normalizeSettings({
+      ...displaySettings,
+      profiles: displaySettings.profiles.map((profile) => ({
+        ...profile,
+        apiProxy: isProfileApiProxyEligible(displaySettings, profile) && apiProxyAvailable
+          ? (apiProxyLocked || profile.apiProxy)
+          : false,
+      })),
+    })
+    setDraft(nextDraft)
+    setTimeoutInput(String(getActiveApiProfile(nextDraft).timeout))
+    setAgentMaxToolRoundsInput(String(nextDraft.agentMaxToolRounds))
+  }, [apiProxyAvailable, apiProxyLocked, showSettings, settings, reusedTaskApiProfileId])
+
+  const createNewProfile = () => {}
+  const switchProfile = (id: string) => {}
+  const confirmCopyProfileImportUrl = (profile: ApiProfile) => {
+    setShowProfileMenu(false)
+  }
+  const duplicateActiveProfile = () => {
+    if (defaultConfigOnly) return
+  }
+  const deleteProfile = (id: string) => {
+    if (draft.profiles.length <= 1) return
+  }
+
+  return (
+    <>
+            {activeTab === 'agent' && (
+              <AgentSettingsTab
+                draft={draft}
+                agentMaxToolRoundsInput={agentMaxToolRoundsInput}
+              />
+            )}
+
+            {activeTab === 'api' && (
+              <div className="space-y-4">
+                <span className="block text-sm text-gray-600 dark:text-gray-300">当前配置</span>
+                <input value={activeProfile.name} />
+                <input value={activeProfile.baseUrl} />
+                <input value={activeProfile.apiKey} />
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      confirmCopyProfileImportUrl(profile)
+                    }}
+                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-gray-400 opacity-60 transition-all hover:bg-gray-100 hover:text-gray-600 hover:opacity-100 dark:hover:bg-white/[0.08] dark:hover:text-gray-200"
+                    aria-label={\`复制导入配置「\${profile.name}」的 URL\`}
+                    title="复制导入 URL"
+                  >
+                    <LinkIcon className="h-3.5 w-3.5" />
+                  </button>
+                  {draft.profiles.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        setConfirmDialog({
+                          title: '删除配置',
+                          message: \`确定要删除配置「\${profile.name}」吗？\`,
+                          action: () => deleteProfile(profile.id)
+                        })
+                      }}
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-gray-400 opacity-60 transition-all hover:bg-red-50 hover:text-red-500 hover:opacity-100 dark:hover:bg-red-500/10"
+                      aria-label="删除配置"
+                    >
+                      <TrashIcon className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+            </div>
+            )}
+${'            '}
+            {activeTab === 'data' && (
+              <div className="space-y-4">data</div>
+            )}
+    </>
+  )
+}
+`
+
+
+const AGENT_SETTINGS_SOURCE = `interface AgentSettingsTabProps {
+  draft: AppSettings
+  agentMaxToolRoundsInput: string
+  updateAgentApiConfigMode: (mode: AgentApiConfigMode) => void
+}
+
+export default function AgentSettingsTab({
+  draft,
+  agentMaxToolRoundsInput,
+  updateAgentApiConfigMode,
+}: AgentSettingsTabProps) {
+  return (
+    <div className="space-y-4">
+      <div className="block">
+        <span>使用独立的 API 配置</span>
+        <Select
+          value={draft.agentApiConfigMode}
+          onChange={(value) => updateAgentApiConfigMode(value as AgentApiConfigMode)}
+          options={[{ label: '关闭', value: 'off' }]}
+        />
+      </div>
+
+      {draft.agentApiConfigMode !== 'off' && (
+        <div>
+          <Select value={draft.agentTextProfileId ?? ''} options={[]} />
+          <Select value={draft.agentImageProfileId ?? ''} options={[]} />
+        </div>
+      )}
+      <label className="block">
+        <span>最大工具调用轮数</span>
+        <input value={agentMaxToolRoundsInput} />
+      </label>
+    </div>
+  )
+}
+`
+
 async function createFixture(
   mainSource = MAIN_SOURCE,
   storeSource = STORE_SOURCE,
   appSource = APP_SOURCE,
   inputBarSource = INPUT_BAR_SOURCE,
   agentWorkspaceSource = AGENT_WORKSPACE_SOURCE,
+  dbSource = DB_SOURCE,
+  settingsModalSource = SETTINGS_MODAL_SOURCE,
+  agentSettingsSource = AGENT_SETTINGS_SOURCE,
 ) {
   const root = await mkdtemp(path.join(tmpdir(), 'gpt-image-playground-patch-'))
-  await mkdir(path.join(root, 'src', 'components'), { recursive: true })
+  await mkdir(path.join(root, 'src', 'components', 'settings'), { recursive: true })
   await mkdir(path.join(root, 'src', 'lib'), { recursive: true })
   await writeFile(path.join(root, 'src', 'main.tsx'), mainSource)
+  await writeFile(path.join(root, 'src', 'lib', 'db.ts'), dbSource)
   await writeFile(path.join(root, 'src', 'store.ts'), storeSource)
   await writeFile(path.join(root, 'src', 'App.tsx'), appSource)
   await writeFile(path.join(root, 'src', 'components', 'InputBar.tsx'), inputBarSource)
   await writeFile(path.join(root, 'src', 'components', 'AgentWorkspace.tsx'), agentWorkspaceSource)
+  await writeFile(path.join(root, 'src', 'components', 'SettingsModal.tsx'), settingsModalSource)
+  await writeFile(path.join(root, 'src', 'components', 'settings', 'AgentSettingsTab.tsx'), agentSettingsSource)
   return root
 }
 
@@ -222,16 +481,80 @@ test('injects the New API bridge through the validated upstream entry markers', 
 
   const mainSource = await readFile(path.join(root, 'src', 'main.tsx'), 'utf8')
   const bridgeSource = await readFile(path.join(root, 'src', 'lib', 'newApiBridge.ts'), 'utf8')
+  const storageSource = await readFile(path.join(root, 'src', 'lib', 'newApiStorage.ts'), 'utf8')
+  const syncSource = await readFile(path.join(root, 'src', 'lib', 'newApiSync.ts'), 'utf8')
+  const dbSource = await readFile(path.join(root, 'src', 'lib', 'db.ts'), 'utf8')
   const storeSource = await readFile(path.join(root, 'src', 'store.ts'), 'utf8')
   const appSource = await readFile(path.join(root, 'src', 'App.tsx'), 'utf8')
   const inputBarSource = await readFile(path.join(root, 'src', 'components', 'InputBar.tsx'), 'utf8')
   const agentWorkspaceSource = await readFile(path.join(root, 'src', 'components', 'AgentWorkspace.tsx'), 'utf8')
+  const settingsModalSource = await readFile(path.join(root, 'src', 'components', 'SettingsModal.tsx'), 'utf8')
+  const agentSettingsSource = await readFile(path.join(root, 'src', 'components', 'settings', 'AgentSettingsTab.tsx'), 'utf8')
   assert.match(mainSource, /import \{ installNewApiBridge \} from '\.\/lib\/newApiBridge'/)
   assert.match(mainSource, /installNewApiBridge\(\)\n\ninstallMobileViewportGuards\(\)/)
   assert.match(mainSource, /navigator\.serviceWorker\.getRegistration\(scope\)/)
   assert.match(mainSource, /key\.startsWith\('gpt-image-playground-'\)/)
   assert.doesNotMatch(mainSource, /serviceWorker\.register/)
   assert.equal(bridgeSource, 'export const bridgeFixture = true\n')
+  assert.match(storageSource, /getNewApiImagePlaygroundDatabaseName/)
+  assert.doesNotMatch(storageSource, /new_api_user/)
+  assert.match(storageSource, /normalizeInjectedUserId\(window\.__NEW_API_USER_ID__\)/)
+  assert.match(storageSource, /New API authenticated user identity is required/)
+  assert.doesNotMatch(storageSource, /getItem\(['"]uid['"]\)/)
+  assert.match(storageSource, /LEGACY_MIGRATION_OWNER_KEY/)
+  assert.match(storageSource, /claimLegacyMigrationOwner\(storage, userId\) !== userId/)
+  assert.match(syncSource, /initializeNewApiImagePlaygroundSync/)
+  assert.match(syncSource, /sensitiveSyncFieldNames/)
+  assert.match(syncSource, /normalizedKey === 'rawimageurls' \|\| normalizedKey === 'rawresponsepayload'/)
+  assert.match(syncSource, /maskDraft: null/)
+  assert.match(syncSource, /deleteCachedAsset/)
+  assert.match(syncSource, /mutationResult\.result === 'conflict' && mutationResult\.item/)
+  assert.match(syncSource, /applyRemoteItemAndUpdateMetadata/)
+  assert.match(syncSource, /await canReuseImageSyncEntry\('image', image\.dataUrl, metadataEntry\)/)
+  assert.match(syncSource, /await canReuseImageSyncEntry\('thumbnail', thumbnail\.thumbnailDataUrl, metadataEntry, thumbnail\.thumbnailVersion\)/)
+  assert.match(syncSource, /content_sha256: localItem\.contentSha256/)
+  assert.match(dbSource, /const DB_NAME = getNewApiImagePlaygroundDatabaseName\(\)/)
+  assert.match(dbSource, /await ensureLegacyImagePlaygroundIndexedDBMigration/)
+  assert.match(dbSource, /export function deleteAgentConversation/)
+  assert.match(dbSource, /export function getAllStoredImageThumbnailIds/)
+  assert.match(dbSource, /notifyNewApiImagePlaygroundStorageChanged\(\)/)
+  assert.match(storeSource, /getNewApiImagePlaygroundStorageKey/)
+  assert.match(storeSource, /initializeNewApiImagePlaygroundSync/)
+  assert.match(storeSource, /name: getNewApiImagePlaygroundStorageKey\(\)/)
+  assert.match(storeSource, /async function refreshNewApiImagePlaygroundStore/)
+  assert.match(storeSource, /getNewApiImagePlaygroundUserId\(\)/)
+  assert.match(settingsModalSource, /const managedProfileIds = new Set\(\[/)
+  assert.match(settingsModalSource, /'new-api-managed'/)
+  assert.match(settingsModalSource, /'new-api-managed-agent'/)
+  assert.match(settingsModalSource, /if \(wasSettingsOpenRef\.current && !managedProfileActive\) return/)
+  assert.match(settingsModalSource, /const managedProfile = draft\.profiles\.find\(\(profile\) => profile\.id === 'new-api-managed'\)/)
+  assert.match(settingsModalSource, /const managedModeActive = Boolean\(managedProfile\) && managedProfileActive/)
+  assert.match(settingsModalSource, /新增第三方配置/)
+  assert.match(settingsModalSource, /onClick=\{createNewProfile\}/)
+  assert.match(settingsModalSource, /userProfiles\.map\(\(profile\) =>/)
+  assert.match(settingsModalSource, /onClick=\{\(\) => switchProfile\(profile\.id\)\}/)
+  assert.match(settingsModalSource, /if \(defaultConfigOnly \|\| managedProfileIds\.has\(activeProfile\.id\)\) return/)
+  assert.match(settingsModalSource, /if \(managedProfileIds\.has\(id\) \|\| draft\.profiles\.length <= 1\) return/)
+  assert.match(settingsModalSource, /if \(managedProfileIds\.has\(profile\.id\)\) return/)
+  assert.match(settingsModalSource, /当前由 New API 托管/)
+  assert.match(settingsModalSource, /页面顶部的 New API 密钥下拉/)
+  assert.match(settingsModalSource, /Images、Responses 与 Agent 使用同一个 New API 托管密钥/)
+  assert.match(settingsModalSource, /通过同源 <code[^>]*>\/pg<\/code> 请求/)
+  assert.match(settingsModalSource, /managedProfileName=\{managedModeActive \? \(managedProfile\?\.name \?\? 'New API'\) : null\}/)
+  assert.match(agentSettingsSource, /managedProfileName: string \| null/)
+  assert.match(agentSettingsSource, /Agent 连接由 New API 托管/)
+  assert.match(agentSettingsSource, /Responses 对话与 Images 生图均使用宿主在页面顶部选中的 New API 密钥/)
+  assert.match(agentSettingsSource, /此处不接受 API URL 或 API Key，也不会覆盖宿主管理的连接配置/)
+  const managedAgentPanel = agentSettingsSource.match(/\{managedProfileName \? \(([\s\S]*?)\n\s*\) : \(/)?.[1]
+  assert.ok(managedAgentPanel)
+  assert.doesNotMatch(managedAgentPanel, /<input|<Select|updateAgentApiConfigMode|commitSettings|OpenAI|默认 OpenAI|apiKey|baseUrl/)
+  const managedApiPanel = settingsModalSource.match(/managedModeActive \? \(([\s\S]*?)\n\s*\) : \(/)?.[1]
+  assert.ok(managedApiPanel)
+  assert.doesNotMatch(managedApiPanel, /activeProfile\.apiKey|<input|OpenAI/)
+  const customApiPanel = settingsModalSource.match(/managedModeActive \? \([\s\S]*?\n\s*\) : \(\n([\s\S]*?)\n\s*\)\n\s*\)}/)?.[1]
+  assert.ok(customApiPanel)
+  assert.match(customApiPanel, /activeProfile\.baseUrl/)
+  assert.match(customApiPanel, /activeProfile\.apiKey/)
   assert.match(storeSource, /new Set\(\['new-api-managed', 'new-api-managed-agent'\]\)/)
   assert.match(storeSource, /localStorage\.getItem\('new-api:image-playground:tool-settings'\)/)
   assert.match(storeSource, /const settings = normalizeSettings\(\{[\s\S]*profiles,[\s\S]*activeProfileId,[\s\S]*agentApiConfigMode,/)
@@ -435,6 +758,41 @@ test('fails closed when the upstream task retry marker no longer matches', async
   )
 })
 
+test('fails closed when the upstream SettingsModal managed-mode marker no longer matches', async () => {
+  const root = await createFixture(
+    MAIN_SOURCE,
+    STORE_SOURCE,
+    APP_SOURCE,
+    INPUT_BAR_SOURCE,
+    AGENT_WORKSPACE_SOURCE,
+    DB_SOURCE,
+    SETTINGS_MODAL_SOURCE.replace(
+      '    if (wasSettingsOpenRef.current) return\n',
+      '    if (wasSettingsOpenRef.current && showSettings) return\n',
+    ),
+  )
+
+  await assert.rejects(
+    applyUpstreamPatch(root, { bridgeSource: 'export {}\n' }),
+    /upstream SettingsModal managed hydration marker .* did not match exactly once/,
+  )
+})
+
+test('fails closed when the upstream AgentSettings managed-mode marker no longer matches', async () => {
+  const root = await createFixture()
+  const agentSettingsPath = path.join(root, 'src', 'components', 'settings', 'AgentSettingsTab.tsx')
+  const source = await readFile(agentSettingsPath, 'utf8')
+  await writeFile(agentSettingsPath, source.replace(
+    'export default function AgentSettingsTab({\n  draft,\n',
+    'export default function AgentSettingsTab({\n  settingsDraft,\n',
+  ))
+
+  await assert.rejects(
+    applyUpstreamPatch(root, { bridgeSource: 'export {}\n' }),
+    /upstream AgentSettings managed property destructuring marker .* did not match exactly once/,
+  )
+})
+
 test('managed New API profiles enable hybrid Agent mode without changing tool-only streaming', async () => {
   const root = await createFixture()
 
@@ -450,6 +808,11 @@ test('managed New API profiles enable hybrid Agent mode without changing tool-on
   assert.match(bridgeSource, /agentImageProfileId: MANAGED_IMAGE_PROFILE_ID/)
   assert.match(bridgeSource, /streamImages: message\.mode === 'new-api'/)
   assert.match(bridgeSource, /streamImages: true/)
+  assert.match(bridgeSource, /useStore\.persist\.onFinishHydration/)
+  assert.match(bridgeSource, /managedProfilesMatch\(useStore\.getState\(\)\.settings, activeConfigureMessage\)/)
+  assert.match(bridgeSource, /useStore\.subscribe\(\(state\) =>/)
+  assert.match(bridgeSource, /const previousConfigureMessage = activeConfigureMessage/)
+  assert.match(bridgeSource, /activeConfigureMessage = previousConfigureMessage/)
 })
 
 test('default bridge removes both managed profiles before restoring tool settings', async () => {
@@ -461,6 +824,7 @@ test('default bridge removes both managed profiles before restoring tool setting
   assert.match(bridgeSource, /function removeManagedProfiles/)
   assert.match(bridgeSource, /profiles\.filter\(\(profile\) => !isManagedProfile\(profile\)\)/)
   assert.match(bridgeSource, /rememberToolSettings\(state\.settings\)/)
-  assert.match(bridgeSource, /agentApiConfigMode: snapshot\?\.agentApiConfigMode/)
+  assert.match(bridgeSource, /agentApiConfigMode: currentAgentUsesManagedProfile/)
+  assert.match(bridgeSource, /\? \(snapshot\?\.agentApiConfigMode \?\? 'off'\)/)
   assert.match(bridgeSource, /if \(profiles\.some\(isManagedProfile\)\) removeManagedProfiles\(\)/)
 })

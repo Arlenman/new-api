@@ -380,6 +380,7 @@ func TokenAuth() func(c *gin.Context) {
 			key = strings.TrimSpace(key[7:])
 		}
 		var token *model.Token
+		var runtimeTool string
 		var err error
 		if key == "" || key == "midjourney-proxy" {
 			key = c.Request.Header.Get("mj-api-secret")
@@ -394,8 +395,12 @@ func TokenAuth() func(c *gin.Context) {
 			if strings.HasPrefix(key, "utrs_") {
 				var session *model.UserToolRuntimeSession
 				session, token, err = model.ResolveUserToolRuntimeToken(key)
-				if session != nil {
-					common.SetContextKey(c, constant.ContextKeyUserTool, session.Tool)
+				if err == nil && session != nil {
+					if !userToolRuntimeRequestAllowed(session.Tool, c.Request.Method, c.Request.URL.Path) {
+						abortWithOpenAiMessage(c, http.StatusForbidden, "该工具运行凭证无权访问此接口", types.ErrorCodeAccessDenied)
+						return
+					}
+					runtimeTool = session.Tool
 				}
 			} else {
 				parts = strings.Split(key, "-")
@@ -482,8 +487,43 @@ func TokenAuth() func(c *gin.Context) {
 		if err != nil {
 			return
 		}
+		if runtimeTool != "" {
+			common.SetContextKey(c, constant.ContextKeyUserTool, runtimeTool)
+		}
 		c.Next()
 	}
+}
+
+func userToolRuntimeRequestAllowed(tool, method, path string) bool {
+	if method == http.MethodPost {
+		switch tool {
+		case model.UserToolImagePlayground:
+			switch path {
+			case "/pg/images/generations", "/pg/images/edits", "/pg/responses",
+				"/pg/v1/images/generations", "/pg/v1/images/edits", "/pg/v1/responses":
+				return true
+			}
+		case model.UserToolInfiniteCanvas:
+			switch path {
+			case "/pg/images/generations", "/pg/images/edits", "/pg/responses",
+				"/pg/v1/images/generations", "/pg/v1/images/edits", "/pg/v1/responses",
+				"/v1/responses", "/v1/audio/speech", "/v1/videos":
+				return true
+			}
+		}
+	}
+	if tool != model.UserToolInfiniteCanvas || method != http.MethodGet {
+		return false
+	}
+	if path == "/v1/models" {
+		return true
+	}
+	const videoPrefix = "/v1/videos/"
+	if !strings.HasPrefix(path, videoPrefix) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, videoPrefix), "/")
+	return (len(parts) == 1 && parts[0] != "") || (len(parts) == 2 && parts[0] != "" && parts[1] == "content")
 }
 
 func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) error {

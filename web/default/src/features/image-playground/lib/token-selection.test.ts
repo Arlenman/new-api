@@ -2,8 +2,11 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import type { ApiKey } from '@/features/keys/types'
+import type { UserToolRuntimeSession } from '@/features/user-tools/api'
 
 import {
+  getApiKeyDisplayLabel,
+  getApiKeySelectionOptions,
   isApiKeyAvailable,
   parseRememberedTokenSelection,
   selectPreferredApiKey,
@@ -39,6 +42,37 @@ function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
   }
 }
 
+describe('image playground API key labels', () => {
+  test('uses the runtime-session display label as the authoritative label', () => {
+    const runtimeToken: UserToolRuntimeSession['token'] = {
+      id: 2,
+      name: 'stale-name',
+      masked_key: 'sk-****test',
+      group: 'stale-group',
+      display_label: ' test2 · A组 ',
+    }
+
+    assert.equal(
+      getApiKeyDisplayLabel(runtimeToken, 'Unnamed API key'),
+      'test2 · A组'
+    )
+  })
+
+  test('formats paginated API key options from their name and group', () => {
+    assert.equal(
+      getApiKeyDisplayLabel(
+        { name: 'test2', group: ' A组 ' },
+        'Unnamed API key'
+      ),
+      'test2 · A组'
+    )
+    assert.equal(
+      getApiKeyDisplayLabel({ name: '', group: '' }, 'Unnamed API key'),
+      'Unnamed API key'
+    )
+  })
+})
+
 describe('image playground API key availability', () => {
   test('accepts enabled non-expired keys with quota', () => {
     const now = 1_700_000_000
@@ -65,6 +99,25 @@ describe('image playground API key availability', () => {
       isApiKeyAvailable(createApiKey({ remain_quota: 0 }), now),
       false
     )
+  })
+
+  test('keeps every user key in the selector while marking unavailable keys disabled', () => {
+    const now = 1_700_000_000
+    const options = getApiKeySelectionOptions(
+      [
+        createApiKey({ id: 1, name: 'usable', group: 'A组' }),
+        createApiKey({ id: 2, name: 'disabled', group: 'B组', status: 2 }),
+        createApiKey({ id: 3, name: 'exhausted', remain_quota: 0 }),
+      ],
+      now,
+      'Unnamed API key'
+    )
+
+    assert.deepEqual(options, [
+      { label: 'usable · A组', value: '1', available: true },
+      { label: 'disabled · B组', value: '2', available: false },
+      { label: 'exhausted', value: '3', available: false },
+    ])
   })
 })
 

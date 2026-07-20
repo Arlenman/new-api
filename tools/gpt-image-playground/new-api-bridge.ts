@@ -36,6 +36,14 @@ interface ToolSettingsSnapshot {
   agentImageProfileId: string | null
 }
 
+interface ManagedConfiguration {
+  apiUrl: string
+  apiKey: string
+  profileName: string
+}
+
+let activeConfigureMessage: ConfigureMessage | null = null
+
 function isConfigureMessage(value: unknown): value is ConfigureMessage {
   if (!value || typeof value !== 'object') return false
   const message = value as Record<string, unknown>
@@ -46,6 +54,93 @@ function isConfigureMessage(value: unknown): value is ConfigureMessage {
 
 function isManagedProfile(profile: ApiProfile) {
   return MANAGED_PROFILE_IDS.has(profile.id)
+}
+
+function getManagedConfiguration(message: ConfigureMessage): ManagedConfiguration | null {
+  if (typeof message.apiUrl !== 'string' || typeof message.apiKey !== 'string') return null
+  let apiUrl = message.apiUrl.trim().replace(/\/+$/, '')
+  const apiKey = message.apiKey.trim()
+  if (!apiUrl || !apiKey) return null
+
+  let parsedUrl: URL
+  try {
+    parsedUrl = new URL(apiUrl, window.location.origin)
+  } catch {
+    return null
+  }
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') return null
+  if (message.mode === 'new-api') {
+    const normalizedPathname = parsedUrl.pathname.replace(/\/+$/, '') || '/'
+    if (
+      parsedUrl.origin !== window.location.origin ||
+      normalizedPathname !== '/pg' ||
+      parsedUrl.search !== '' ||
+      parsedUrl.hash !== '' ||
+      !apiKey.startsWith('utrs_')
+    ) {
+      return null
+    }
+    apiUrl = `${parsedUrl.origin}/pg`
+  }
+
+  return {
+    apiUrl,
+    apiKey,
+    profileName: message.profileName?.trim()
+      || (message.mode === 'new-api' ? 'New API' : 'Custom API'),
+  }
+}
+
+function managedProfilesMatch(settings: AppSettings, message: ConfigureMessage) {
+  const configuration = getManagedConfiguration(message)
+  if (!configuration) return false
+
+  const imageProfile = settings.profiles.find((profile) => profile.id === MANAGED_IMAGE_PROFILE_ID)
+  if (
+    !imageProfile ||
+    imageProfile.name !== configuration.profileName ||
+    imageProfile.provider !== 'openai' ||
+    imageProfile.baseUrl !== configuration.apiUrl ||
+    imageProfile.apiKey !== configuration.apiKey ||
+    imageProfile.apiMode !== 'images' ||
+    !imageProfile.model ||
+    imageProfile.codexCli ||
+    imageProfile.apiProxy ||
+    imageProfile.streamImages !== (message.mode === 'new-api')
+  ) {
+    return false
+  }
+
+  const agentProfile = settings.profiles.find((profile) => profile.id === MANAGED_AGENT_PROFILE_ID)
+  if (message.mode === 'tool') {
+    if (agentProfile) return false
+    if (!MANAGED_PROFILE_IDS.has(settings.activeProfileId)) return true
+    return settings.activeProfileId === MANAGED_IMAGE_PROFILE_ID &&
+      settings.agentApiConfigMode === 'off' &&
+      settings.agentTextProfileId === null &&
+      settings.agentImageProfileId === MANAGED_IMAGE_PROFILE_ID
+  }
+
+  if (
+    !agentProfile ||
+    agentProfile.name !== `${configuration.profileName} · Agent` ||
+    agentProfile.provider !== 'openai' ||
+    agentProfile.baseUrl !== configuration.apiUrl ||
+    agentProfile.apiKey !== configuration.apiKey ||
+    agentProfile.apiMode !== 'responses' ||
+    !agentProfile.model ||
+    agentProfile.codexCli ||
+    agentProfile.apiProxy ||
+    !agentProfile.streamImages
+  ) {
+    return false
+  }
+
+  if (!MANAGED_PROFILE_IDS.has(settings.activeProfileId)) return true
+  return settings.activeProfileId === MANAGED_IMAGE_PROFILE_ID &&
+    settings.agentApiConfigMode === 'hybrid' &&
+    settings.agentTextProfileId === MANAGED_AGENT_PROFILE_ID &&
+    settings.agentImageProfileId === MANAGED_IMAGE_PROFILE_ID
 }
 
 function postToParent(type: 'ready' | 'configured', mode?: BridgeMode) {
@@ -108,8 +203,9 @@ function removeManagedProfiles(preferredProfileId?: string | null) {
 
   if (profiles.length === 0) profiles.push(createDefaultOpenAIProfile())
 
-  const rememberedProfileId = snapshot?.activeProfileId
-    ?? preferredProfileId
+  const rememberedProfileId = preferredProfileId
+    ?? (!MANAGED_PROFILE_IDS.has(state.settings.activeProfileId) ? state.settings.activeProfileId : null)
+    ?? snapshot?.activeProfileId
     ?? window.localStorage.getItem(TOOL_PROFILE_STORAGE_KEY)
   const activeProfile = profiles.find((profile) => profile.id === rememberedProfileId)
     ?? profiles.find((profile) => profile.id === state.settings.activeProfileId)
@@ -119,18 +215,23 @@ function removeManagedProfiles(preferredProfileId?: string | null) {
   const currentAgentUsesManagedProfile =
     MANAGED_PROFILE_IDS.has(state.settings.agentTextProfileId ?? '') ||
     MANAGED_PROFILE_IDS.has(state.settings.agentImageProfileId ?? '')
+  const currentAgentTextProfileId = hasProfile(state.settings.agentTextProfileId)
+    ? state.settings.agentTextProfileId
+    : null
+  const currentAgentImageProfileId = hasProfile(state.settings.agentImageProfileId)
+    ? state.settings.agentImageProfileId
+    : null
 
   state.setSettings({
     profiles,
     activeProfileId: activeProfile.id,
-    agentApiConfigMode: snapshot?.agentApiConfigMode
-      ?? (currentAgentUsesManagedProfile ? 'off' : state.settings.agentApiConfigMode),
-    agentTextProfileId: hasProfile(snapshot?.agentTextProfileId)
-      ? snapshot?.agentTextProfileId
-      : (hasProfile(state.settings.agentTextProfileId) ? state.settings.agentTextProfileId : null),
-    agentImageProfileId: hasProfile(snapshot?.agentImageProfileId)
-      ? snapshot?.agentImageProfileId
-      : (hasProfile(state.settings.agentImageProfileId) ? state.settings.agentImageProfileId : activeProfile.id),
+    agentApiConfigMode: currentAgentUsesManagedProfile
+      ? (snapshot?.agentApiConfigMode ?? 'off')
+      : state.settings.agentApiConfigMode,
+    agentTextProfileId: currentAgentTextProfileId
+      ?? (hasProfile(snapshot?.agentTextProfileId) ? snapshot?.agentTextProfileId : null),
+    agentImageProfileId: currentAgentImageProfileId
+      ?? (hasProfile(snapshot?.agentImageProfileId) ? snapshot?.agentImageProfileId : activeProfile.id),
   })
   clearToolSettingsSnapshot()
 }
@@ -140,31 +241,24 @@ function restoreToolProfile() {
 }
 
 function applyManagedProfiles(message: ConfigureMessage) {
-  if (typeof message.apiUrl !== 'string' || typeof message.apiKey !== 'string') return false
-  const apiUrl = message.apiUrl.trim().replace(/\/+$/, '')
-  const apiKey = message.apiKey.trim()
-  if (!apiUrl || !apiKey) return false
-
-  let parsedUrl: URL
-  try {
-    parsedUrl = new URL(apiUrl, window.location.origin)
-  } catch {
-    return false
-  }
-  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') return false
-  if (message.mode === 'new-api' && parsedUrl.origin !== window.location.origin) return false
+  const configuration = getManagedConfiguration(message)
+  if (!configuration) return false
 
   const state = useStore.getState()
-  if (!state.settings.profiles.some(isManagedProfile)) rememberToolSettings(state.settings)
+  const hadManagedProfiles = state.settings.profiles.some(isManagedProfile)
+  const shouldActivateManagedProfile = !hadManagedProfiles || MANAGED_PROFILE_IDS.has(state.settings.activeProfileId)
+  if (!hadManagedProfiles && !readToolSettingsSnapshot()) {
+    rememberToolSettings(state.settings)
+  }
 
   const existingImageProfile = state.settings.profiles.find((profile) => profile.id === MANAGED_IMAGE_PROFILE_ID)
   const managedImageProfile: ApiProfile = {
     ...(existingImageProfile ?? createDefaultOpenAIProfile()),
     id: MANAGED_IMAGE_PROFILE_ID,
-    name: message.profileName?.trim() || (message.mode === 'new-api' ? 'New API' : 'Custom API'),
+    name: configuration.profileName,
     provider: 'openai',
-    baseUrl: apiUrl,
-    apiKey,
+    baseUrl: configuration.apiUrl,
+    apiKey: configuration.apiKey,
     model: existingImageProfile?.model || DEFAULT_IMAGES_MODEL,
     apiMode: 'images',
     codexCli: false,
@@ -174,13 +268,23 @@ function applyManagedProfiles(message: ConfigureMessage) {
   const userProfiles = state.settings.profiles.filter((profile) => !isManagedProfile(profile))
 
   if (message.mode === 'tool') {
-    state.setSettings({
+    const nextSettings: Partial<AppSettings> = {
       profiles: [...userProfiles, managedImageProfile],
-      activeProfileId: MANAGED_IMAGE_PROFILE_ID,
-      agentApiConfigMode: 'off',
-      agentTextProfileId: null,
-      agentImageProfileId: MANAGED_IMAGE_PROFILE_ID,
-    })
+    }
+    if (shouldActivateManagedProfile) {
+      Object.assign(nextSettings, {
+        activeProfileId: MANAGED_IMAGE_PROFILE_ID,
+        agentApiConfigMode: 'off',
+        agentTextProfileId: null,
+        agentImageProfileId: MANAGED_IMAGE_PROFILE_ID,
+      })
+    } else if (state.settings.agentTextProfileId === MANAGED_AGENT_PROFILE_ID) {
+      Object.assign(nextSettings, {
+        agentApiConfigMode: 'off',
+        agentTextProfileId: null,
+      })
+    }
+    state.setSettings(nextSettings)
     return true
   }
 
@@ -188,10 +292,10 @@ function applyManagedProfiles(message: ConfigureMessage) {
   const managedAgentProfile: ApiProfile = {
     ...(existingAgentProfile ?? createDefaultOpenAIProfile({ apiMode: 'responses' })),
     id: MANAGED_AGENT_PROFILE_ID,
-    name: 'New API Agent',
+    name: `${configuration.profileName} · Agent`,
     provider: 'openai',
-    baseUrl: apiUrl,
-    apiKey,
+    baseUrl: configuration.apiUrl,
+    apiKey: configuration.apiKey,
     model: existingAgentProfile?.model || DEFAULT_RESPONSES_MODEL,
     apiMode: 'responses',
     codexCli: false,
@@ -199,13 +303,18 @@ function applyManagedProfiles(message: ConfigureMessage) {
     streamImages: true,
   }
 
-  state.setSettings({
+  const nextSettings: Partial<AppSettings> = {
     profiles: [...userProfiles, managedImageProfile, managedAgentProfile],
-    activeProfileId: MANAGED_IMAGE_PROFILE_ID,
-    agentApiConfigMode: 'hybrid',
-    agentTextProfileId: MANAGED_AGENT_PROFILE_ID,
-    agentImageProfileId: MANAGED_IMAGE_PROFILE_ID,
-  })
+  }
+  if (shouldActivateManagedProfile) {
+    Object.assign(nextSettings, {
+      activeProfileId: MANAGED_IMAGE_PROFILE_ID,
+      agentApiConfigMode: 'hybrid',
+      agentTextProfileId: MANAGED_AGENT_PROFILE_ID,
+      agentImageProfileId: MANAGED_IMAGE_PROFILE_ID,
+    })
+  }
+  state.setSettings(nextSettings)
   return true
 }
 
@@ -214,6 +323,30 @@ export function installNewApiBridge() {
 
   const profiles = useStore.getState().settings.profiles
   if (profiles.some(isManagedProfile)) removeManagedProfiles()
+
+  useStore.persist.onFinishHydration(() => {
+    if (activeConfigureMessage && !managedProfilesMatch(useStore.getState().settings, activeConfigureMessage)) {
+      applyManagedProfiles(activeConfigureMessage)
+    }
+  })
+
+  let repairingManagedProfiles = false
+  useStore.subscribe((state) => {
+    if (
+      !activeConfigureMessage ||
+      repairingManagedProfiles ||
+      managedProfilesMatch(state.settings, activeConfigureMessage)
+    ) {
+      return
+    }
+
+    repairingManagedProfiles = true
+    try {
+      applyManagedProfiles(activeConfigureMessage)
+    } finally {
+      repairingManagedProfiles = false
+    }
+  })
 
   window.addEventListener('message', (event) => {
     if (event.origin !== window.location.origin || event.source !== window.parent) return
@@ -225,11 +358,26 @@ export function installNewApiBridge() {
     if (!isConfigureMessage(event.data)) return
 
     if (event.data.mode === 'tool' && !event.data.apiUrl && !event.data.apiKey) {
+      activeConfigureMessage = null
       restoreToolProfile()
       postToParent('configured', 'tool')
       return
     }
-    if (applyManagedProfiles(event.data)) postToParent('configured', event.data.mode)
+    const previousConfigureMessage = activeConfigureMessage
+    activeConfigureMessage = {
+      source: MESSAGE_SOURCE,
+      type: 'new-api:image-playground:configure',
+      mode: event.data.mode,
+      apiUrl: event.data.apiUrl,
+      apiKey: event.data.apiKey,
+      apiMode: event.data.apiMode,
+      profileName: event.data.profileName,
+    }
+    if (!applyManagedProfiles(activeConfigureMessage)) {
+      activeConfigureMessage = previousConfigureMessage
+      return
+    }
+    postToParent('configured', event.data.mode)
   })
 
   postToParent('ready')

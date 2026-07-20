@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useEffect, useState } from 'react'
 
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { ImagePlayground } from '.'
 import { shouldKeepImagePlaygroundMounted } from './lib/persistent-mount'
@@ -32,17 +33,25 @@ type PersistentImagePlaygroundProps = {
 export function PersistentImagePlayground(
   props: PersistentImagePlaygroundProps
 ) {
-  // Image generation streams live inside the iframe. Keep it mounted after
-  // the first visit so route navigation does not abort in-flight requests.
-  const [hasMounted, setHasMounted] = useState(props.active)
+  const userId = useAuthStore((state) => state.auth.user?.id)
+  // Keep the current account's iframe mounted across route navigation, but
+  // never keep an iframe alive after logout or an account switch.
+  const [mountedUserId, setMountedUserId] = useState<number | null>(() =>
+    props.active && userId ? userId : null
+  )
   const shouldRender = shouldKeepImagePlaygroundMounted(
-    hasMounted,
+    mountedUserId,
+    userId,
     props.active
   )
 
   useEffect(() => {
-    if (props.active) setHasMounted(true)
-  }, [props.active])
+    setMountedUserId((current) => {
+      if (!userId) return null
+      if (props.active) return userId
+      return current === userId ? current : null
+    })
+  }, [props.active, userId])
 
   if (!shouldRender) return null
 
@@ -55,6 +64,7 @@ export function PersistentImagePlayground(
       )}
     >
       <ImagePlayground
+        key={userId}
         active={props.active}
         immersive={props.immersive}
         onImmersiveChange={props.onImmersiveChange}

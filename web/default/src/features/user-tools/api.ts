@@ -38,6 +38,8 @@ export interface UserToolRuntimeSession {
     id: number
     name: string
     masked_key: string
+    group: string
+    display_label: string
   }
 }
 

@@ -20,14 +20,11 @@ import { Link } from '@tanstack/react-router'
 import {
   CircleAlert,
   CircleCheck,
-  Globe2,
   Images,
   KeyRound,
   LoaderCircle,
   Maximize2,
   Minimize2,
-  RefreshCw,
-  Settings2,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -38,23 +35,13 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { getApiKeys } from '@/features/keys/api'
+import { getAllApiKeys } from '@/features/keys/api'
 import type { ApiKey } from '@/features/keys/types'
 import {
   createUserToolRuntimeSession,
@@ -68,18 +55,13 @@ import { useAuthStore } from '@/stores/auth-store'
 import {
   createNewApiConfigureMessage,
   createProbeMessage,
-  createToolConfigureMessage,
   isTrustedImagePlaygroundMessage,
-  type ImagePlaygroundMode,
 } from './lib/bridge'
-import {
-  IMAGE_PLAYGROUND_CONFIGURATION_STORAGE_KEY,
-  normalizeImagePlaygroundApiUrl,
-  parseImagePlaygroundConfiguration,
-  serializeImagePlaygroundConfiguration,
-} from './lib/configuration-storage'
+import { resolveImagePlaygroundHostMode } from './lib/configuration-storage'
 import {
   IMAGE_PLAYGROUND_TOKEN_STORAGE_KEY,
+  getApiKeyDisplayLabel,
+  getApiKeySelectionOptions,
   isApiKeyAvailable,
   parseRememberedTokenSelection,
   selectPreferredApiKey,
@@ -90,11 +72,14 @@ const TOOL_URL = '/_tools/gpt-image-playground/'
 type BridgeStatus = 'loading' | 'configuring' | 'ready' | 'error'
 
 interface AppliedConfiguration {
-  mode: ImagePlaygroundMode
+  mode: 'new-api'
   tokenId: number | null
-  customApiUrl: string
-  customApiKey: string
   revision: number
+}
+
+interface RuntimeTokenLabel {
+  tokenId: number
+  displayLabel: string
 }
 
 type ImagePlaygroundProps = {
@@ -123,16 +108,11 @@ export function ImagePlayground({
   } | null>(null)
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([])
   const [keysLoading, setKeysLoading] = useState(true)
-  const [draftMode, setDraftMode] = useState<ImagePlaygroundMode>('new-api')
-  const [draftTokenId, setDraftTokenId] = useState<number | null>(null)
-  const [draftCustomApiUrl, setDraftCustomApiUrl] = useState('')
-  const [draftCustomApiKey, setDraftCustomApiKey] = useState('')
   const [appliedConfiguration, setAppliedConfiguration] =
     useState<AppliedConfiguration | null>(null)
-  const [configurationOpen, setConfigurationOpen] = useState(false)
-  const [configurationError, setConfigurationError] = useState<string | null>(
-    null
-  )
+  const [keySwitching, setKeySwitching] = useState(false)
+  const [runtimeTokenLabel, setRuntimeTokenLabel] =
+    useState<RuntimeTokenLabel | null>(null)
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>('loading')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
@@ -166,40 +146,23 @@ export function ImagePlayground({
     let cancelled = false
 
     async function loadApiKeys() {
+      const hostMode = resolveImagePlaygroundHostMode(window.localStorage)
       if (!userId) {
         setKeysLoading(false)
         return
       }
 
-      const rememberedConfiguration = parseImagePlaygroundConfiguration(
-        window.localStorage.getItem(IMAGE_PLAYGROUND_CONFIGURATION_STORAGE_KEY),
-        userId
-      )
-      const customApiUrl = rememberedConfiguration?.customApiUrl ?? ''
-      const customApiKey = rememberedConfiguration?.customApiKey ?? ''
-      const normalizedCustomApiUrl =
-        normalizeImagePlaygroundApiUrl(customApiUrl)
-      const useRememberedCustomConfiguration =
-        rememberedConfiguration?.mode === 'tool' &&
-        normalizedCustomApiUrl !== null &&
-        customApiKey.trim() !== ''
-
-      setDraftMode(useRememberedCustomConfiguration ? 'tool' : 'new-api')
-      setDraftCustomApiUrl(customApiUrl)
-      setDraftCustomApiKey(customApiKey)
       setKeysLoading(true)
       setErrorMessage(null)
       try {
-        const response = await getApiKeys({ p: 1, size: 100 })
+        const response = await getAllApiKeys()
         if (!response.success || !response.data) {
           throw new Error(response.message || 'Failed to load API keys')
         }
         if (cancelled) return
 
         const now = Math.floor(Date.now() / 1000)
-        const availableKeys = response.data.items.filter((apiKey) =>
-          isApiKeyAvailable(apiKey, now)
-        )
+        const allApiKeys = response.data.items
         const legacyRememberedTokenId = parseRememberedTokenSelection(
           window.localStorage.getItem(IMAGE_PLAYGROUND_TOKEN_STORAGE_KEY),
           userId
@@ -214,20 +177,15 @@ export function ImagePlayground({
           selectedTokenId = legacyRememberedTokenId
         }
         const preferredKey = selectPreferredApiKey(
-          availableKeys,
+          allApiKeys,
           selectedTokenId,
           now
         )
 
-        setApiKeys(availableKeys)
-        setDraftTokenId(preferredKey?.id ?? null)
+        setApiKeys(allApiKeys)
         setAppliedConfiguration({
-          mode: useRememberedCustomConfiguration ? 'tool' : 'new-api',
-          tokenId: useRememberedCustomConfiguration
-            ? null
-            : (preferredKey?.id ?? null),
-          customApiUrl: normalizedCustomApiUrl ?? customApiUrl,
-          customApiKey,
+          mode: hostMode,
+          tokenId: preferredKey?.id ?? null,
           revision: 1,
         })
         if (preferredKey) {
@@ -239,17 +197,12 @@ export function ImagePlayground({
       } catch {
         if (cancelled) return
         setApiKeys([])
-        setDraftTokenId(null)
         setAppliedConfiguration({
-          mode: useRememberedCustomConfiguration ? 'tool' : 'new-api',
+          mode: hostMode,
           tokenId: null,
-          customApiUrl: normalizedCustomApiUrl ?? customApiUrl,
-          customApiKey,
           revision: 1,
         })
-        if (!useRememberedCustomConfiguration) {
-          setErrorMessage(t('Failed to load API keys'))
-        }
+        setErrorMessage(t('Failed to load API keys'))
       } finally {
         if (!cancelled) setKeysLoading(false)
       }
@@ -317,26 +270,6 @@ export function ImagePlayground({
       setBridgeStatus('configuring')
       setErrorMessage(null)
 
-      if (appliedConfiguration.mode === 'tool') {
-        const customApiUrl = normalizeImagePlaygroundApiUrl(
-          appliedConfiguration.customApiUrl
-        )
-        const customApiKey = appliedConfiguration.customApiKey.trim()
-        if (!customApiUrl || !customApiKey) {
-          configurationInFlightRef.current = null
-          setBridgeStatus('error')
-          setErrorMessage(
-            !customApiUrl ? t('Must be a valid URL') : t('API key is required')
-          )
-          return
-        }
-        iframeWindow.postMessage(
-          createToolConfigureMessage(customApiUrl, customApiKey),
-          window.location.origin
-        )
-        return
-      }
-
       if (!appliedConfiguration.tokenId) {
         configurationInFlightRef.current = null
         setBridgeStatus('error')
@@ -375,10 +308,19 @@ export function ImagePlayground({
             }
 
             runtimeExpiresAtRef.current = response.data.expires_at
+            const tokenDisplayLabel = getApiKeyDisplayLabel(
+              response.data.token,
+              t('Unnamed API key')
+            )
+            setRuntimeTokenLabel({
+              tokenId: response.data.token.id,
+              displayLabel: tokenDisplayLabel,
+            })
             currentIframeWindow.postMessage(
               createNewApiConfigureMessage(
                 window.location.origin,
-                runtimeCredential
+                runtimeCredential,
+                tokenDisplayLabel
               ),
               window.location.origin
             )
@@ -416,83 +358,77 @@ export function ImagePlayground({
 
   const keyOptions = useMemo(
     () =>
-      apiKeys.map((apiKey) => ({
-        label: apiKey.name || t('Unnamed API key'),
-        value: String(apiKey.id),
-      })),
+      getApiKeySelectionOptions(
+        apiKeys,
+        Math.floor(Date.now() / 1000),
+        t('Unnamed API key')
+      ),
     [apiKeys, t]
   )
 
   const appliedSourceLabel = useMemo(() => {
     if (!appliedConfiguration) return null
-    if (appliedConfiguration.mode === 'new-api') {
-      return (
-        apiKeys.find((apiKey) => apiKey.id === appliedConfiguration.tokenId)
-          ?.name || t('Unnamed API key')
-      )
+    if (runtimeTokenLabel?.tokenId === appliedConfiguration.tokenId) {
+      return runtimeTokenLabel.displayLabel
     }
-
-    const customApiUrl = normalizeImagePlaygroundApiUrl(
-      appliedConfiguration.customApiUrl
+    return (
+      keyOptions.find(
+        (option) => option.value === String(appliedConfiguration.tokenId)
+      )?.label ?? null
     )
-    if (!customApiUrl) return null
-    return new URL(customApiUrl).host
-  }, [apiKeys, appliedConfiguration, t])
+  }, [appliedConfiguration, keyOptions, runtimeTokenLabel])
 
-  const normalizedDraftCustomApiUrl =
-    normalizeImagePlaygroundApiUrl(draftCustomApiUrl)
-  const draftCustomConfigurationValid =
-    normalizedDraftCustomApiUrl !== null && draftCustomApiKey.trim() !== ''
-
-  const applyConfiguration = async () => {
-    if (!appliedConfiguration || !userId) return
-    if (draftMode === 'new-api' && !draftTokenId) return
-    if (draftMode === 'tool' && !normalizedDraftCustomApiUrl) {
-      setConfigurationError(t('Must be a valid URL'))
-      return
-    }
-    if (draftMode === 'tool' && !draftCustomApiKey.trim()) {
-      setConfigurationError(t('API key is required'))
+  const switchApiKey = async (value: string | null) => {
+    if (
+      !value ||
+      !appliedConfiguration ||
+      keySwitching
+    ) {
       return
     }
 
-    if (draftMode === 'new-api' && draftTokenId) {
-      try {
-        const preference = await updateUserToolPreference(
-          'image-playground',
-          draftTokenId
-        )
-        if (!preference.success) {
-          throw new Error(preference.message)
-        }
-        window.localStorage.removeItem(IMAGE_PLAYGROUND_TOKEN_STORAGE_KEY)
-      } catch {
-        setConfigurationError(t('Failed to save API key selection'))
-        return
-      }
+    const tokenId = Number(value)
+    const selectedKey = apiKeys.find((apiKey) => apiKey.id === tokenId)
+    if (
+      !Number.isInteger(tokenId) ||
+      tokenId <= 0 ||
+      !selectedKey ||
+      !isApiKeyAvailable(selectedKey, Math.floor(Date.now() / 1000)) ||
+      tokenId === appliedConfiguration.tokenId
+    ) {
+      return
     }
-    window.localStorage.setItem(
-      IMAGE_PLAYGROUND_CONFIGURATION_STORAGE_KEY,
-      serializeImagePlaygroundConfiguration(userId, {
-        mode: draftMode,
-        customApiUrl: normalizedDraftCustomApiUrl ?? draftCustomApiUrl,
-        customApiKey: draftCustomApiKey,
-      })
-    )
 
-    configurationInFlightRef.current = null
-    configuredRevisionRef.current = null
-    setBridgeStatus('loading')
+    setKeySwitching(true)
     setErrorMessage(null)
-    setConfigurationError(null)
-    setAppliedConfiguration({
-      mode: draftMode,
-      tokenId: draftMode === 'new-api' ? draftTokenId : null,
-      customApiUrl: normalizedDraftCustomApiUrl ?? draftCustomApiUrl,
-      customApiKey: draftCustomApiKey.trim(),
-      revision: appliedConfiguration.revision + 1,
-    })
-    setConfigurationOpen(false)
+    try {
+      const preference = await updateUserToolPreference(
+        'image-playground',
+        tokenId
+      )
+      if (!preference.success) {
+        throw new Error(preference.message)
+      }
+
+      window.localStorage.removeItem(IMAGE_PLAYGROUND_TOKEN_STORAGE_KEY)
+      configurationInFlightRef.current = null
+      configuredRevisionRef.current = null
+      runtimeCredentialRequestRef.current = null
+      runtimeExpiresAtRef.current = 0
+      setBridgeStatus('loading')
+      setRuntimeTokenLabel(null)
+      const nextRevision = appliedConfiguration.revision + 1
+      appliedRevisionRef.current = nextRevision
+      setAppliedConfiguration({
+        ...appliedConfiguration,
+        tokenId,
+        revision: nextRevision,
+      })
+    } catch {
+      setErrorMessage(t('Failed to save API key selection'))
+    } finally {
+      setKeySwitching(false)
+    }
   }
 
   const toggleFullscreen = async () => {
@@ -514,17 +450,6 @@ export function ImagePlayground({
       onImmersiveChange(false)
       toast.error(t('Unable to enter fullscreen'))
     }
-  }
-
-  const handleConfigurationOpenChange = (open: boolean) => {
-    if (open && appliedConfiguration) {
-      setDraftMode(appliedConfiguration.mode)
-      setDraftTokenId(appliedConfiguration.tokenId)
-      setDraftCustomApiUrl(appliedConfiguration.customApiUrl)
-      setDraftCustomApiKey(appliedConfiguration.customApiKey)
-      setConfigurationError(null)
-    }
-    setConfigurationOpen(open)
   }
 
   const iframeLoaded = () => {
@@ -590,8 +515,7 @@ export function ImagePlayground({
   }
 
   return (
-    <>
-      <SectionPageLayout fixedContent immersive={immersive}>
+    <SectionPageLayout fixedContent immersive={immersive}>
         <SectionPageLayout.Title>
           <span className='inline-flex items-center gap-2'>
             <Images className='size-5' />
@@ -602,19 +526,47 @@ export function ImagePlayground({
           </span>
         </SectionPageLayout.Title>
         <SectionPageLayout.Actions>
-          {appliedSourceLabel && (
-            <Badge
-              variant='secondary'
-              className='hidden max-w-52 justify-start sm:inline-flex'
-              title={appliedSourceLabel}
+          {keyOptions.length > 0 ? (
+            <Select
+              items={keyOptions}
+              value={
+                appliedConfiguration?.tokenId
+                  ? String(appliedConfiguration.tokenId)
+                  : null
+              }
+              disabled={keySwitching}
+              onValueChange={(value) => void switchApiKey(value)}
             >
-              {appliedConfiguration?.mode === 'new-api' ? (
-                <KeyRound />
-              ) : (
-                <Globe2 />
-              )}
-              <span className='truncate'>{appliedSourceLabel}</span>
-            </Badge>
+              <SelectTrigger
+                size='sm'
+                className='flex w-40 sm:w-52'
+                aria-label={t('Select an API key')}
+                title={appliedSourceLabel ?? t('Select an API key')}
+              >
+                {keySwitching ? (
+                  <LoaderCircle className='animate-spin' />
+                ) : (
+                  <KeyRound />
+                )}
+                <SelectValue placeholder={t('Select an API key')} />
+              </SelectTrigger>
+              <SelectContent alignItemWithTrigger={false}>
+                {keyOptions.map((option) => (
+                  <SelectItem
+                    key={option.value}
+                    value={option.value}
+                    disabled={!option.available}
+                  >
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <Button variant='outline' size='sm' render={<Link to='/keys' />}>
+              <KeyRound />
+              {t('Create an API key first')}
+            </Button>
           )}
           <div className='text-muted-foreground flex items-center gap-1.5 text-xs whitespace-nowrap'>
             {bridgeStatusIcon}
@@ -633,16 +585,6 @@ export function ImagePlayground({
             onClick={() => void toggleFullscreen()}
           >
             {immersive ? <Minimize2 /> : <Maximize2 />}
-          </Button>
-          <Button
-            type='button'
-            variant='outline'
-            size='icon-sm'
-            aria-label={t('API configuration')}
-            title={t('API configuration')}
-            onClick={() => handleConfigurationOpenChange(true)}
-          >
-            <Settings2 />
           </Button>
         </SectionPageLayout.Actions>
         <SectionPageLayout.Content>
@@ -667,7 +609,7 @@ export function ImagePlayground({
                 <>
                   {/* oxlint-disable-next-line react/iframe-missing-sandbox -- The tool needs same-origin storage and scripts for bridge configuration and async task recovery. */}
                   <iframe
-                    key={appliedConfiguration.revision}
+                    key={`${userId}:${appliedConfiguration.revision}`}
                     ref={iframeRef}
                     src={TOOL_URL}
                     title={t('Image Playground')}
@@ -693,185 +635,6 @@ export function ImagePlayground({
             </div>
           </div>
         </SectionPageLayout.Content>
-      </SectionPageLayout>
-
-      <Dialog
-        open={configurationOpen}
-        onOpenChange={handleConfigurationOpenChange}
-      >
-        <DialogContent className='sm:max-w-xl'>
-          <DialogHeader>
-            <DialogTitle>{t('API configuration')}</DialogTitle>
-            <DialogDescription>
-              {t(
-                'Use a New API key from your account, or connect a third-party OpenAI-compatible API.'
-              )}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className='flex flex-col gap-4'>
-            <div className='grid gap-2 sm:grid-cols-2'>
-              <Button
-                type='button'
-                variant={draftMode === 'new-api' ? 'default' : 'outline'}
-                className='h-auto justify-start px-3 py-3 text-left whitespace-normal'
-                aria-pressed={draftMode === 'new-api'}
-                onClick={() => {
-                  setDraftMode('new-api')
-                  setConfigurationError(null)
-                }}
-              >
-                <KeyRound className='size-4' />
-                <span>
-                  <span className='block'>{t('Use New API Key')}</span>
-                  <span
-                    className={cn(
-                      'block text-xs font-normal',
-                      draftMode === 'new-api'
-                        ? 'text-primary-foreground/75'
-                        : 'text-muted-foreground'
-                    )}
-                  >
-                    {t('Automatically use a key from your account.')}
-                  </span>
-                </span>
-              </Button>
-              <Button
-                type='button'
-                variant={draftMode === 'tool' ? 'default' : 'outline'}
-                className='h-auto justify-start px-3 py-3 text-left whitespace-normal'
-                aria-pressed={draftMode === 'tool'}
-                onClick={() => {
-                  setDraftMode('tool')
-                  setConfigurationError(null)
-                }}
-              >
-                <Globe2 className='size-4' />
-                <span>
-                  <span className='block'>{t('Use third-party API')}</span>
-                  <span
-                    className={cn(
-                      'block text-xs font-normal',
-                      draftMode === 'tool'
-                        ? 'text-primary-foreground/75'
-                        : 'text-muted-foreground'
-                    )}
-                  >
-                    {t('Use a custom Base URL and API key.')}
-                  </span>
-                </span>
-              </Button>
-            </div>
-
-            <div className='bg-muted/30 rounded-lg border p-4'>
-              {draftMode === 'new-api' ? (
-                <div className='min-w-0 space-y-2'>
-                  <Label htmlFor='image-key'>{t('API Key')}</Label>
-                  {keyOptions.length > 0 ? (
-                    <Select
-                      items={keyOptions}
-                      value={draftTokenId ? String(draftTokenId) : null}
-                      onValueChange={(value) =>
-                        setDraftTokenId(value ? Number(value) : null)
-                      }
-                    >
-                      <SelectTrigger
-                        id='image-key'
-                        className='bg-background w-full'
-                      >
-                        <SelectValue placeholder={t('Select an API key')} />
-                      </SelectTrigger>
-                      <SelectContent alignItemWithTrigger={false}>
-                        {keyOptions.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  ) : (
-                    <Button
-                      variant='outline'
-                      className='bg-background w-full justify-start'
-                      render={<Link to='/keys' />}
-                    >
-                      <KeyRound />
-                      {t('Create an API key first')}
-                    </Button>
-                  )}
-                </div>
-              ) : (
-                <div className='space-y-4'>
-                  <div className='space-y-2'>
-                    <Label htmlFor='image-custom-base-url'>
-                      {t('Base URL')}
-                    </Label>
-                    <Input
-                      id='image-custom-base-url'
-                      type='url'
-                      value={draftCustomApiUrl}
-                      placeholder='https://api.example.com/v1'
-                      className='bg-background'
-                      aria-invalid={
-                        draftCustomApiUrl !== '' &&
-                        normalizedDraftCustomApiUrl === null
-                      }
-                      onChange={(event) => {
-                        setDraftCustomApiUrl(event.target.value)
-                        setConfigurationError(null)
-                      }}
-                    />
-                  </div>
-                  <div className='space-y-2'>
-                    <Label htmlFor='image-custom-api-key'>{t('API Key')}</Label>
-                    <Input
-                      id='image-custom-api-key'
-                      type='password'
-                      value={draftCustomApiKey}
-                      placeholder='sk-...'
-                      autoComplete='off'
-                      className='bg-background'
-                      onChange={(event) => {
-                        setDraftCustomApiKey(event.target.value)
-                        setConfigurationError(null)
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {configurationError && (
-              <div className='text-destructive flex items-center gap-2 text-sm'>
-                <CircleAlert className='size-4 shrink-0' />
-                {configurationError}
-              </div>
-            )}
-          </div>
-
-          <DialogFooter>
-            <Button
-              type='button'
-              variant='outline'
-              onClick={() => setConfigurationOpen(false)}
-            >
-              {t('Cancel')}
-            </Button>
-            <Button
-              type='button'
-              disabled={
-                draftMode === 'new-api'
-                  ? !draftTokenId
-                  : !draftCustomConfigurationValid
-              }
-              onClick={applyConfiguration}
-            >
-              <RefreshCw />
-              {t('Apply and reload')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+    </SectionPageLayout>
   )
 }

@@ -1,24 +1,33 @@
-ARG GPT_IMAGE_PLAYGROUND_REF=a10477581b3d43ac98d39777e4445625a9db113d
+ARG GPT_IMAGE_PLAYGROUND_REF=ae8de0f192a22ec23513aad75ed6766f0245976c
+ARG INFINITE_CANVAS_REF=c81bb8b651b403eb60d04fd84ea57276f2f2b86c
 
 FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS image-playground-builder
 
 ARG GPT_IMAGE_PLAYGROUND_REF
-RUN apk add --no-cache git
 WORKDIR /build
-RUN git init -q source \
-    && git -C source remote add origin https://github.com/CookSleep/gpt_image_playground.git \
-    && for attempt in 1 2 3; do \
-        if git -C source fetch --depth 1 origin "${GPT_IMAGE_PLAYGROUND_REF}"; then break; fi; \
-        if [ "${attempt}" = 3 ]; then exit 1; fi; \
-        sleep $((attempt * 5)); \
-    done \
-    && git -C source checkout --detach FETCH_HEAD
-COPY tools/gpt-image-playground /build/integration
-RUN node /build/integration/patch-upstream.mjs /build/source \
+COPY third_party/gpt-image-playground ./source
+COPY tools/gpt-image-playground ./integration
+RUN test "$(cat /build/integration/upstream.commit)" = "${GPT_IMAGE_PLAYGROUND_REF}" \
+    && node /build/integration/patch-upstream.mjs /build/source \
     && cd /build/source \
     && npm ci \
     && npm run build \
     && node /build/integration/write-build-info.mjs /build/source /build/source/dist
+
+FROM oven/bun:1@sha256:0733e50325078969732ebe3b15ce4c4be5082f18c4ac1a0f0ca4839c2e4e42a7 AS infinite-canvas-builder
+
+ARG INFINITE_CANVAS_REF
+WORKDIR /build
+COPY third_party/infinite-canvas ./source
+COPY tools/infinite-canvas ./integration
+RUN test "$(cat /build/integration/upstream.commit)" = "${INFINITE_CANVAS_REF}" \
+    && printf '%s\n' "${INFINITE_CANVAS_REF}" > /build/source/.new-api-upstream-commit \
+    && bun /build/integration/patch-upstream.mjs /build/source \
+    && cd /build/source/web \
+    && bun install \
+    && VITE_BASE=/_tools/infinite-canvas/ bun run build \
+    && bun /build/integration/write-build-info.mjs /build/source /build/source/web/dist \
+    && rm /build/source/.new-api-upstream-commit
 
 FROM oven/bun:1@sha256:0733e50325078969732ebe3b15ce4c4be5082f18c4ac1a0f0ca4839c2e4e42a7 AS builder
 
@@ -72,6 +81,9 @@ COPY LICENSE NOTICE THIRD-PARTY-LICENSES.md /licenses/
 COPY --from=image-playground-builder /build/source/LICENSE /licenses/gpt-image-playground-LICENSE
 COPY --from=image-playground-builder /build/source/dist /opt/new-api/tools/gpt-image-playground
 ENV GPT_IMAGE_PLAYGROUND_DIST=/opt/new-api/tools/gpt-image-playground
+COPY --from=infinite-canvas-builder /build/source/LICENSE /licenses/infinite-canvas-LICENSE
+COPY --from=infinite-canvas-builder /build/source/web/dist /opt/new-api/tools/infinite-canvas
+ENV INFINITE_CANVAS_DIST=/opt/new-api/tools/infinite-canvas
 EXPOSE 3000
 WORKDIR /data
 ENTRYPOINT ["/new-api"]

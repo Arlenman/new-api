@@ -96,6 +96,12 @@ export function SidebarModulesSection({
         title: t('Image Playground'),
         description: t('Generate images with account or custom API keys.'),
       },
+      infiniteCanvas: {
+        title: t('Infinite Canvas'),
+        description: t(
+          'Canvas editor with parallel image generation and asynchronous media tasks.'
+        ),
+      },
       chat: {
         title: t('Chat'),
         description: t('Access previous conversations and start new ones.'),

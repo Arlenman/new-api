@@ -12,7 +12,8 @@ describe('image playground bridge messages', () => {
   test('creates same-origin New API configuration without putting the key in the URL', () => {
     const message = createNewApiConfigureMessage(
       'https://new-api.example.com/',
-      'utrs_runtime-session'
+      'utrs_runtime-session',
+      ' test2 · A组 '
     )
 
     assert.deepEqual(message, {
@@ -22,9 +23,21 @@ describe('image playground bridge messages', () => {
       apiUrl: 'https://new-api.example.com/pg',
       apiKey: 'utrs_runtime-session',
       apiMode: 'images',
-      profileName: 'New API',
+      profileName: 'New API · test2 · A组',
     })
     assert.equal(message.apiUrl.includes('utrs_runtime-session'), false)
+  })
+
+  test('rejects a persistent user API key for New API managed profiles', () => {
+    assert.throws(
+      () =>
+        createNewApiConfigureMessage(
+          'https://new-api.example.com/',
+          'sk-persistent-user-key',
+          'test2'
+        ),
+      /runtime credential/
+    )
   })
 
   test('creates probe and third-party tool configuration messages', () => {

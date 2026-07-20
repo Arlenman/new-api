@@ -104,5 +104,29 @@ func (tool *imagePlayground) serve(c *gin.Context) {
 	if contentType := mime.TypeByExtension(filepath.Ext(cleanPath)); contentType != "" {
 		c.Header("Content-Type", contentType)
 	}
+	if cleanPath == "index.html" {
+		index, readErr := os.ReadFile(filepath.Join(tool.root, cleanPath))
+		if readErr != nil {
+			common.SysError("read image playground index: " + readErr.Error())
+			c.Status(http.StatusInternalServerError)
+			return
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", injectImagePlaygroundUserIdentity(index, c.GetInt("id")))
+		return
+	}
 	http.ServeContent(c.Writer, c.Request, path.Base(cleanPath), info.ModTime(), file)
+}
+
+func injectImagePlaygroundUserIdentity(index []byte, userID int) []byte {
+	if userID <= 0 {
+		return index
+	}
+
+	script := fmt.Sprintf(`<script>window.__NEW_API_USER_ID__=%d;</script>`, userID)
+	html := string(index)
+	headEnd := strings.Index(strings.ToLower(html), "</head>")
+	if headEnd < 0 {
+		return append([]byte(script), index...)
+	}
+	return []byte(html[:headEnd] + script + html[headEnd:])
 }

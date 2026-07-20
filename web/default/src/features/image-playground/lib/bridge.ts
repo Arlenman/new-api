@@ -57,17 +57,25 @@ export function createProbeMessage(): ImagePlaygroundProbeMessage {
 
 export function createNewApiConfigureMessage(
   origin: string,
-  apiKey: string
+  apiKey: string,
+  apiKeyDisplayLabel?: string
 ): ImagePlaygroundConfigureMessage {
   const apiUrl = `${new URL(origin).origin}/pg`
+  const normalizedApiKey = apiKey.trim()
+  if (!normalizedApiKey.startsWith('utrs_')) {
+    throw new Error('New API image playground requires a runtime credential')
+  }
+  const normalizedApiKeyDisplayLabel = apiKeyDisplayLabel?.trim()
   return {
     source: PARENT_SOURCE,
     type: 'new-api:image-playground:configure',
     mode: 'new-api',
     apiUrl,
-    apiKey: apiKey.trim(),
+    apiKey: normalizedApiKey,
     apiMode: 'images',
-    profileName: 'New API',
+    profileName: normalizedApiKeyDisplayLabel
+      ? `New API · ${normalizedApiKeyDisplayLabel}`
+      : 'New API',
   }
 }
 

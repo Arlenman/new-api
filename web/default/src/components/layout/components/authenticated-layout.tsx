@@ -26,6 +26,8 @@ import { LayoutProvider } from '@/context/layout-provider'
 import { SearchProvider } from '@/context/search-provider'
 import { isImagePlaygroundPath } from '@/features/image-playground/lib/persistent-mount'
 import { PersistentImagePlayground } from '@/features/image-playground/persistent-image-playground'
+import { isInfiniteCanvasPath } from '@/features/infinite-canvas/lib/persistent-mount'
+import { PersistentInfiniteCanvas } from '@/features/infinite-canvas/persistent-infinite-canvas'
 import { getCookie } from '@/lib/cookies'
 import { cn } from '@/lib/utils'
 
@@ -42,6 +44,7 @@ export function AuthenticatedLayout(props: AuthenticatedLayoutProps) {
     select: (state) => {
       const pathname = state.location.pathname
       if (isImagePlaygroundPath(pathname)) return 'image-playground'
+      if (isInfiniteCanvasPath(pathname)) return 'infinite-canvas'
       return null
     },
   })
@@ -88,6 +91,9 @@ export function AuthenticatedLayout(props: AuthenticatedLayoutProps) {
                 active={activeTool === 'image-playground'}
                 immersive={imagePlaygroundImmersive}
                 onImmersiveChange={setImagePlaygroundImmersive}
+              />
+              <PersistentInfiniteCanvas
+                active={activeTool === 'infinite-canvas'}
               />
             </SidebarInset>
           </div>

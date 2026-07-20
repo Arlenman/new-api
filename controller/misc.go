@@ -50,6 +50,7 @@ func GetStatus(c *gin.Context) {
 	passkeySetting := system_setting.GetPasskeySettings()
 	legalSetting := system_setting.GetLegalSettings()
 	imagePlaygroundStatus := common.GetImagePlaygroundStatus()
+	infiniteCanvasStatus := common.GetInfiniteCanvasStatus()
 
 	data := gin.H{
 		"version":                     common.Version,
@@ -57,6 +58,10 @@ func GetStatus(c *gin.Context) {
 		"image_playground_version":    imagePlaygroundStatus.Version,
 		"image_playground_commit":     imagePlaygroundStatus.Commit,
 		"image_playground_built_at":   imagePlaygroundStatus.BuiltAt,
+		"infinite_canvas_available":   infiniteCanvasStatus.Available,
+		"infinite_canvas_version":     infiniteCanvasStatus.Version,
+		"infinite_canvas_commit":      infiniteCanvasStatus.Commit,
+		"infinite_canvas_built_at":    infiniteCanvasStatus.BuiltAt,
 		"start_time":                  common.StartTime,
 		"email_verification":          common.EmailVerificationEnabled,
 		"github_oauth":                common.GitHubOAuthEnabled,

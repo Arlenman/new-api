@@ -23,13 +23,49 @@ interface RememberedTokenSelection {
   tokenId: number
 }
 
+interface ApiKeyDisplaySource {
+  name?: string | null
+  group?: string | null
+  display_label?: string | null
+}
+
+export interface ApiKeySelectionOption {
+  label: string
+  value: string
+  available: boolean
+}
+
 export const IMAGE_PLAYGROUND_TOKEN_STORAGE_KEY =
   'new-api:image-playground:token-selection'
+
+export function getApiKeyDisplayLabel(
+  source: ApiKeyDisplaySource,
+  unnamedLabel: string
+): string {
+  const authoritativeLabel = source.display_label?.trim()
+  if (authoritativeLabel) return authoritativeLabel
+
+  const name = source.name?.trim() || unnamedLabel
+  const group = source.group?.trim()
+  return group ? `${name} · ${group}` : name
+}
 
 export function isApiKeyAvailable(apiKey: ApiKey, now: number): boolean {
   if (apiKey.status !== 1) return false
   if (apiKey.expired_time !== -1 && apiKey.expired_time <= now) return false
   return apiKey.unlimited_quota || apiKey.remain_quota > 0
+}
+
+export function getApiKeySelectionOptions(
+  apiKeys: ApiKey[],
+  now: number,
+  unnamedLabel: string
+): ApiKeySelectionOption[] {
+  return apiKeys.map((apiKey) => ({
+    label: getApiKeyDisplayLabel(apiKey, unnamedLabel),
+    value: String(apiKey.id),
+    available: isApiKeyAvailable(apiKey, now),
+  }))
 }
 
 export function selectPreferredApiKey(
