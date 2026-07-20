@@ -54,7 +54,15 @@ export function Playground() {
     renameActiveSessionFromMessage,
   } = usePlaygroundState()
 
-  const { sendChat, sendImage, stopGeneration, isGenerating } = useChatHandler({
+  const {
+    sendChat,
+    sendImage,
+    stopGeneration,
+    activeImageSessionIds,
+    isGenerating,
+    isSessionNavigationDisabled,
+  } = useChatHandler({
+    activeSessionId,
     config,
     parameterEnabled,
     onMessageUpdate: updateMessages,
@@ -101,7 +109,8 @@ export function Playground() {
     <div className='relative flex size-full min-h-0 flex-col overflow-hidden md:flex-row'>
       <PlaygroundSessionSidebar
         activeSessionId={activeSessionId}
-        disabled={isGenerating}
+        disabled={isSessionNavigationDisabled}
+        generatingSessionIds={activeImageSessionIds}
         sessions={sessions}
         onCreateSession={createSession}
         onDeleteSession={deleteSession}

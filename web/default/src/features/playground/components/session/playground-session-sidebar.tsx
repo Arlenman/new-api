@@ -50,6 +50,7 @@ import type { PlaygroundSession } from '../../types'
 type PlaygroundSessionSidebarProps = {
   activeSessionId: string | null
   disabled?: boolean
+  generatingSessionIds?: string[]
   sessions: PlaygroundSession[]
   onCreateSession: () => void
   onDeleteSession: (sessionId: string) => void
@@ -60,6 +61,7 @@ type PlaygroundSessionSidebarProps = {
 export function PlaygroundSessionSidebar({
   activeSessionId,
   disabled,
+  generatingSessionIds = [],
   sessions,
   onCreateSession,
   onDeleteSession,
@@ -118,6 +120,7 @@ export function PlaygroundSessionSidebar({
         <div className='flex gap-1 p-2 md:flex-col'>
           {sessions.map((session) => {
             const isActive = session.id === activeSessionId
+            const isGenerating = generatingSessionIds.includes(session.id)
 
             return (
               <div
@@ -151,7 +154,7 @@ export function PlaygroundSessionSidebar({
                       <Button
                         aria-label={t('Conversation actions')}
                         className='mr-1 opacity-100 md:opacity-0 md:group-hover/session:opacity-100'
-                        disabled={disabled}
+                        disabled={disabled || isGenerating}
                         size='icon-sm'
                         variant='ghost'
                       />
@@ -161,14 +164,14 @@ export function PlaygroundSessionSidebar({
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align='end'>
                     <DropdownMenuItem
-                      disabled={disabled}
+                      disabled={disabled || isGenerating}
                       onClick={() => setRenameSession(session)}
                     >
                       <Edit3Icon className='mr-2 size-4' />
                       {t('Rename conversation')}
                     </DropdownMenuItem>
                     <DropdownMenuItem
-                      disabled={disabled}
+                      disabled={disabled || isGenerating}
                       onClick={() => setDeleteSession(session)}
                     >
                       <Trash2Icon className='mr-2 size-4' />
@@ -209,11 +212,11 @@ export function PlaygroundSessionSidebar({
         </DialogContent>
       </Dialog>
 
-	    <ConfirmDialog
-	      destructive
-	      desc={t(
-	        'This conversation will be deleted from your account. This cannot be undone.'
-	      )}
+      <ConfirmDialog
+        destructive
+        desc={t(
+          'This conversation will be deleted from your account. This cannot be undone.'
+        )}
         confirmText={t('Delete')}
         handleConfirm={handleDelete}
         open={Boolean(deleteSession)}

@@ -17,7 +17,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { PlaygroundSession, Message } from '../../types.ts'
-import { normalizeImageGenerationRetryableMessage } from '../message/image-generation-error-utils.ts'
+import {
+  isLegacyImageGeneration524ErrorMessage,
+  normalizeImageGenerationRetryableMessage,
+} from '../message/image-generation-error-utils.ts'
 
 export type PlaygroundSessionServerItem = {
   id: string
@@ -46,6 +49,13 @@ export function normalizePlaygroundSessionResponse(
 }
 
 function normalizeServerMessage(message: Message): Message {
+  if (isLegacyImageGeneration524ErrorMessage(message)) {
+    return normalizeImageGenerationRetryableMessage({
+      ...message,
+      mode: 'image',
+    })
+  }
+
   return normalizeImageGenerationRetryableMessage(message)
 }
 

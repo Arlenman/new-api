@@ -46,6 +46,7 @@ import type {
 import { useStreamRequest } from './use-stream-request'
 
 interface UseChatHandlerOptions {
+  activeSessionId: string | null
   config: PlaygroundConfig
   parameterEnabled: ParameterEnabled
   onMessageUpdate: (updater: (prev: Message[]) => Message[]) => void
@@ -84,6 +85,7 @@ function mergePendingStreamChunk(
  * Hook for handling chat message sending and receiving
  */
 export function useChatHandler({
+  activeSessionId,
   config,
   parameterEnabled,
   onMessageUpdate,
@@ -91,8 +93,8 @@ export function useChatHandler({
   const { t } = useTranslation()
   const { sendStreamRequest, stopStream, isStreaming } = useStreamRequest()
   const [isRequesting, setIsRequesting] = useState(false)
-  const [activeImageTaskCount, setActiveImageTaskCount] = useState(() =>
-    imageGenerationTaskManager.getActiveTaskCount()
+  const [activeImageSessionIds, setActiveImageSessionIds] = useState(
+    () => imageGenerationTaskManager.getSnapshot().activeSessionIds
   )
   const abortControllerRef = useRef<AbortController | null>(null)
   const requestIdRef = useRef(0)
@@ -162,7 +164,7 @@ export function useChatHandler({
   useEffect(
     () =>
       imageGenerationTaskManager.subscribe((snapshot) => {
-        setActiveImageTaskCount(snapshot.activeTaskIds.length)
+        setActiveImageSessionIds(snapshot.activeSessionIds)
       }),
     []
   )
@@ -348,7 +350,9 @@ export function useChatHandler({
     flushStreamUpdates()
     abortControllerRef.current?.abort()
     abortControllerRef.current = null
-    imageGenerationTaskManager.cancelAll()
+    if (activeSessionId) {
+      imageGenerationTaskManager.cancelSession(activeSessionId)
+    }
     setIsRequesting(false)
     onMessageUpdate((prev) =>
       updateLastAssistantMessage(prev, (message) =>
@@ -357,12 +361,19 @@ export function useChatHandler({
           : message
       )
     )
-  }, [stopStream, flushStreamUpdates, onMessageUpdate])
+  }, [activeSessionId, stopStream, flushStreamUpdates, onMessageUpdate])
+
+  const isChatGenerating = isStreaming || isRequesting
+  const isActiveSessionGeneratingImage = Boolean(
+    activeSessionId && activeImageSessionIds.includes(activeSessionId)
+  )
 
   return {
     sendChat,
     sendImage,
     stopGeneration,
-    isGenerating: isStreaming || isRequesting || activeImageTaskCount > 0,
+    activeImageSessionIds,
+    isGenerating: isChatGenerating || isActiveSessionGeneratingImage,
+    isSessionNavigationDisabled: isChatGenerating,
   }
 }

@@ -135,6 +135,7 @@ export function usePlaygroundState() {
 
   const persistSessions = useCallback((sessionsToSave: PlaygroundSession[]) => {
     latestSessionsRef.current = sessionsToSave
+    imageGenerationTaskManager.setSessionsSnapshot(sessionsToSave)
 
     if (!hasLoadedMessagesRef.current) {
       return
@@ -225,6 +226,7 @@ export function usePlaygroundState() {
         ) ?? initial.sessions[0]
 
       latestSessionsRef.current = initial.sessions
+      imageGenerationTaskManager.setSessionsSnapshot(initial.sessions)
       latestActiveSessionIdRef.current = activeSession.id
       latestMessagesRef.current = activeSession.messages
       hasLoadedMessagesRef.current = true

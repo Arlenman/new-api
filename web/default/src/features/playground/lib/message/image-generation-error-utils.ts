@@ -32,6 +32,9 @@ import {
   updateCurrentVersionContent,
 } from './message-utils.ts'
 
+const LEGACY_IMAGE_GENERATION_524_PATTERN =
+  /^Request error occurred:\s*Request failed with status code 524$/i
+
 const RECOVERABLE_IMAGE_ERROR_PATTERNS = [
   /Request error occurred/i,
   /Request failed with status code 5\d\d/i,
@@ -60,6 +63,21 @@ function hasRecoverableImageErrorContent(content: string): boolean {
 
 function isAssistantOrUnknownMessage(message: Message): boolean {
   return message.from === MESSAGE_ROLES.ASSISTANT || !message.from
+}
+
+export function isLegacyImageGeneration524ErrorMessage(
+  message: Message
+): boolean {
+  if (
+    !isAssistantOrUnknownMessage(message) ||
+    message.mode != null ||
+    message.imageGeneration != null ||
+    message.status !== MESSAGE_STATUS.ERROR
+  ) {
+    return false
+  }
+
+  return LEGACY_IMAGE_GENERATION_524_PATTERN.test(getMessageContent(message))
 }
 
 export function isPendingImageGenerationMessage(message: Message): boolean {

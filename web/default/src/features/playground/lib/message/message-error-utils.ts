@@ -18,7 +18,10 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { MESSAGE_STATUS } from '../../constants.ts'
 import type { Message } from '../../types.ts'
-import { isRecoverableImageGenerationErrorMessage } from './image-generation-error-utils.ts'
+import {
+  isLegacyImageGeneration524ErrorMessage,
+  isRecoverableImageGenerationErrorMessage,
+} from './image-generation-error-utils.ts'
 import { getMessageContent } from './message-utils.ts'
 
 export const MODEL_PRICING_SETTINGS_PATH =
@@ -60,7 +63,8 @@ export function isAdminRole(role?: number | null): boolean {
 export function isErrorMessage(message: Message): boolean {
   return (
     message.status === MESSAGE_STATUS.ERROR &&
-    !isRecoverableImageGenerationErrorMessage(message)
+    !isRecoverableImageGenerationErrorMessage(message) &&
+    !isLegacyImageGeneration524ErrorMessage(message)
   )
 }
 
