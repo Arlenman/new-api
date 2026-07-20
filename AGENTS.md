@@ -58,6 +58,8 @@ web/             — Frontend themes container
 
 ### Common Code Quality
 
+**Parallel agent execution:** When a task contains independent subtasks that can be performed concurrently, use multiple agents in parallel when doing so can shorten delivery time without reducing quality. Keep immediate blockers and tightly coupled critical-path work local; delegate only concrete, self-contained subtasks with clear outputs and, for code changes, disjoint write scopes. Do not duplicate work across agents. Review and integrate every delegated result, then run the same required tests and acceptance checks as for locally implemented work before declaring completion.
+
 - New code should stay direct and readable. Prefer early returns, clear branches, and well-named local variables to deep nesting or layered control flow.
 - Minimize nested function definitions. Use them only when required by a callback API or when keeping the closure local is clearly simpler than adding another symbol.
 - Avoid adding package-level or module-level helper functions that have only one caller and do not express a stable business concept. Inline that logic at the call site instead.
