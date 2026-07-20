@@ -25,6 +25,7 @@ jobs:
         with:
           fetch-depth: 1
           ref: ${{ inputs.branch }}
+          submodules: recursive
 
       - name: Resolve Docker tags
         id: version
@@ -72,6 +73,7 @@ jobs:
         with:
           fetch-depth: 1
           ref: ${{ needs.prepare.outputs.sha }}
+          submodules: recursive
 
       - name: Write VERSION
         run: |
