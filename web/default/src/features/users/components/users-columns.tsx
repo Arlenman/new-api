@@ -42,6 +42,7 @@ import {
 } from '../constants'
 import type { User } from '../types'
 import { DataTableRowActions } from './data-table-row-actions'
+import { HiddenUserCheckbox } from './hidden-user-checkbox'
 
 function getQuotaProgressColor(percentage: number): string {
   if (percentage <= 10) return '[&_[data-slot=progress-indicator]]:bg-rose-500'
@@ -49,8 +50,17 @@ function getQuotaProgressColor(percentage: number): string {
   return '[&_[data-slot=progress-indicator]]:bg-emerald-500'
 }
 
-export function useUsersColumns(): ColumnDef<User>[] {
+export function useUsersColumns(showHidden = false): ColumnDef<User>[] {
   const { t } = useTranslation()
+  const hiddenColumn: ColumnDef<User> = {
+    id: 'hidden',
+    header: t('Hide user'),
+    cell: ({ row }) => <HiddenUserCheckbox user={row.original} />,
+    enableSorting: false,
+    size: 120,
+    meta: { mobileOrder: 25 },
+  }
+
   return [
     {
       id: 'select',
@@ -282,6 +292,7 @@ export function useUsersColumns(): ColumnDef<User>[] {
       size: 120,
       meta: { mobileOrder: 20 },
     },
+    ...(showHidden ? [hiddenColumn] : []),
     {
       id: 'invite_info',
       header: t('Invite Info'),

@@ -2,6 +2,12 @@ package model
 
 import "gorm.io/gorm"
 
+func SetUserHidden(userID int, hidden bool) error {
+	return DB.Model(&User{}).
+		Where("id = ?", userID).
+		Update("hidden", hidden).Error
+}
+
 func getHiddenUserIDs() ([]int, error) {
 	var ids []int
 	err := DB.Model(&User{}).

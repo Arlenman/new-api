@@ -7,6 +7,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestSetUserHidden(t *testing.T) {
+	truncateTables(t)
+	require.NoError(t, DB.Create(&User{
+		Id:          1,
+		Username:    "target-user",
+		DisplayName: "Target User",
+		Password:    "password123",
+		Group:       "default",
+		Remark:      "keep this remark",
+		AffCode:     "target-aff",
+		Quota:       123,
+	}).Error)
+
+	require.NoError(t, SetUserHidden(1, true))
+	hiddenUser, err := GetUserById(1, false)
+	require.NoError(t, err)
+	require.True(t, hiddenUser.Hidden)
+	require.Equal(t, "Target User", hiddenUser.DisplayName)
+	require.Equal(t, "default", hiddenUser.Group)
+	require.Equal(t, "keep this remark", hiddenUser.Remark)
+	require.Equal(t, 123, hiddenUser.Quota)
+
+	require.NoError(t, SetUserHidden(1, false))
+	visibleUser, err := GetUserById(1, false)
+	require.NoError(t, err)
+	require.False(t, visibleUser.Hidden)
+	require.Equal(t, "Target User", visibleUser.DisplayName)
+	require.Equal(t, "default", visibleUser.Group)
+	require.Equal(t, "keep this remark", visibleUser.Remark)
+	require.Equal(t, 123, visibleUser.Quota)
+}
+
 func seedHiddenUserAnalyticsData(t *testing.T) {
 	t.Helper()
 	require.NoError(t, DB.Create(&User{Id: 1, Username: "visible", Password: "password123", AffCode: "visible-aff"}).Error)

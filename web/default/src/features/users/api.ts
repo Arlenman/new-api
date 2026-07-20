@@ -124,6 +124,18 @@ export async function manageUser(
 }
 
 /**
+ * Update only the user's hidden state.
+ */
+export async function setUserHidden(
+  id: number,
+  hidden: boolean
+): Promise<ApiResponse<Pick<User, 'hidden'>>> {
+  const action = hidden ? 'hide' : 'unhide'
+  const res = await api.post('/api/user/manage', { id, action })
+  return res.data
+}
+
+/**
  * Adjust user quota atomically (add/subtract/override)
  */
 export async function adjustUserQuota(
