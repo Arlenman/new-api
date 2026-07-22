@@ -82,6 +82,7 @@ export function PersistentInfiniteCanvas(props: PersistentInfiniteCanvasProps) {
     >
       <InfiniteCanvas
         key={userId}
+        active={props.active}
         maximized={isMaximized}
         onMaximizedChange={setMaximized}
       />

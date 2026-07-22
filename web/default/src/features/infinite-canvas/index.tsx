@@ -79,6 +79,7 @@ interface AppliedConfiguration extends ManagedInfiniteCanvasConfiguration {
 }
 
 type InfiniteCanvasProps = {
+  active: boolean
   maximized: boolean
   onMaximizedChange: (maximized: boolean) => void
 }
@@ -108,6 +109,8 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
   appliedRevisionRef.current = appliedConfiguration?.revision ?? 0
 
   useEffect(() => {
+    if (!props.active) return
+
     let cancelled = false
 
     async function loadApiKeys() {
@@ -142,6 +145,8 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
         } catch {
           selectedTokenId = legacyRememberedTokenId
         }
+        if (cancelled) return
+
         const preferredKey = selectPreferredApiKey(
           response.data.items,
           selectedTokenId,
@@ -149,11 +154,11 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
         )
 
         setApiKeys(response.data.items)
-        setAppliedConfiguration({
+        setAppliedConfiguration((current) => ({
           ...managedConfiguration,
           tokenId: preferredKey?.id ?? null,
-          revision: 1,
-        })
+          revision: (current?.revision ?? 0) + 1,
+        }))
         if (preferredKey) {
           if (preferredKey.id !== selectedTokenId) {
             void updateUserToolPreference('infinite-canvas', preferredKey.id)
@@ -163,11 +168,11 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
       } catch {
         if (cancelled) return
         setApiKeys([])
-        setAppliedConfiguration({
+        setAppliedConfiguration((current) => ({
           ...managedConfiguration,
           tokenId: null,
-          revision: 1,
-        })
+          revision: (current?.revision ?? 0) + 1,
+        }))
         setErrorMessage(t('Failed to load API keys'))
       } finally {
         if (!cancelled) setKeysLoading(false)
@@ -178,7 +183,7 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
     return () => {
       cancelled = true
     }
-  }, [t, userId])
+  }, [props.active, t, userId])
 
   useEffect(() => {
     const timer = window.setInterval(() => {

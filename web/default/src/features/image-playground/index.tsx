@@ -143,6 +143,8 @@ export function ImagePlayground({
   }, [active, immersive, onImmersiveChange])
 
   useEffect(() => {
+    if (!active) return
+
     let cancelled = false
 
     async function loadApiKeys() {
@@ -176,6 +178,8 @@ export function ImagePlayground({
         } catch {
           selectedTokenId = legacyRememberedTokenId
         }
+        if (cancelled) return
+
         const preferredKey = selectPreferredApiKey(
           allApiKeys,
           selectedTokenId,
@@ -183,11 +187,11 @@ export function ImagePlayground({
         )
 
         setApiKeys(allApiKeys)
-        setAppliedConfiguration({
+        setAppliedConfiguration((current) => ({
           mode: hostMode,
           tokenId: preferredKey?.id ?? null,
-          revision: 1,
-        })
+          revision: (current?.revision ?? 0) + 1,
+        }))
         if (preferredKey) {
           if (preferredKey.id !== selectedTokenId) {
             void updateUserToolPreference('image-playground', preferredKey.id)
@@ -197,11 +201,11 @@ export function ImagePlayground({
       } catch {
         if (cancelled) return
         setApiKeys([])
-        setAppliedConfiguration({
+        setAppliedConfiguration((current) => ({
           mode: hostMode,
           tokenId: null,
-          revision: 1,
-        })
+          revision: (current?.revision ?? 0) + 1,
+        }))
         setErrorMessage(t('Failed to load API keys'))
       } finally {
         if (!cancelled) setKeysLoading(false)
@@ -212,7 +216,7 @@ export function ImagePlayground({
     return () => {
       cancelled = true
     }
-  }, [t, userId])
+  }, [active, t, userId])
 
   useEffect(() => {
     const timer = window.setInterval(() => {

@@ -87,6 +87,21 @@ describe('image playground API key availability', () => {
     )
   })
 
+  test('accepts and selects an unlimited key with negative tracked quota', () => {
+    const now = 1_700_000_000
+    const key = createApiKey({
+      id: 45,
+      name: 'GPT-test',
+      status: 1,
+      remain_quota: -287622,
+      unlimited_quota: true,
+      expired_time: -1,
+    })
+
+    assert.equal(isApiKeyAvailable(key, now), true)
+    assert.equal(selectPreferredApiKey([key], key.id, now)?.id, key.id)
+  })
+
   test('rejects disabled, expired, and exhausted keys', () => {
     const now = 1_700_000_000
 
