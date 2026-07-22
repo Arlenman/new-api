@@ -106,6 +106,11 @@ type ApiNoticeConfigUpdate struct {
 	ClearAPIKey bool   `json:"clear_api_key"`
 }
 
+type ApiNoticeAPIKeyReveal struct {
+	APIKey       string `json:"api_key"`
+	APIKeySource string `json:"api_key_source"`
+}
+
 type ApiNoticeTestProviderResult struct {
 	Provider string `json:"provider"`
 	Accepted bool   `json:"accepted"`

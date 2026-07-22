@@ -220,6 +220,11 @@ export interface ApiNoticeConfigUpdate {
   clear_api_key?: boolean;
 }
 
+export interface ApiNoticeAPIKeyReveal {
+  api_key: string;
+  api_key_source: string;
+}
+
 export interface ApiNoticeEndpointStatus {
   status: string;
   http_status: number;

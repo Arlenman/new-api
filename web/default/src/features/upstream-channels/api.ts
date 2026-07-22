@@ -27,6 +27,7 @@ import type {
   AlertRuleTestSendResult,
   ApiNoticeConfig,
   ApiNoticeConfigUpdate,
+  ApiNoticeAPIKeyReveal,
   ApiNoticeConnectionStatus,
   ApiNoticeMessage,
   ApiResponse,
@@ -257,6 +258,17 @@ export async function getApiNoticeConfig(): Promise<
 > {
   const res = await api.get<ApiResponse<ApiNoticeConfig>>(
     '/api/alert-rules/config',
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function revealApiNoticeAPIKey(): Promise<
+  ApiResponse<ApiNoticeAPIKeyReveal>
+> {
+  const res = await api.post<ApiResponse<ApiNoticeAPIKeyReveal>>(
+    '/api/alert-rules/config/reveal',
+    undefined,
     { skipBusinessError: true }
   )
   return res.data

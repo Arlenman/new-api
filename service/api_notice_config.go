@@ -16,7 +16,8 @@ import (
 const apiNoticeAPIKeyPurpose = "api-notice-hmac-secret"
 
 // ApiNoticeRuntimeConfig is the server-side configuration used by every
-// api-notice operation. APIKey is never serialized or returned to the client.
+// api-notice operation. Regular configuration responses expose only key status
+// and a mask; the root-only reveal endpoint returns APIKey only on demand.
 type ApiNoticeRuntimeConfig struct {
 	BaseURL       string
 	APIKey        string
@@ -39,6 +40,20 @@ func GetApiNoticeConfig() (dto.ApiNoticeConfig, error) {
 		APIKeyMasked:      masked,
 		APIKeySource:      runtime.APIKeySource,
 		PersistentStorage: common.HasPersistentCryptoSecret(),
+	}, nil
+}
+
+func RevealApiNoticeAPIKey() (dto.ApiNoticeAPIKeyReveal, error) {
+	runtime, err := loadApiNoticeRuntimeConfig()
+	if err != nil {
+		return dto.ApiNoticeAPIKeyReveal{}, err
+	}
+	if strings.TrimSpace(runtime.APIKey) == "" {
+		return dto.ApiNoticeAPIKeyReveal{}, ErrApiNoticeAPIKeyNotConfigured
+	}
+	return dto.ApiNoticeAPIKeyReveal{
+		APIKey:       runtime.APIKey,
+		APIKeySource: runtime.APIKeySource,
 	}, nil
 }
 

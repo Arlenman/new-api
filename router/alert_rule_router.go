@@ -15,6 +15,7 @@ func registerAlertRuleRoutes(apiRouter *gin.RouterGroup) {
 		alertRuleRoute.GET("/providers", controller.GetAlertRuleProviders)
 		alertRuleRoute.GET("/config", controller.GetApiNoticeConfig)
 		alertRuleRoute.PUT("/config", controller.UpdateApiNoticeConfig)
+		alertRuleRoute.POST("/config/reveal", controller.RevealApiNoticeAPIKey)
 		alertRuleRoute.POST("/preview", controller.PreviewAlertRule)
 		alertRuleRoute.POST("/test-connection", controller.TestAlertRuleConnection)
 		alertRuleRoute.POST("/test-send", controller.TestSendAlertRule)

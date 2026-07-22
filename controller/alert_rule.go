@@ -7,6 +7,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
@@ -134,6 +135,18 @@ func GetApiNoticeConfig(c *gin.Context) {
 		return
 	}
 	common.ApiSuccess(c, config)
+}
+
+func RevealApiNoticeAPIKey(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
+	revealed, err := service.RevealApiNoticeAPIKey()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	middleware.SkipAdminAuditResponseCapture(c)
+	common.ApiSuccess(c, revealed)
 }
 
 func UpdateApiNoticeConfig(c *gin.Context) {

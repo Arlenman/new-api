@@ -105,6 +105,7 @@ import {
   getAlertRules,
   getApiNoticeConfig,
   previewAlertRule,
+  revealApiNoticeAPIKey,
   testAlertRuleConnection,
   testSendAlertRule,
   updateApiNoticeConfig,
@@ -198,6 +199,7 @@ export function AlertRuleDialog({
     useState<ApiNoticeConfig | null>(null)
   const [apiNoticeBaseURL, setApiNoticeBaseURL] = useState('')
   const [apiNoticeAPIKey, setApiNoticeAPIKey] = useState('')
+  const [apiNoticeAPIKeyDirty, setApiNoticeAPIKeyDirty] = useState(false)
   const [testSendResult, setTestSendResult] =
     useState<AlertRuleTestSendResult | null>(null)
   const [previewing, setPreviewing] = useState(false)
@@ -235,6 +237,7 @@ export function AlertRuleDialog({
     setApiNoticeConfig(loadedApiNoticeConfig)
     setApiNoticeBaseURL(loadedApiNoticeConfig.base_url)
     setApiNoticeAPIKey('')
+    setApiNoticeAPIKeyDirty(false)
   }, [open, loadedApiNoticeConfig])
 
   const selectRule = useCallback(
@@ -291,6 +294,7 @@ export function AlertRuleDialog({
     setApiNoticeConfig(null)
     setApiNoticeBaseURL('')
     setApiNoticeAPIKey('')
+    setApiNoticeAPIKeyDirty(false)
     setTestSendResult(null)
     setRetryingProviderCatalog(false)
     setProviderCatalogRetryFailed(false)
@@ -329,6 +333,27 @@ export function AlertRuleDialog({
     },
   })
 
+  const apiNoticeAPIKeyRevealMutation = useMutation({
+    mutationFn: async () => {
+      const response = await revealApiNoticeAPIKey()
+      if (!response.success || !response.data?.api_key) {
+        throw new Error(response.message || t('Failed to reveal upstream key'))
+      }
+      return response.data.api_key
+    },
+    onSuccess: (apiKey) => {
+      setApiNoticeAPIKey(apiKey)
+      setApiNoticeAPIKeyDirty(false)
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t('Failed to reveal upstream key')
+      )
+    },
+  })
+
   const apiNoticeConfigMutation = useMutation({
     mutationFn: updateApiNoticeConfig,
     onSuccess: async (response) => {
@@ -341,6 +366,7 @@ export function AlertRuleDialog({
       setApiNoticeConfig(response.data)
       setApiNoticeBaseURL(response.data.base_url)
       setApiNoticeAPIKey('')
+      setApiNoticeAPIKeyDirty(false)
       await queryClient.invalidateQueries({
         queryKey: apiNoticeConfigQueryKey,
       })
@@ -576,6 +602,7 @@ export function AlertRuleDialog({
       testingConnection ||
       testingSend ||
       apiNoticeConfigMutation.isPending ||
+      apiNoticeAPIKeyRevealMutation.isPending ||
       toggleRuleMutation.isPending ||
       retryingProviderCatalog
     ) {
@@ -717,12 +744,17 @@ export function AlertRuleDialog({
           baseURL={apiNoticeBaseURL}
           apiKey={apiNoticeAPIKey}
           saving={apiNoticeConfigMutation.isPending}
+          revealing={apiNoticeAPIKeyRevealMutation.isPending}
           onBaseURLChange={setApiNoticeBaseURL}
-          onApiKeyChange={setApiNoticeAPIKey}
+          onApiKeyChange={(value) => {
+            setApiNoticeAPIKey(value)
+            setApiNoticeAPIKeyDirty(true)
+          }}
+          onReveal={() => apiNoticeAPIKeyRevealMutation.mutateAsync()}
           onSave={() =>
             apiNoticeConfigMutation.mutate({
               base_url: apiNoticeBaseURL,
-              api_key: apiNoticeAPIKey,
+              api_key: apiNoticeAPIKeyDirty ? apiNoticeAPIKey : '',
             })
           }
         />
@@ -2022,16 +2054,20 @@ function ApiNoticeConfiguration({
   baseURL,
   apiKey,
   saving,
+  revealing,
   onBaseURLChange,
   onApiKeyChange,
+  onReveal,
   onSave,
 }: {
   config: ApiNoticeConfig | null
   baseURL: string
   apiKey: string
   saving: boolean
+  revealing: boolean
   onBaseURLChange: (value: string) => void
   onApiKeyChange: (value: string) => void
+  onReveal: () => Promise<string>
   onSave: () => void
 }) {
   const { t } = useTranslation()
@@ -2041,6 +2077,26 @@ function ApiNoticeConfiguration({
   useEffect(() => {
     if (!apiKey) setShowAPIKey(false)
   }, [apiKey])
+
+  async function toggleAPIKeyVisibility() {
+    if (apiKey) {
+      setShowAPIKey((current) => !current)
+      return
+    }
+    try {
+      await onReveal()
+      setShowAPIKey(true)
+    } catch {
+      // The mutation displays the request error.
+    }
+  }
+
+  let apiKeyVisibilityIcon: ReactNode = <Eye />
+  if (revealing) {
+    apiKeyVisibilityIcon = <LoaderCircle className='animate-spin' />
+  } else if (showAPIKey) {
+    apiKeyVisibilityIcon = <EyeOff />
+  }
 
   return (
     <Card>
@@ -2092,11 +2148,11 @@ function ApiNoticeConfiguration({
                 variant='ghost'
                 size='icon-sm'
                 className='absolute top-1/2 right-1 -translate-y-1/2'
-                disabled={!apiKey}
+                disabled={revealing || (!apiKey && !apiKeyConfigured)}
                 aria-label={showAPIKey ? t('Hide key') : t('Show')}
-                onClick={() => setShowAPIKey((current) => !current)}
+                onClick={toggleAPIKeyVisibility}
               >
-                {showAPIKey ? <EyeOff /> : <Eye />}
+                {apiKeyVisibilityIcon}
               </Button>
             </div>
           </Field>

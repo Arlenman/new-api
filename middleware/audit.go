@@ -37,6 +37,18 @@ func (w *auditResponseWriter) WriteString(s string) (int, error) {
 	return w.Write([]byte(s))
 }
 
+// SkipAdminAuditResponseCapture prevents the admin audit wrapper from keeping a
+// copy of a sensitive response body. The request is still audited; success is
+// inferred from the HTTP status code instead of the response JSON.
+func SkipAdminAuditResponseCapture(c *gin.Context) {
+	writer, ok := c.Writer.(*auditResponseWriter)
+	if !ok {
+		return
+	}
+	writer.body.Reset()
+	writer.maxSize = 0
+}
+
 // auditRouteActions 将「METHOD + 路由模板」映射为语言无关的操作标识 action。
 // 这些是未被 handler 手动埋点的写操作，由中间件兜底记录；前端依据 action 用 i18n 本地化展示。
 // 未命中的写操作回退为 action="generic"，前端展示 "METHOD route"。
