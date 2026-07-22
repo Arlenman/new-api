@@ -41,12 +41,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { getAllApiKeys } from '@/features/keys/api'
-import type { ApiKey } from '@/features/keys/types'
 import {
   createUserToolRuntimeSession,
+  getAllUserToolTokens,
   getUserToolPreference,
   updateUserToolPreference,
+  type UserToolTokenOption,
 } from '@/features/user-tools/api'
 import { useStatus } from '@/hooks/use-status'
 import { cn } from '@/lib/utils'
@@ -106,7 +106,7 @@ export function ImagePlayground({
     revision: number
     promise: Promise<void>
   } | null>(null)
-  const [apiKeys, setApiKeys] = useState<ApiKey[]>([])
+  const [apiKeys, setApiKeys] = useState<UserToolTokenOption[]>([])
   const [keysLoading, setKeysLoading] = useState(true)
   const [appliedConfiguration, setAppliedConfiguration] =
     useState<AppliedConfiguration | null>(null)
@@ -122,9 +122,7 @@ export function ImagePlayground({
     if (!active) return
 
     const syncFullscreenState = () => {
-      onImmersiveChange(
-        document.fullscreenElement === document.documentElement
-      )
+      onImmersiveChange(document.fullscreenElement === document.documentElement)
     }
 
     syncFullscreenState()
@@ -157,13 +155,12 @@ export function ImagePlayground({
       setKeysLoading(true)
       setErrorMessage(null)
       try {
-        const response = await getAllApiKeys()
+        const response = await getAllUserToolTokens('image-playground')
         if (!response.success || !response.data) {
           throw new Error(response.message || 'Failed to load API keys')
         }
         if (cancelled) return
 
-        const now = Math.floor(Date.now() / 1000)
         const allApiKeys = response.data.items
         const legacyRememberedTokenId = parseRememberedTokenSelection(
           window.localStorage.getItem(IMAGE_PLAYGROUND_TOKEN_STORAGE_KEY),
@@ -180,11 +177,7 @@ export function ImagePlayground({
         }
         if (cancelled) return
 
-        const preferredKey = selectPreferredApiKey(
-          allApiKeys,
-          selectedTokenId,
-          now
-        )
+        const preferredKey = selectPreferredApiKey(allApiKeys, selectedTokenId)
 
         setApiKeys(allApiKeys)
         setAppliedConfiguration((current) => ({
@@ -361,12 +354,7 @@ export function ImagePlayground({
   }, [appliedConfiguration, t])
 
   const keyOptions = useMemo(
-    () =>
-      getApiKeySelectionOptions(
-        apiKeys,
-        Math.floor(Date.now() / 1000),
-        t('Unnamed API key')
-      ),
+    () => getApiKeySelectionOptions(apiKeys, t('Unnamed API key')),
     [apiKeys, t]
   )
 
@@ -383,11 +371,7 @@ export function ImagePlayground({
   }, [appliedConfiguration, keyOptions, runtimeTokenLabel])
 
   const switchApiKey = async (value: string | null) => {
-    if (
-      !value ||
-      !appliedConfiguration ||
-      keySwitching
-    ) {
+    if (!value || !appliedConfiguration || keySwitching) {
       return
     }
 
@@ -397,7 +381,7 @@ export function ImagePlayground({
       !Number.isInteger(tokenId) ||
       tokenId <= 0 ||
       !selectedKey ||
-      !isApiKeyAvailable(selectedKey, Math.floor(Date.now() / 1000)) ||
+      !isApiKeyAvailable(selectedKey) ||
       tokenId === appliedConfiguration.tokenId
     ) {
       return
@@ -520,125 +504,118 @@ export function ImagePlayground({
 
   return (
     <SectionPageLayout fixedContent immersive={immersive}>
-        <SectionPageLayout.Title>
-          <span className='inline-flex items-center gap-2'>
-            <Images className='size-5' />
-            {t('Image Playground')}
-            {playgroundVersion && (
-              <Badge variant='outline'>v{playgroundVersion}</Badge>
-            )}
-          </span>
-        </SectionPageLayout.Title>
-        <SectionPageLayout.Actions>
-          {keyOptions.length > 0 ? (
-            <Select
-              items={keyOptions}
-              value={
-                appliedConfiguration?.tokenId
-                  ? String(appliedConfiguration.tokenId)
-                  : null
-              }
-              disabled={keySwitching}
-              onValueChange={(value) => void switchApiKey(value)}
-            >
-              <SelectTrigger
-                size='sm'
-                className='flex w-40 sm:w-52'
-                aria-label={t('Select an API key')}
-                title={appliedSourceLabel ?? t('Select an API key')}
-              >
-                {keySwitching ? (
-                  <LoaderCircle className='animate-spin' />
-                ) : (
-                  <KeyRound />
-                )}
-                <SelectValue placeholder={t('Select an API key')} />
-              </SelectTrigger>
-              <SelectContent alignItemWithTrigger={false}>
-                {keyOptions.map((option) => (
-                  <SelectItem
-                    key={option.value}
-                    value={option.value}
-                    disabled={!option.available}
-                  >
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          ) : (
-            <Button variant='outline' size='sm' render={<Link to='/keys' />}>
-              <KeyRound />
-              {t('Create an API key first')}
-            </Button>
+      <SectionPageLayout.Title>
+        <span className='inline-flex items-center gap-2'>
+          <Images className='size-5' />
+          {t('Image Playground')}
+          {playgroundVersion && (
+            <Badge variant='outline'>v{playgroundVersion}</Badge>
           )}
-          <div className='text-muted-foreground flex items-center gap-1.5 text-xs whitespace-nowrap'>
-            {bridgeStatusIcon}
-            {bridgeStatusLabel}
-          </div>
-          <Button
-            type='button'
-            variant='outline'
-            size='icon-sm'
-            aria-label={
-              immersive ? t('Exit fullscreen') : t('Enter fullscreen')
+        </span>
+      </SectionPageLayout.Title>
+      <SectionPageLayout.Actions>
+        {keyOptions.length > 0 ? (
+          <Select
+            items={keyOptions}
+            value={
+              appliedConfiguration?.tokenId
+                ? String(appliedConfiguration.tokenId)
+                : null
             }
-            title={
-              immersive ? t('Exit fullscreen') : t('Enter fullscreen')
-            }
-            onClick={() => void toggleFullscreen()}
+            disabled={keySwitching}
+            onValueChange={(value) => void switchApiKey(value)}
           >
-            {immersive ? <Minimize2 /> : <Maximize2 />}
-          </Button>
-        </SectionPageLayout.Actions>
-        <SectionPageLayout.Content>
-          <div className='flex h-full min-h-0 flex-col gap-2'>
-            {errorMessage && (
-              <Alert variant='destructive' className='shrink-0'>
-                <CircleAlert />
-                <AlertTitle>{t('Configuration failed')}</AlertTitle>
-                <AlertDescription>{errorMessage}</AlertDescription>
-              </Alert>
-            )}
-
-            <div
-              className={cn(
-                'bg-background relative flex-1 overflow-hidden',
-                immersive
-                  ? 'min-h-0'
-                  : 'min-h-[30rem] rounded-lg border'
-              )}
+            <SelectTrigger
+              size='sm'
+              className='flex w-40 sm:w-52'
+              aria-label={t('Select an API key')}
+              title={appliedSourceLabel ?? t('Select an API key')}
             >
-              {appliedConfiguration && (
-                <>
-                  {/* oxlint-disable-next-line react/iframe-missing-sandbox -- The tool needs same-origin storage and scripts for bridge configuration and async task recovery. */}
-                  <iframe
-                    key={`${userId}:${appliedConfiguration.revision}`}
-                    ref={iframeRef}
-                    src={TOOL_URL}
-                    title={t('Image Playground')}
-                    className={cn(
-                      'h-full w-full border-0',
-                      immersive ? 'min-h-0' : 'min-h-[30rem]'
-                    )}
-                    allow='clipboard-read; clipboard-write'
-                    referrerPolicy='same-origin'
-                    onLoad={iframeLoaded}
-                  />
-                </>
+              {keySwitching ? (
+                <LoaderCircle className='animate-spin' />
+              ) : (
+                <KeyRound />
               )}
-              {(bridgeStatus === 'loading' ||
-                bridgeStatus === 'configuring') && (
-                <div className='bg-background/75 pointer-events-none absolute inset-0 flex items-center justify-center backdrop-blur-[1px]'>
-                  <div className='text-muted-foreground bg-background/95 flex items-center gap-2 rounded-full border px-3 py-2 text-sm shadow-sm'>
-                    <LoaderCircle className='size-4 animate-spin' />
-                    {bridgeStatusLabel}
-                  </div>
+              <SelectValue placeholder={t('Select an API key')} />
+            </SelectTrigger>
+            <SelectContent alignItemWithTrigger={false}>
+              {keyOptions.map((option) => (
+                <SelectItem
+                  key={option.value}
+                  value={option.value}
+                  disabled={!option.available}
+                >
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <Button variant='outline' size='sm' render={<Link to='/keys' />}>
+            <KeyRound />
+            {t('Create an API key first')}
+          </Button>
+        )}
+        <div className='text-muted-foreground flex items-center gap-1.5 text-xs whitespace-nowrap'>
+          {bridgeStatusIcon}
+          {bridgeStatusLabel}
+        </div>
+        <Button
+          type='button'
+          variant='outline'
+          size='icon-sm'
+          aria-label={immersive ? t('Exit fullscreen') : t('Enter fullscreen')}
+          title={immersive ? t('Exit fullscreen') : t('Enter fullscreen')}
+          onClick={() => void toggleFullscreen()}
+        >
+          {immersive ? <Minimize2 /> : <Maximize2 />}
+        </Button>
+      </SectionPageLayout.Actions>
+      <SectionPageLayout.Content>
+        <div className='flex h-full min-h-0 flex-col gap-2'>
+          {errorMessage && (
+            <Alert variant='destructive' className='shrink-0'>
+              <CircleAlert />
+              <AlertTitle>{t('Configuration failed')}</AlertTitle>
+              <AlertDescription>{errorMessage}</AlertDescription>
+            </Alert>
+          )}
+
+          <div
+            className={cn(
+              'bg-background relative flex-1 overflow-hidden',
+              immersive ? 'min-h-0' : 'min-h-[30rem] rounded-lg border'
+            )}
+          >
+            {appliedConfiguration && (
+              <>
+                {/* oxlint-disable-next-line react/iframe-missing-sandbox -- The tool needs same-origin storage and scripts for bridge configuration and async task recovery. */}
+                <iframe
+                  key={`${userId}:${appliedConfiguration.revision}`}
+                  ref={iframeRef}
+                  src={TOOL_URL}
+                  title={t('Image Playground')}
+                  className={cn(
+                    'h-full w-full border-0',
+                    immersive ? 'min-h-0' : 'min-h-[30rem]'
+                  )}
+                  allow='clipboard-read; clipboard-write'
+                  referrerPolicy='same-origin'
+                  onLoad={iframeLoaded}
+                />
+              </>
+            )}
+            {(bridgeStatus === 'loading' || bridgeStatus === 'configuring') && (
+              <div className='bg-background/75 pointer-events-none absolute inset-0 flex items-center justify-center backdrop-blur-[1px]'>
+                <div className='text-muted-foreground bg-background/95 flex items-center gap-2 rounded-full border px-3 py-2 text-sm shadow-sm'>
+                  <LoaderCircle className='size-4 animate-spin' />
+                  {bridgeStatusLabel}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
-        </SectionPageLayout.Content>
+        </div>
+      </SectionPageLayout.Content>
     </SectionPageLayout>
   )
 }

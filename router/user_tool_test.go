@@ -41,6 +41,7 @@ func TestUserToolRoutesRejectMismatchedUserSession(t *testing.T) {
 		{method: http.MethodGet, path: "/api/user-tools/infinite-canvas/bootstrap"},
 		{method: http.MethodGet, path: "/api/user-tools/infinite-canvas/changes"},
 		{method: http.MethodPost, path: "/api/user-tools/infinite-canvas/sync"},
+		{method: http.MethodGet, path: "/api/user-tools/infinite-canvas/tokens"},
 		{method: http.MethodGet, path: "/api/user-tools/infinite-canvas/preferences"},
 		{method: http.MethodPut, path: "/api/user-tools/infinite-canvas/preferences"},
 		{method: http.MethodPost, path: "/api/user-tools/infinite-canvas/runtime-session"},

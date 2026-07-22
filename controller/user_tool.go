@@ -91,6 +91,12 @@ type userToolTokenResponse struct {
 	DisplayLabel string `json:"display_label"`
 }
 
+type userToolTokenOptionResponse struct {
+	userToolTokenResponse
+	CreatedTime int64 `json:"created_time"`
+	Available   bool  `json:"available"`
+}
+
 func GetUserToolBootstrap(c *gin.Context) {
 	userID, tool, ok := userToolRequestScope(c)
 	if !ok {
@@ -293,6 +299,67 @@ func GetUserToolPreferences(c *gin.Context) {
 		return
 	}
 	common.ApiSuccess(c, gin.H{"selected_token_id": preference.SelectedTokenID, "updated_at": preference.UpdatedTime})
+}
+
+func GetUserToolTokens(c *gin.Context) {
+	userID, _, ok := userToolRequestScope(c)
+	if !ok {
+		return
+	}
+	pageInfo := common.GetPageQuery(c)
+	if pageInfo.Page < 1 {
+		pageInfo.Page = 1
+	}
+	if pageInfo.PageSize < 1 || pageInfo.PageSize > 100 {
+		pageInfo.PageSize = 100
+	}
+	tokens, err := model.GetAllUserTokens(userID, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	total, err := model.CountUserTokens(userID)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	options := make([]userToolTokenOptionResponse, 0, len(tokens))
+	for _, token := range tokens {
+		validatedToken, validationErr := model.ValidateUserToolTokenRecord(userID, token)
+		if errors.Is(validationErr, model.ErrDatabase) {
+			common.ApiError(c, validationErr)
+			return
+		}
+		if validatedToken != nil && validatedToken.Id == token.Id {
+			token = validatedToken
+		}
+
+		displayName := strings.TrimSpace(token.Name)
+		if displayName == "" {
+			displayName = token.GetMaskedKey()
+		}
+		displayGroup := strings.TrimSpace(token.Group)
+		displayLabel := displayName
+		if displayGroup != "" {
+			displayLabel += " · " + displayGroup
+		}
+		options = append(options, userToolTokenOptionResponse{
+			userToolTokenResponse: userToolTokenResponse{
+				ID:           token.Id,
+				Name:         token.Name,
+				MaskedKey:    token.GetMaskedKey(),
+				Group:        token.Group,
+				DisplayLabel: displayLabel,
+			},
+			CreatedTime: token.CreatedTime,
+			Available:   validationErr == nil,
+		})
+	}
+
+	pageInfo.SetTotal(int(total))
+	pageInfo.SetItems(options)
+	common.ApiSuccess(c, pageInfo)
 }
 
 func UpdateUserToolPreferences(c *gin.Context) {

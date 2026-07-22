@@ -43,6 +43,54 @@ export interface UserToolRuntimeSession {
   }
 }
 
+export interface UserToolTokenOption {
+  id: number
+  name: string
+  masked_key: string
+  group: string
+  display_label: string
+  created_time: number
+  available: boolean
+}
+
+interface UserToolTokenPage {
+  items: UserToolTokenOption[]
+  total: number
+  page: number
+  page_size: number
+}
+
+const USER_TOOL_TOKEN_PAGE_SIZE = 100
+
+export async function getAllUserToolTokens(
+  tool: UserTool
+): Promise<ApiResponse<UserToolTokenPage>> {
+  const firstResponse = await api.get(
+    `/api/user-tools/${tool}/tokens?p=1&size=${USER_TOOL_TOKEN_PAGE_SIZE}`
+  )
+  const firstPage = firstResponse.data as ApiResponse<UserToolTokenPage>
+  if (!firstPage.success || !firstPage.data) return firstPage
+
+  const items = [...firstPage.data.items]
+  const pageCount = Math.ceil(firstPage.data.total / USER_TOOL_TOKEN_PAGE_SIZE)
+  for (let page = 2; page <= pageCount; page += 1) {
+    const response = await api.get(
+      `/api/user-tools/${tool}/tokens?p=${page}&size=${USER_TOOL_TOKEN_PAGE_SIZE}`
+    )
+    const currentPage = response.data as ApiResponse<UserToolTokenPage>
+    if (!currentPage.success || !currentPage.data) return currentPage
+    items.push(...currentPage.data.items)
+  }
+
+  return {
+    ...firstPage,
+    data: {
+      ...firstPage.data,
+      items,
+    },
+  }
+}
+
 export async function getUserToolPreference(
   tool: UserTool
 ): Promise<ApiResponse<UserToolPreference>> {

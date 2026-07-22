@@ -200,11 +200,35 @@ func ValidateUserToolToken(userID, tokenID int) (*Token, error) {
 		}
 		return nil, fmt.Errorf("%w: %v", ErrDatabase, err)
 	}
-	validated, err := ValidateUserToken(token.Key)
+	return ValidateUserToolTokenRecord(userID, token)
+}
+
+func ValidateUserToolTokenRecord(userID int, token *Token) (*Token, error) {
+	if userID <= 0 || token == nil || token.Id <= 0 || token.UserId != userID || token.Key == "" {
+		return nil, ErrTokenInvalid
+	}
+
+	var validated *Token
+	var err error
+	if common.RedisEnabled {
+		validated, err = ValidateUserToken(token.Key)
+	} else {
+		validated, err = resetDueTokenQuota(token)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, ErrTokenInvalid
+			}
+			return validated, fmt.Errorf("%w: %v", ErrDatabase, err)
+		}
+		validated, err = validateUserTokenState(validated)
+	}
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTokenInvalid
+		}
 		return validated, err
 	}
-	if validated.Id != tokenID || validated.UserId != userID {
+	if validated.Id != token.Id || validated.UserId != userID {
 		return nil, ErrTokenInvalid
 	}
 	return validated, nil

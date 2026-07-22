@@ -40,12 +40,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { getAllApiKeys } from '@/features/keys/api'
-import type { ApiKey } from '@/features/keys/types'
 import {
   createUserToolRuntimeSession,
+  getAllUserToolTokens,
   getUserToolPreference,
   updateUserToolPreference,
+  type UserToolTokenOption,
 } from '@/features/user-tools/api'
 import { useStatus } from '@/hooks/use-status'
 import { cn } from '@/lib/utils'
@@ -98,7 +98,7 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
     revision: number
     promise: Promise<void>
   } | null>(null)
-  const [apiKeys, setApiKeys] = useState<ApiKey[]>([])
+  const [apiKeys, setApiKeys] = useState<UserToolTokenOption[]>([])
   const [keysLoading, setKeysLoading] = useState(true)
   const [appliedConfiguration, setAppliedConfiguration] =
     useState<AppliedConfiguration | null>(null)
@@ -125,13 +125,12 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
       setKeysLoading(true)
       setErrorMessage(null)
       try {
-        const response = await getAllApiKeys()
+        const response = await getAllUserToolTokens('infinite-canvas')
         if (!response.success || !response.data) {
           throw new Error(response.message || 'Failed to load API keys')
         }
         if (cancelled) return
 
-        const now = Math.floor(Date.now() / 1000)
         const legacyRememberedTokenId = parseRememberedTokenSelection(
           window.localStorage.getItem(INFINITE_CANVAS_TOKEN_STORAGE_KEY),
           userId
@@ -149,8 +148,7 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
 
         const preferredKey = selectPreferredApiKey(
           response.data.items,
-          selectedTokenId,
-          now
+          selectedTokenId
         )
 
         setApiKeys(response.data.items)
@@ -315,12 +313,7 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
   }, [appliedConfiguration, t])
 
   const keyOptions = useMemo(
-    () =>
-      createApiKeyOptions(
-        apiKeys,
-        Math.floor(Date.now() / 1000),
-        t('Unnamed API key')
-      ),
+    () => createApiKeyOptions(apiKeys, t('Unnamed API key')),
     [apiKeys, t]
   )
 
@@ -342,8 +335,7 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
       apiKeys,
       value,
       appliedConfiguration.tokenId,
-      appliedConfiguration.revision,
-      Math.floor(Date.now() / 1000)
+      appliedConfiguration.revision
     )
     if (!switchTarget) return
 

@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { ApiKey } from '@/features/keys/types'
+import type { UserToolTokenOption } from '@/features/user-tools/api'
 
 interface RememberedTokenSelection {
   userId: number
@@ -55,39 +55,34 @@ export function getApiKeyDisplayLabel(
   return group ? `${name} · ${group}` : name
 }
 
-export function isApiKeyAvailable(apiKey: ApiKey, now: number): boolean {
-  if (apiKey.status !== 1) return false
-  if (apiKey.expired_time !== -1 && apiKey.expired_time <= now) return false
-  return apiKey.unlimited_quota || apiKey.remain_quota > 0
+export function isApiKeyAvailable(apiKey: UserToolTokenOption): boolean {
+  return apiKey.available
 }
 
 export function createApiKeyOptions(
-  apiKeys: ApiKey[],
-  now: number,
+  apiKeys: UserToolTokenOption[],
   unnamedApiKeyLabel: string
 ): ApiKeyOption[] {
   return apiKeys.map((apiKey) => ({
     label: getApiKeyDisplayLabel(apiKey, unnamedApiKeyLabel),
     value: String(apiKey.id),
-    disabled: !isApiKeyAvailable(apiKey, now),
+    disabled: !isApiKeyAvailable(apiKey),
   }))
 }
 
 export function isApiKeySelectionAvailable(
-  apiKeys: ApiKey[],
-  tokenId: number,
-  now: number
+  apiKeys: UserToolTokenOption[],
+  tokenId: number
 ): boolean {
   const selectedApiKey = apiKeys.find((apiKey) => apiKey.id === tokenId)
-  return selectedApiKey ? isApiKeyAvailable(selectedApiKey, now) : false
+  return selectedApiKey ? isApiKeyAvailable(selectedApiKey) : false
 }
 
 export function createApiKeySwitchTarget(
-  apiKeys: ApiKey[],
+  apiKeys: UserToolTokenOption[],
   value: string | null,
   currentTokenId: number | null,
-  currentRevision: number,
-  now: number
+  currentRevision: number
 ): ApiKeySwitchTarget | null {
   if (!value) return null
 
@@ -96,7 +91,7 @@ export function createApiKeySwitchTarget(
     !Number.isInteger(tokenId) ||
     tokenId <= 0 ||
     tokenId === currentTokenId ||
-    !isApiKeySelectionAvailable(apiKeys, tokenId, now)
+    !isApiKeySelectionAvailable(apiKeys, tokenId)
   ) {
     return null
   }
@@ -108,13 +103,10 @@ export function createApiKeySwitchTarget(
 }
 
 export function selectPreferredApiKey(
-  apiKeys: ApiKey[],
-  rememberedTokenId: number | null,
-  now: number
-): ApiKey | null {
-  const availableKeys = apiKeys.filter((apiKey) =>
-    isApiKeyAvailable(apiKey, now)
-  )
+  apiKeys: UserToolTokenOption[],
+  rememberedTokenId: number | null
+): UserToolTokenOption | null {
+  const availableKeys = apiKeys.filter(isApiKeyAvailable)
   if (rememberedTokenId !== null) {
     const rememberedKey = availableKeys.find(
       (apiKey) => apiKey.id === rememberedTokenId

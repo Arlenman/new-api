@@ -64,6 +64,151 @@ func setupUserToolControllerTest(t *testing.T) {
 	t.Setenv("USER_TOOL_ASSET_DIR", t.TempDir())
 }
 
+func TestGetUserToolTokensUsesBackendValidationAndMasksCredentials(t *testing.T) {
+	setupUserToolControllerTest(t)
+
+	availableToken := &model.Token{
+		UserId:         101,
+		Key:            "available-user-tool-key-1234567890",
+		Name:           "Production key",
+		Status:         common.TokenStatusEnabled,
+		CreatedTime:    200,
+		ExpiredTime:    -1,
+		UnlimitedQuota: true,
+		Group:          "GPT组",
+	}
+	periodicallyExhaustedToken := &model.Token{
+		UserId:                  101,
+		Key:                     "periodically-exhausted-key-1234567890",
+		Name:                    "Periodic key",
+		Status:                  common.TokenStatusEnabled,
+		CreatedTime:             100,
+		ExpiredTime:             -1,
+		UnlimitedQuota:          true,
+		QuotaResetEnabled:       true,
+		QuotaResetPeriod:        "daily",
+		QuotaResetAmount:        100,
+		QuotaResetRemaining:     0,
+		QuotaResetNextTime:      common.GetTimestamp() + 3600,
+		QuotaResetCarryOver:     false,
+		QuotaResetIntervalHours: 24,
+	}
+	otherUserToken := &model.Token{
+		UserId:         202,
+		Key:            "other-user-key-1234567890",
+		Name:           "Other user",
+		Status:         common.TokenStatusEnabled,
+		CreatedTime:    300,
+		ExpiredTime:    -1,
+		UnlimitedQuota: true,
+	}
+	require.NoError(t, model.DB.Create(availableToken).Error)
+	require.NoError(t, model.DB.Create(periodicallyExhaustedToken).Error)
+	require.NoError(t, model.DB.Create(otherUserToken).Error)
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Set("id", 101)
+	context.Params = gin.Params{{Key: "tool", Value: model.UserToolImagePlayground}}
+	context.Request = httptest.NewRequest(
+		http.MethodGet,
+		"/api/user-tools/image-playground/tokens?p=1&size=100",
+		nil,
+	)
+	GetUserToolTokens(context)
+
+	var envelope userToolAPIResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &envelope))
+	require.True(t, envelope.Success, envelope.Message)
+	assert.NotContains(t, recorder.Body.String(), availableToken.Key)
+	assert.NotContains(t, recorder.Body.String(), periodicallyExhaustedToken.Key)
+	assert.NotContains(t, recorder.Body.String(), otherUserToken.Name)
+
+	var data struct {
+		Total int `json:"total"`
+		Items []struct {
+			ID           int    `json:"id"`
+			MaskedKey    string `json:"masked_key"`
+			DisplayLabel string `json:"display_label"`
+			CreatedTime  int64  `json:"created_time"`
+			Available    bool   `json:"available"`
+		} `json:"items"`
+	}
+	require.NoError(t, common.Unmarshal(envelope.Data, &data))
+	require.Len(t, data.Items, 2)
+	assert.Equal(t, 2, data.Total)
+	itemsByID := make(map[int]struct {
+		MaskedKey    string
+		DisplayLabel string
+		CreatedTime  int64
+		Available    bool
+	}, len(data.Items))
+	for _, item := range data.Items {
+		itemsByID[item.ID] = struct {
+			MaskedKey    string
+			DisplayLabel string
+			CreatedTime  int64
+			Available    bool
+		}{
+			MaskedKey:    item.MaskedKey,
+			DisplayLabel: item.DisplayLabel,
+			CreatedTime:  item.CreatedTime,
+			Available:    item.Available,
+		}
+	}
+	assert.Equal(t, model.MaskTokenKey(availableToken.Key), itemsByID[availableToken.Id].MaskedKey)
+	assert.Equal(t, "Production key · GPT组", itemsByID[availableToken.Id].DisplayLabel)
+	assert.Equal(t, int64(200), itemsByID[availableToken.Id].CreatedTime)
+	assert.True(t, itemsByID[availableToken.Id].Available)
+	assert.False(t, itemsByID[periodicallyExhaustedToken.Id].Available)
+}
+
+func TestGetUserToolTokensClampsInvalidPagination(t *testing.T) {
+	setupUserToolControllerTest(t)
+
+	tokens := make([]model.Token, 105)
+	for index := range tokens {
+		tokens[index] = model.Token{
+			UserId:         101,
+			Key:            fmt.Sprintf("pagination-user-tool-key-%03d", index),
+			Name:           fmt.Sprintf("Key %03d", index),
+			Status:         common.TokenStatusEnabled,
+			CreatedTime:    int64(index + 1),
+			ExpiredTime:    -1,
+			UnlimitedQuota: true,
+		}
+	}
+	require.NoError(t, model.DB.Create(&tokens).Error)
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Set("id", 101)
+	context.Params = gin.Params{{Key: "tool", Value: model.UserToolImagePlayground}}
+	context.Request = httptest.NewRequest(
+		http.MethodGet,
+		"/api/user-tools/image-playground/tokens?p=-1&size=-1",
+		nil,
+	)
+	GetUserToolTokens(context)
+
+	var envelope userToolAPIResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &envelope))
+	require.True(t, envelope.Success, envelope.Message)
+	var data struct {
+		Page     int `json:"page"`
+		PageSize int `json:"page_size"`
+		Total    int `json:"total"`
+		Items    []struct {
+			ID int `json:"id"`
+		} `json:"items"`
+	}
+	require.NoError(t, common.Unmarshal(envelope.Data, &data))
+	assert.Equal(t, 1, data.Page)
+	assert.Equal(t, 100, data.PageSize)
+	assert.Equal(t, 105, data.Total)
+	assert.Len(t, data.Items, 100)
+}
+
 func TestCreateUserToolRuntimeSessionReturnsScopedCredentialAndTokenMetadata(t *testing.T) {
 	setupUserToolControllerTest(t)
 

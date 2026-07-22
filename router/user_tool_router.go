@@ -14,6 +14,7 @@ func registerUserToolRoutes(apiRouter *gin.RouterGroup) {
 		userToolRoute.GET("/:tool/bootstrap", controller.GetUserToolBootstrap)
 		userToolRoute.GET("/:tool/changes", controller.GetUserToolChanges)
 		userToolRoute.POST("/:tool/sync", controller.SyncUserTool)
+		userToolRoute.GET("/:tool/tokens", controller.GetUserToolTokens)
 		userToolRoute.GET("/:tool/preferences", controller.GetUserToolPreferences)
 		userToolRoute.PUT("/:tool/preferences", controller.UpdateUserToolPreferences)
 		userToolRoute.POST("/:tool/runtime-session", controller.CreateUserToolRuntimeSession)
