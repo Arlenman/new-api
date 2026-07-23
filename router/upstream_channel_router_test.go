@@ -47,6 +47,9 @@ func TestUpstreamChannelRoutesRejectNonRootSessions(t *testing.T) {
 		{method: http.MethodPost, path: "/api/upstream-channels/refresh"},
 		{method: http.MethodGet, path: "/api/upstream-channels/priority-schedule"},
 		{method: http.MethodPut, path: "/api/upstream-channels/priority-schedule"},
+		{method: http.MethodPost, path: "/api/upstream-channels/priority-schedule/run"},
+		{method: http.MethodGet, path: "/api/upstream-channels/priority-schedule/tasks"},
+		{method: http.MethodDelete, path: "/api/upstream-channels/priority-schedule/tasks"},
 		{method: http.MethodPut, path: "/api/upstream-channels/1"},
 		{method: http.MethodDelete, path: "/api/upstream-channels/1"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/pin"},
@@ -57,6 +60,8 @@ func TestUpstreamChannelRoutesRejectNonRootSessions(t *testing.T) {
 		{method: http.MethodPost, path: "/api/upstream-channels/1/refresh-balance"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/refresh-keys"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/refresh-groups"},
+		{method: http.MethodPost, path: "/api/upstream-channels/1/keys/link"},
+		{method: http.MethodPatch, path: "/api/upstream-channels/1/keys/1/group"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/keys/import"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/keys/models"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/keys/1"},
@@ -204,7 +209,7 @@ func TestUpstreamChannelRoutesAllowRootSession(t *testing.T) {
 	baseURL := "https://upstream.example"
 	require.NoError(t, db.Create(&model.Channel{Key: "root-route-test", BaseURL: &baseURL, Status: common.ChannelStatusEnabled}).Error)
 	require.NoError(t, db.Create(&model.Channel{Key: "unrelated-route-test", BaseURL: &baseURL, Status: common.ChannelStatusEnabled}).Error)
-	fingerprint := model.UpstreamKeyFingerprint("root-route-test")
+	fingerprint := model.UpstreamChannelKeyFingerprint(baseURL, "root-route-test")
 	snapshotJSON := `{"provider":"new-api","balance":0,"account":{"id":1,"username":"root","balance":0},"keys":[{"id":7,"name":"route-key","masked_key":"sk-...test","status":"1","imported":false,"key_fingerprint":"` + fingerprint + `"}],"groups":[],"ratios":{},"retrieved_at":0}`
 	require.NoError(t, db.Create(&model.UpstreamChannel{
 		BaseURL:             baseURL,
@@ -249,11 +254,13 @@ func TestUpstreamChannelRoutesAllowRootSession(t *testing.T) {
 			HasPassword              bool   `json:"has_password"`
 			SourceChannelCount       int    `json:"source_channel_count"`
 			ActiveSourceChannelCount int    `json:"active_source_channel_count"`
+			InUseKeyCount            int    `json:"in_use_key_count"`
 			Priority                 int64  `json:"priority"`
 			Snapshot                 *struct {
 				Keys []struct {
-					Imported bool `json:"imported"`
-					Active   bool `json:"active"`
+					Imported       bool   `json:"imported"`
+					Active         bool   `json:"active"`
+					KeyFingerprint string `json:"key_fingerprint"`
 				} `json:"keys"`
 			} `json:"snapshot"`
 		} `json:"data"`
@@ -264,12 +271,15 @@ func TestUpstreamChannelRoutesAllowRootSession(t *testing.T) {
 	assert.Equal(t, "https://upstream.example", response.Data[0].BaseURL)
 	assert.False(t, response.Data[0].HasPassword)
 	assert.Equal(t, 2, response.Data[0].SourceChannelCount)
-	assert.Equal(t, 1, response.Data[0].ActiveSourceChannelCount)
+	assert.Equal(t, 2, response.Data[0].ActiveSourceChannelCount)
+	assert.Equal(t, 1, response.Data[0].InUseKeyCount)
 	assert.Zero(t, response.Data[0].Priority)
 	require.NotNil(t, response.Data[0].Snapshot)
 	require.Len(t, response.Data[0].Snapshot.Keys, 1)
 	assert.True(t, response.Data[0].Snapshot.Keys[0].Imported)
 	assert.True(t, response.Data[0].Snapshot.Keys[0].Active)
-	assert.NotContains(t, recorder.Body.String(), "key_fingerprint")
-	assert.NotContains(t, recorder.Body.String(), fingerprint)
+	assert.Equal(t, fingerprint, response.Data[0].Snapshot.Keys[0].KeyFingerprint)
+	assert.Contains(t, recorder.Body.String(), "key_fingerprint")
+	assert.NotContains(t, recorder.Body.String(), "root-route-test")
+	assert.NotContains(t, recorder.Body.String(), "unrelated-route-test")
 }

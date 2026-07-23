@@ -25,6 +25,8 @@ func registerUpstreamChannelRoutes(apiRouter *gin.RouterGroup) {
 		upstreamRoute.POST("/:id/refresh-balance", controller.RefreshUpstreamChannelBalance)
 		upstreamRoute.POST("/:id/refresh-keys", controller.RefreshUpstreamChannelKeys)
 		upstreamRoute.POST("/:id/refresh-groups", controller.RefreshUpstreamChannelGroups)
+		upstreamRoute.POST("/:id/keys/link", controller.LinkUpstreamChannelKeys)
+		upstreamRoute.PATCH("/:id/keys/:key_id/group", controller.UpdateUpstreamChannelKeyGroup)
 		upstreamRoute.POST("/:id/keys/import", controller.ImportUpstreamChannelKeys)
 		upstreamRoute.POST("/:id/keys/models", controller.FetchUpstreamChannelKeyModels)
 		upstreamRoute.POST("/:id/keys/:key_id", controller.RevealUpstreamChannelKey)

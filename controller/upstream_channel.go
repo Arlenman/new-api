@@ -31,6 +31,7 @@ type upstreamChannelView struct {
 	HasPassword              bool                      `json:"has_password"`
 	SourceChannelCount       int                       `json:"source_channel_count"`
 	ActiveSourceChannelCount int                       `json:"active_source_channel_count"`
+	InUseKeyCount            int                       `json:"in_use_key_count"`
 	Balance                  float64                   `json:"balance"`
 	Availability24h          *float64                  `json:"availability_24h"`
 	AverageFirstTokenLatency *float64                  `json:"average_first_token_latency_ms"`
@@ -109,6 +110,11 @@ type importUpstreamChannelKeysRequest struct {
 
 type fetchUpstreamChannelKeyModelsRequest struct {
 	KeyIDs []int64 `json:"key_ids"`
+}
+
+type updateUpstreamChannelKeyGroupRequest struct {
+	Group   string `json:"group"`
+	GroupID *int64 `json:"group_id"`
 }
 
 func CreateUpstreamChannel(c *gin.Context) {
@@ -200,7 +206,7 @@ func CreateUpstreamChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0))
+	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row)))
 }
 
 func GetUpstreamChannels(c *gin.Context) {
@@ -216,8 +222,12 @@ func GetUpstreamChannels(c *gin.Context) {
 	}
 	views := make([]upstreamChannelView, 0, len(rows))
 	for _, row := range rows {
-		channelStats := stats[row.BaseURL]
-		view := buildUpstreamChannelView(row, channelStats.Total, channelStats.Active)
+		normalizedBaseURL, normalizeErr := service.NormalizeUpstreamBaseURL(row.BaseURL)
+		if normalizeErr != nil {
+			normalizedBaseURL = row.BaseURL
+		}
+		channelStats := stats[normalizedBaseURL]
+		view := buildUpstreamChannelView(row, channelStats.Total, channelStats.Active, channelStats.InUseKeyCount)
 		metrics := logMetrics[row.BaseURL]
 		view.Availability24h = metrics.Availability24h
 		view.AverageFirstTokenLatency = metrics.AverageFirstTokenLatencyMs
@@ -337,7 +347,7 @@ func UpdateUpstreamChannelConfig(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0))
+	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row)))
 }
 
 func UpdateUpstreamChannelSelectedGroup(c *gin.Context) {
@@ -361,7 +371,7 @@ func UpdateUpstreamChannelSelectedGroup(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0))
+	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row)))
 }
 
 func UpdateUpstreamChannelDefaultTestModel(c *gin.Context) {
@@ -385,7 +395,7 @@ func UpdateUpstreamChannelDefaultTestModel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0))
+	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row)))
 }
 
 func GetUpstreamPrioritySchedule(c *gin.Context) {
@@ -434,7 +444,7 @@ func PinUpstreamChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0))
+	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row)))
 }
 
 func UpdateUpstreamChannelNote(c *gin.Context) {
@@ -466,7 +476,7 @@ func UpdateUpstreamChannelNote(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0))
+	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row)))
 }
 
 func RefreshUpstreamChannel(c *gin.Context) {
@@ -479,12 +489,12 @@ func RefreshUpstreamChannel(c *gin.Context) {
 	if err != nil {
 		var data any
 		if row != nil {
-			data = buildUpstreamChannelView(row, 0, 0)
+			data = buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row))
 		}
 		respondUpstreamChannelError(c, err, data)
 		return
 	}
-	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0))
+	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row)))
 }
 
 func RefreshUpstreamChannelBalance(c *gin.Context) {
@@ -499,6 +509,58 @@ func RefreshUpstreamChannelGroups(c *gin.Context) {
 	refreshUpstreamChannel(c, service.RefreshUpstreamChannelGroups)
 }
 
+func LinkUpstreamChannelKeys(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		common.ApiError(c, errInvalidUpstreamChannelID)
+		return
+	}
+	row, _, summary, err := service.LinkUpstreamChannelKeys(c.Request.Context(), id)
+	if err != nil {
+		var data any
+		if row != nil {
+			data = buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row))
+		}
+		respondUpstreamChannelError(c, err, data)
+		return
+	}
+	common.ApiSuccess(c, gin.H{
+		"channel": buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row)),
+		"summary": summary,
+	})
+}
+
+func UpdateUpstreamChannelKeyGroup(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		common.ApiError(c, errInvalidUpstreamChannelID)
+		return
+	}
+	keyID, err := strconv.ParseInt(c.Param("key_id"), 10, 64)
+	if err != nil || keyID <= 0 {
+		common.ApiError(c, errInvalidUpstreamKeyID)
+		return
+	}
+	var request updateUpstreamChannelKeyGroupRequest
+	if err = c.ShouldBindJSON(&request); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	row, _, err := service.UpdateUpstreamChannelKeyGroup(c.Request.Context(), id, keyID, service.UpstreamKeyGroupUpdate{
+		Group:   request.Group,
+		GroupID: request.GroupID,
+	})
+	if err != nil {
+		var data any
+		if row != nil {
+			data = buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row))
+		}
+		respondUpstreamChannelError(c, err, data)
+		return
+	}
+	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row)))
+}
+
 func refreshUpstreamChannel(c *gin.Context, refresh func(context.Context, int) (*model.UpstreamChannel, service.UpstreamSnapshot, error)) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil || id <= 0 {
@@ -509,12 +571,12 @@ func refreshUpstreamChannel(c *gin.Context, refresh func(context.Context, int) (
 	if err != nil {
 		var data any
 		if row != nil {
-			data = buildUpstreamChannelView(row, 0, 0)
+			data = buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row))
 		}
 		respondUpstreamChannelError(c, err, data)
 		return
 	}
-	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0))
+	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row)))
 }
 
 func RefreshAllUpstreamChannels(c *gin.Context) {
@@ -607,7 +669,7 @@ func respondUpstreamChannelError(c *gin.Context, err error, data any) {
 	c.JSON(http.StatusOK, response)
 }
 
-func buildUpstreamChannelView(row *model.UpstreamChannel, sourceChannelCount int, activeSourceChannelCount int) upstreamChannelView {
+func buildUpstreamChannelView(row *model.UpstreamChannel, sourceChannelCount int, activeSourceChannelCount int, inUseKeyCount int) upstreamChannelView {
 	view := upstreamChannelView{
 		ID:                       row.Id,
 		Name:                     row.Name,
@@ -622,6 +684,7 @@ func buildUpstreamChannelView(row *model.UpstreamChannel, sourceChannelCount int
 		HasPassword:              row.HasPassword(),
 		SourceChannelCount:       sourceChannelCount,
 		ActiveSourceChannelCount: activeSourceChannelCount,
+		InUseKeyCount:            inUseKeyCount,
 		Balance:                  row.Balance,
 		BalanceUpdatedTime:       row.BalanceUpdatedTime,
 		BalanceThreshold:         row.BalanceThreshold,
@@ -636,13 +699,22 @@ func buildUpstreamChannelView(row *model.UpstreamChannel, sourceChannelCount int
 		var snapshot service.UpstreamSnapshot
 		if err := common.Unmarshal([]byte(row.SnapshotJSON), &snapshot); err == nil {
 			service.NormalizeUpstreamSnapshot(&snapshot)
-			for i := range snapshot.Keys {
-				snapshot.Keys[i].KeyFingerprint = ""
-			}
 			view.Snapshot = &snapshot
 		}
 	}
 	return view
+}
+
+func upstreamChannelInUseKeyCount(row *model.UpstreamChannel) int {
+	if row == nil || strings.TrimSpace(row.SnapshotJSON) == "" {
+		return 0
+	}
+	var snapshot service.UpstreamSnapshot
+	if err := common.UnmarshalJsonStr(row.SnapshotJSON, &snapshot); err != nil {
+		return 0
+	}
+	service.NormalizeUpstreamSnapshot(&snapshot)
+	return service.SummarizeUpstreamKeyLinks(snapshot.Keys).Enabled
 }
 
 func validUpstreamChannelMultiplier(multiplier float64) bool {

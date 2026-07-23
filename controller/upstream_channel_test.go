@@ -55,9 +55,66 @@ func setupUpstreamChannelControllerTest(t *testing.T) (*gin.Engine, *model.Upstr
 	engine.PATCH("/api/upstream-channels/:id/note", UpdateUpstreamChannelNote)
 	engine.PATCH("/api/upstream-channels/:id/selected-group", UpdateUpstreamChannelSelectedGroup)
 	engine.PATCH("/api/upstream-channels/:id/default-test-model", UpdateUpstreamChannelDefaultTestModel)
+	engine.POST("/api/upstream-channels/:id/keys/link", LinkUpstreamChannelKeys)
+	engine.PATCH("/api/upstream-channels/:id/keys/:key_id/group", UpdateUpstreamChannelKeyGroup)
 	engine.POST("/api/upstream-channels/:id/keys/import", ImportUpstreamChannelKeys)
 	engine.POST("/api/upstream-channels/:id/keys/models", FetchUpstreamChannelKeyModels)
 	return engine, row
+}
+
+func TestUpdateUpstreamChannelKeyGroupRejectsUnsupportedProvider(t *testing.T) {
+	engine, row := setupUpstreamChannelControllerTest(t)
+	row.Provider = service.UpstreamProviderOther
+	fingerprint := model.UpstreamChannelKeyFingerprint(row.BaseURL, "sk-linked")
+	row.SnapshotJSON = `{"provider":"other","keys":[{"id":7,"name":"key","linked":true,"active":true,"in_use_status":"enabled","key_fingerprint":"` + fingerprint + `"}],"groups":[],"ratios":{},"models":[]}`
+	require.NoError(t, model.DB.Save(row).Error)
+
+	request := httptest.NewRequest(
+		http.MethodPatch,
+		"/api/upstream-channels/"+strconv.Itoa(row.Id)+"/keys/7/group",
+		bytes.NewBufferString(`{"group":"premium"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+		Data    struct {
+			InUseKeyCount int                       `json:"in_use_key_count"`
+			Snapshot      *service.UpstreamSnapshot `json:"snapshot"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.False(t, response.Success)
+	assert.Contains(t, response.Message, "provider other")
+	require.NotNil(t, response.Data.Snapshot)
+	require.Len(t, response.Data.Snapshot.Keys, 1)
+	assert.Equal(t, int64(7), response.Data.Snapshot.Keys[0].ID)
+	assert.Equal(t, 1, response.Data.InUseKeyCount)
+}
+
+func TestLinkUpstreamChannelKeysErrorResponseKeepsInUseKeyCount(t *testing.T) {
+	engine, row := setupUpstreamChannelControllerTest(t)
+	fingerprint := model.UpstreamChannelKeyFingerprint(row.BaseURL, "sk-linked")
+	row.SnapshotJSON = `{"provider":"new-api","keys":[{"id":7,"linked":true,"active":true,"in_use_status":"enabled","key_fingerprint":"` + fingerprint + `"}],"groups":[],"ratios":{},"models":[]}`
+	require.NoError(t, model.DB.Save(row).Error)
+
+	request := httptest.NewRequest(http.MethodPost, "/api/upstream-channels/"+strconv.Itoa(row.Id)+"/keys/link", nil)
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			InUseKeyCount int `json:"in_use_key_count"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.False(t, response.Success)
+	assert.Equal(t, 1, response.Data.InUseKeyCount)
 }
 
 func TestUpstreamChannelTurnstileErrorResponseIncludesRecoveryCode(t *testing.T) {
@@ -75,7 +132,7 @@ func TestUpstreamChannelTurnstileErrorResponseIncludesRecoveryCode(t *testing.T)
 		respondUpstreamChannelError(
 			c,
 			service.ErrNewAPITurnstileRequiresAccessToken,
-			buildUpstreamChannelView(row, 0, 0),
+			buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row)),
 		)
 	})
 	request := httptest.NewRequest(http.MethodGet, "/turnstile-error", nil)
