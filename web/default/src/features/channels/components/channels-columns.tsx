@@ -72,7 +72,11 @@ import {
   handleUpdateChannelField,
   handleUpdateTagField,
   handleUpdateChannelBalance,
+  isChannelAggregateRow,
+  isPriorityAggregateRow,
   isTagAggregateRow,
+  type ChannelAggregateRow,
+  type PriorityRow,
   type TagRow,
 } from '../lib'
 import { parseUpstreamUpdateMeta } from '../lib/upstream-update-utils'
@@ -275,6 +279,7 @@ function PriorityCell({ channel }: { channel: Channel }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const isTagRow = isTagAggregateRow(channel)
+  const isPriorityRow = isPriorityAggregateRow(channel)
   const priority = channel.priority
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [pendingValue, setPendingValue] = useState<number | null>(null)
@@ -314,6 +319,10 @@ function PriorityCell({ channel }: { channel: Channel }) {
     )
   }
 
+  if (isPriorityRow) {
+    return <span className='font-medium tabular-nums'>{priority ?? 0}</span>
+  }
+
   // Regular channel row - editable
   return (
     <NumericSpinnerInput
@@ -333,6 +342,7 @@ function WeightCell({ channel }: { channel: Channel }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const isTagRow = isTagAggregateRow(channel)
+  const isPriorityRow = isPriorityAggregateRow(channel)
   const weight = channel.weight
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [pendingValue, setPendingValue] = useState<number | null>(null)
@@ -372,6 +382,14 @@ function WeightCell({ channel }: { channel: Channel }) {
     )
   }
 
+  if (isPriorityRow) {
+    return (
+      <span className='font-medium tabular-nums'>
+        {weight === null || weight === undefined ? t('Mixed') : weight}
+      </span>
+    )
+  }
+
   // Regular channel row - editable
   return (
     <NumericSpinnerInput
@@ -399,7 +417,7 @@ function BalanceCell({ channel }: { channel: Channel }) {
   const queryClient = useQueryClient()
   const layout = useContext(ChannelRowActionsLayoutContext)
   const { sensitiveVisible } = useChannels()
-  const isTagRow = isTagAggregateRow(channel)
+  const isAggregateRow = isChannelAggregateRow(channel)
   const balance = channel.balance || 0
   const usedQuota = channel.used_quota || 0
   const [isUpdating, setIsUpdating] = useState(false)
@@ -455,8 +473,8 @@ function BalanceCell({ channel }: { channel: Channel }) {
   const maskedUsedLabel = `${t('Used:')} ${SENSITIVE_MASK}`
   const maskedRemainingLabel = `${t('Remaining:')} ${SENSITIVE_MASK}`
 
-  // Tag row: only show cumulative used quota
-  if (isTagRow) {
+  // Aggregate row: only show cumulative used quota
+  if (isAggregateRow) {
     return (
       <TooltipProvider>
         <Tooltip>
@@ -643,10 +661,10 @@ export function useChannelsColumns(
                 />
               ),
               cell: ({ row }) => {
-                const isTagRow = isTagAggregateRow(row.original)
+                const isAggregateRow = isChannelAggregateRow(row.original)
 
-                // Don't show checkbox for tag rows
-                if (isTagRow) {
+                // Don't show checkbox for aggregate rows
+                if (isAggregateRow) {
                   return null
                 }
 
@@ -683,14 +701,20 @@ export function useChannelsColumns(
         header: t('Name'),
         meta: { mobileTitle: true },
         cell: ({ row }) => {
+          const isAggregateRow = isChannelAggregateRow(row.original)
           const isTagRow = isTagAggregateRow(row.original)
           const name = row.getValue('name') as string
           const channel = row.original
 
-          // Tag row with expand/collapse
-          if (isTagRow) {
-            const tag = (row.original as TagRow).tag || name
-            const childrenCount = (row.original as TagRow).children?.length || 0
+          // Aggregate row with expand/collapse
+          if (isAggregateRow) {
+            const childrenCount = (row.original as ChannelAggregateRow).children
+              .length
+            const aggregateLabel = isTagRow
+              ? `Tag：${(row.original as TagRow).tag || name}`
+              : `${t('Priority')}：${
+                  (row.original as PriorityRow).priority ?? 0
+                }`
 
             return (
               <div className='flex items-center gap-2'>
@@ -707,9 +731,9 @@ export function useChannelsColumns(
                   )}
                 </Button>
                 <div className='flex items-center gap-1.5'>
-                  <span className='font-semibold'>Tag：{tag}</span>
+                  <span className='font-semibold'>{aggregateLabel}</span>
                   <StatusBadge
-                    label={`${childrenCount} channels`}
+                    label={`${childrenCount} ${t('Channels')}`}
                     variant='blue'
                     size='sm'
                     copyable={false}
@@ -795,11 +819,12 @@ export function useChannelsColumns(
         header: t('Type'),
         cell: ({ row }) => {
           const isTagRow = isTagAggregateRow(row.original)
+          const isPriorityRow = isPriorityAggregateRow(row.original)
 
-          if (isTagRow) {
+          if (isTagRow || isPriorityRow) {
             return (
               <StatusBadge
-                label={t('Tag Aggregate')}
+                label={t(isTagRow ? 'Tag Aggregate' : 'Priority Aggregate')}
                 variant='blue'
                 size='sm'
                 copyable={false}
@@ -930,20 +955,20 @@ export function useChannelsColumns(
         header: t('Status'),
         meta: { mobileBadge: true },
         cell: ({ row }) => {
-          const isTagRow = isTagAggregateRow(row.original)
+          const isAggregateRow = isChannelAggregateRow(row.original)
           const status = row.getValue('status') as number
           const channel = row.original as Channel
 
-          // Tag row: show aggregated status
-          if (isTagRow) {
-            const tagRow = row.original as TagRow
-            const childrenCount = tagRow.children?.length || 0
+          // Aggregate row: show aggregated status
+          if (isAggregateRow) {
+            const aggregateRow = row.original as ChannelAggregateRow
+            const childrenCount = aggregateRow.children.length
             const hasEnabled = status === 1
 
             if (hasEnabled) {
               return (
                 <StatusBadge
-                  label={`Active (${tagRow.enabledCount})`}
+                  label={`${t('Active')} (${aggregateRow.enabledCount})`}
                   variant='success'
                   size='sm'
                   copyable={false}
@@ -953,7 +978,7 @@ export function useChannelsColumns(
             } else {
               return (
                 <StatusBadge
-                  label={`Inactive (${childrenCount})`}
+                  label={`${t('Inactive')} (${childrenCount})`}
                   variant='neutral'
                   size='sm'
                   copyable={false}
@@ -1243,8 +1268,11 @@ export function useChannelsColumns(
         id: 'actions',
         header: () => t('Actions'),
         cell: ({ row }) => {
-          // Check if this is a tag row (has children)
+          // Tag aggregates keep their existing batch actions. Priority
+          // aggregates are display-only because editing a priority group would
+          // immediately change its membership.
           const isTagRow = isTagAggregateRow(row.original)
+          const isPriorityRow = isPriorityAggregateRow(row.original)
 
           if (isTagRow) {
             return (
@@ -1253,6 +1281,10 @@ export function useChannelsColumns(
                 row={row as any}
               />
             )
+          }
+
+          if (isPriorityRow) {
+            return null
           }
 
           return <DataTableRowActions row={row} />

@@ -108,6 +108,10 @@ func buildChannelListQuery(group string, statusFilter int, typeFilter int) *gorm
 	return query
 }
 
+func buildChannelSearchListQuery(group string, statusFilter int, typeFilter int, keyword string, modelKeyword string) *gorm.DB {
+	return model.ApplyChannelSearchFilter(buildChannelListQuery(group, statusFilter, typeFilter), keyword, modelKeyword)
+}
+
 func GetChannelOps(c *gin.Context) {
 	common.ApiSuccess(c, gin.H{
 		"retry_times": common.RetryTimes,
@@ -120,6 +124,7 @@ func GetAllChannels(c *gin.Context) {
 	idSort, _ := strconv.ParseBool(c.Query("id_sort"))
 	sortOptions := model.NewChannelSortOptions(c.Query("sort_by"), c.Query("sort_order"), idSort)
 	enableTagMode, _ := strconv.ParseBool(c.Query("tag_mode"))
+	enablePriorityMode, _ := strconv.ParseBool(c.Query("priority_mode"))
 	groupFilter := model.NormalizeChannelGroupFilter(c.Query("group"))
 	statusParam := c.Query("status")
 	// statusFilter: -1 all, 1 enabled, 0 disabled (include auto & manual)
@@ -135,7 +140,29 @@ func GetAllChannels(c *gin.Context) {
 
 	var total int64
 
-	if enableTagMode {
+	if enablePriorityMode {
+		priorities, err := model.GetPaginatedChannelPriorities(buildChannelListQuery(groupFilter, statusFilter, typeFilter), pageInfo.GetStartIdx(), pageInfo.GetPageSize(), sortOptions)
+		if err != nil {
+			common.SysError("failed to get paginated priorities: " + err.Error())
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取优先级失败，请稍后重试"})
+			return
+		}
+		total, err = model.CountChannelPriorities(buildChannelListQuery(groupFilter, statusFilter, typeFilter))
+		if err != nil {
+			common.SysError("failed to count priorities: " + err.Error())
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取优先级数量失败，请稍后重试"})
+			return
+		}
+		for _, priority := range priorities {
+			priorityChannels, err := model.GetChannelsByPriority(buildChannelListQuery(groupFilter, statusFilter, typeFilter), priority, sortOptions)
+			if err != nil {
+				common.SysError("failed to get channels by priority: " + err.Error())
+				c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取优先级渠道失败，请稍后重试"})
+				return
+			}
+			channelData = append(channelData, priorityChannels...)
+		}
+	} else if enableTagMode {
 		tags, err := model.GetPaginatedChannelTags(buildChannelListQuery(groupFilter, statusFilter, typeFilter), pageInfo.GetStartIdx(), pageInfo.GetPageSize(), sortOptions)
 		if err != nil {
 			common.SysError("failed to get paginated tags: " + err.Error())
@@ -291,7 +318,75 @@ func SearchChannels(c *gin.Context) {
 	idSort, _ := strconv.ParseBool(c.Query("id_sort"))
 	sortOptions := model.NewChannelSortOptions(c.Query("sort_by"), c.Query("sort_order"), idSort)
 	enableTagMode, _ := strconv.ParseBool(c.Query("tag_mode"))
+	enablePriorityMode, _ := strconv.ParseBool(c.Query("priority_mode"))
+	typeFilter := -1
+	if typeParam := c.Query("type"); typeParam != "" {
+		if tp, err := strconv.Atoi(typeParam); err == nil {
+			typeFilter = tp
+		}
+	}
 	channelData := make([]*model.Channel, 0)
+
+	if enablePriorityMode {
+		pageInfo := common.GetPageQuery(c)
+		typeCountQuery := buildChannelSearchListQuery(group, statusFilter, -1, keyword, modelKeyword)
+		var results []struct {
+			Type  int64
+			Count int64
+		}
+		if err := typeCountQuery.Select("type, count(*) as count").Group("type").Find(&results).Error; err != nil {
+			common.SysError("failed to count searched channel types: " + err.Error())
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取渠道类型统计失败，请稍后重试"})
+			return
+		}
+		typeCounts := make(map[int64]int64, len(results))
+		for _, result := range results {
+			typeCounts[result.Type] = result.Count
+		}
+
+		priorities, err := model.GetPaginatedChannelPriorities(
+			buildChannelSearchListQuery(group, statusFilter, typeFilter, keyword, modelKeyword),
+			pageInfo.GetStartIdx(),
+			pageInfo.GetPageSize(),
+			sortOptions,
+		)
+		if err != nil {
+			common.SysError("failed to search paginated priorities: " + err.Error())
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取优先级失败，请稍后重试"})
+			return
+		}
+		total, err := model.CountChannelPriorities(buildChannelSearchListQuery(group, statusFilter, typeFilter, keyword, modelKeyword))
+		if err != nil {
+			common.SysError("failed to count searched priorities: " + err.Error())
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取优先级数量失败，请稍后重试"})
+			return
+		}
+		for _, priority := range priorities {
+			priorityChannels, err := model.GetChannelsByPriority(
+				buildChannelSearchListQuery(group, statusFilter, typeFilter, keyword, modelKeyword),
+				priority,
+				sortOptions,
+			)
+			if err != nil {
+				common.SysError("failed to search channels by priority: " + err.Error())
+				c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取优先级渠道失败，请稍后重试"})
+				return
+			}
+			channelData = append(channelData, priorityChannels...)
+		}
+		for _, datum := range channelData {
+			clearChannelInfo(datum)
+		}
+		common.ApiSuccess(c, gin.H{
+			"items":       channelData,
+			"total":       total,
+			"page":        pageInfo.GetPage(),
+			"page_size":   pageInfo.GetPageSize(),
+			"type_counts": typeCounts,
+		})
+		return
+	}
+
 	if enableTagMode {
 		tags, err := model.SearchTags(keyword, group, modelKeyword, idSort, sortOptions)
 		if err != nil {
@@ -347,14 +442,6 @@ func SearchChannels(c *gin.Context) {
 	typeCounts := make(map[int64]int64)
 	for _, channel := range channelData {
 		typeCounts[int64(channel.Type)]++
-	}
-
-	typeParam := c.Query("type")
-	typeFilter := -1
-	if typeParam != "" {
-		if tp, err := strconv.Atoi(typeParam); err == nil {
-			typeFilter = tp
-		}
 	}
 
 	if typeFilter >= 0 {

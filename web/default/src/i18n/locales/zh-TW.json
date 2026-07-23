@@ -5725,6 +5725,8 @@
     "Maximum test latency must be an integer between 1 and 300 seconds": "最大測試延遲必須是 1 到 300 之間的整數秒",
     "Zoom": "縮放",
     "Zoom in": "Zoom in",
-    "Zoom out": "Zoom out"
+    "Zoom out": "Zoom out",
+    "Priority Aggregate": "優先級聚合",
+    "Priority Mode": "優先級模式"
   }
 }

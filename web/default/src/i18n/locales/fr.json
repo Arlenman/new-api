@@ -5725,6 +5725,8 @@
     "Maximum test latency must be an integer between 1 and 300 seconds": "La latence maximale du test doit être un nombre entier compris entre 1 et 300 secondes",
     "Zoom": "Zoom",
     "Zoom in": "Zoom in",
-    "Zoom out": "Zoom out"
+    "Zoom out": "Zoom out",
+    "Priority Aggregate": "Agrégat de priorités",
+    "Priority Mode": "Mode priorité"
   }
 }

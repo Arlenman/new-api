@@ -5725,6 +5725,8 @@
     "Maximum test latency must be an integer between 1 and 300 seconds": "最大テスト遅延は 1〜300 秒の整数で指定してください",
     "Zoom": "ズーム",
     "Zoom in": "Zoom in",
-    "Zoom out": "Zoom out"
+    "Zoom out": "Zoom out",
+    "Priority Aggregate": "優先度集計",
+    "Priority Mode": "優先度モード"
   }
 }

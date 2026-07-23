@@ -5725,6 +5725,8 @@
     "Maximum test latency must be an integer between 1 and 300 seconds": "Максимальная задержка теста должна быть целым числом от 1 до 300 секунд",
     "Zoom": "Zoom",
     "Zoom in": "Zoom in",
-    "Zoom out": "Zoom out"
+    "Zoom out": "Zoom out",
+    "Priority Aggregate": "Агрегация приоритетов",
+    "Priority Mode": "Режим приоритета"
   }
 }

@@ -58,6 +58,8 @@ type ChannelsContextType = {
   setCurrentTag: (tag: string | null) => void
   enableTagMode: boolean
   setEnableTagMode: (enabled: boolean) => void
+  enablePriorityMode: boolean
+  setEnablePriorityMode: (enabled: boolean) => void
   idSort: boolean
   setIdSort: (enabled: boolean) => void
   batchMode: boolean
@@ -83,14 +85,38 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState<DialogType>(null)
   const [currentRow, setCurrentRow] = useState<Channel | null>(null)
   const [currentTag, setCurrentTag] = useState<string | null>(null)
-  const [enableTagMode, setEnableTagMode] = useState(() => {
-    return localStorage.getItem('enable-tag-mode') === 'true'
+  const [enablePriorityMode, setEnablePriorityModeState] = useState(() => {
+    return localStorage.getItem('enable-priority-mode') === 'true'
+  })
+  const [enableTagMode, setEnableTagModeState] = useState(() => {
+    return (
+      localStorage.getItem('enable-tag-mode') === 'true' &&
+      localStorage.getItem('enable-priority-mode') !== 'true'
+    )
   })
   const [idSort, setIdSort] = useState(() => {
     return localStorage.getItem('channels-id-sort') === 'true'
   })
   const [batchMode, setBatchMode] = useState(false)
   const [sensitiveVisible, setSensitiveVisible] = useState(true)
+
+  const setEnableTagMode = useCallback((enabled: boolean) => {
+    localStorage.setItem('enable-tag-mode', String(enabled))
+    setEnableTagModeState(enabled)
+    if (enabled) {
+      localStorage.setItem('enable-priority-mode', 'false')
+      setEnablePriorityModeState(false)
+    }
+  }, [])
+
+  const setEnablePriorityMode = useCallback((enabled: boolean) => {
+    localStorage.setItem('enable-priority-mode', String(enabled))
+    setEnablePriorityModeState(enabled)
+    if (enabled) {
+      localStorage.setItem('enable-tag-mode', 'false')
+      setEnableTagModeState(false)
+    }
+  }, [])
 
   const queryClient = useQueryClient()
   const refreshChannels = useCallback(async () => {
@@ -111,6 +137,8 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
       setCurrentTag,
       enableTagMode,
       setEnableTagMode,
+      enablePriorityMode,
+      setEnablePriorityMode,
       idSort,
       setIdSort,
       batchMode,
@@ -124,6 +152,7 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
       currentRow,
       currentTag,
       enableTagMode,
+      enablePriorityMode,
       idSort,
       batchMode,
       sensitiveVisible,

@@ -605,16 +605,46 @@ export function getAttentionReason(channel: Channel): string | null {
 /**
  * Tag row type (extends Channel with children)
  */
-export type TagRow = Channel & {
+export type ChannelAggregateRow = Channel & {
+  aggregateType: 'tag' | 'priority'
   children: Channel[]
   enabledCount: number
+}
+
+export type TagRow = ChannelAggregateRow & {
+  aggregateType: 'tag'
+}
+
+export type PriorityRow = ChannelAggregateRow & {
+  aggregateType: 'priority'
+}
+
+/**
+ * Type guard to check whether a row is any aggregate row
+ */
+export function isChannelAggregateRow(
+  row: Channel | ChannelAggregateRow
+): row is ChannelAggregateRow {
+  return (
+    (row as ChannelAggregateRow).aggregateType === 'tag' ||
+    (row as ChannelAggregateRow).aggregateType === 'priority'
+  )
 }
 
 /**
  * Type guard to check whether a row is a tag aggregate row
  */
 export function isTagAggregateRow(row: Channel | TagRow): row is TagRow {
-  return Array.isArray((row as TagRow).children)
+  return (row as TagRow).aggregateType === 'tag'
+}
+
+/**
+ * Type guard to check whether a row is a priority aggregate row
+ */
+export function isPriorityAggregateRow(
+  row: Channel | PriorityRow
+): row is PriorityRow {
+  return (row as PriorityRow).aggregateType === 'priority'
 }
 
 /**
@@ -634,6 +664,7 @@ export function aggregateChannelsByTag(
       // Create tag aggregate row
       const tagRow = {
         ...channel,
+        aggregateType: 'tag',
         key: tag,
         id: tag as unknown as number,
         tag,
@@ -707,6 +738,90 @@ export function aggregateChannelsByTag(
       tagRow.enabledCount += 1
     } else if (tagRow.status === undefined) {
       tagRow.status = channel.status
+    }
+  }
+
+  return result
+}
+
+/**
+ * Aggregate channels by priority for priority mode display.
+ * The server returns priority groups in display order; this function preserves
+ * both that group order and the channel order within each group.
+ */
+export function aggregateChannelsByPriority(
+  channels: Channel[]
+): (Channel | PriorityRow)[] {
+  const priorityMap = new Map<number, PriorityRow>()
+  const result: (Channel | PriorityRow)[] = []
+
+  for (const channel of channels) {
+    const priority = channel.priority ?? 0
+
+    if (!priorityMap.has(priority)) {
+      const priorityRow = {
+        ...channel,
+        aggregateType: 'priority',
+        key: `priority:${priority}`,
+        id: priority,
+        tag: null,
+        name: String(priority),
+        type: 0,
+        status: undefined as unknown as number,
+        group: '',
+        used_quota: 0,
+        response_time: 0,
+        priority,
+        weight: -1 as unknown as number | null,
+        balance: 0,
+        test_time: 0,
+        created_time: 0,
+        balance_updated_time: 0,
+        models: '',
+        children: [],
+        enabledCount: 0,
+      } as PriorityRow
+      priorityMap.set(priority, priorityRow)
+      result.push(priorityRow)
+    }
+
+    const priorityRow = priorityMap.get(priority)
+    if (!priorityRow) {
+      continue
+    }
+
+    priorityRow.children.push(channel)
+    const childCount = priorityRow.children.length
+    priorityRow.used_quota += channel.used_quota
+    priorityRow.response_time =
+      (priorityRow.response_time * (childCount - 1) + channel.response_time) /
+      childCount
+
+    if (childCount === 1) {
+      priorityRow.weight = channel.weight
+    } else if (priorityRow.weight !== channel.weight) {
+      priorityRow.weight = null
+    }
+
+    if (priorityRow.group === '') {
+      priorityRow.group = channel.group
+    } else {
+      const existingGroups = new Set(
+        priorityRow.group.split(',').filter(Boolean)
+      )
+      const newGroups = channel.group.split(',').filter(Boolean)
+      newGroups.forEach((group) => {
+        if (!existingGroups.has(group)) {
+          priorityRow.group += `,${group}`
+        }
+      })
+    }
+
+    if (channel.status === 1) {
+      priorityRow.status = 1
+      priorityRow.enabledCount += 1
+    } else if (priorityRow.status === undefined) {
+      priorityRow.status = channel.status
     }
   }
 

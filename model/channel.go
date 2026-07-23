@@ -402,32 +402,25 @@ func GetChannelsByTag(tag string, idSort bool, selectAll bool, sortOptions ...Ch
 	return channels, err
 }
 
-func SearchChannels(keyword string, group string, model string, idSort bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
-	var channels []*Channel
+func ApplyChannelSearchFilter(query *gorm.DB, keyword string, model string) *gorm.DB {
 	modelsCol := "`models`"
-
-	// 如果是 PostgreSQL，使用双引号
+	baseURLCol := "`base_url`"
 	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		modelsCol = `"models"`
-	}
-
-	baseURLCol := "`base_url`"
-	// 如果是 PostgreSQL，使用双引号
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		baseURLCol = `"base_url"`
 	}
 
-	order := resolveChannelSortOptions(idSort, sortOptions)
-
-	// 构造基础查询
-	baseQuery := DB.Model(&Channel{}).Omit("key")
-
-	// 构造WHERE子句
 	whereClause := "(id = ? OR name LIKE ? OR " + commonKeyCol + " = ? OR " + baseURLCol + " LIKE ?) AND " + modelsCol + " LIKE ?"
 	args := []any{common.String2Int(keyword), "%" + keyword + "%", keyword, "%" + keyword + "%", "%" + model + "%"}
-	baseQuery = ApplyChannelGroupFilter(baseQuery.Where(whereClause, args...), group)
+	return query.Where(whereClause, args...)
+}
 
-	// 执行查询
+func SearchChannels(keyword string, group string, model string, idSort bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
+	var channels []*Channel
+	order := resolveChannelSortOptions(idSort, sortOptions)
+	baseQuery := ApplyChannelGroupFilter(DB.Model(&Channel{}).Omit("key"), group)
+	baseQuery = ApplyChannelSearchFilter(baseQuery, keyword, model)
+
 	err := order.Apply(baseQuery).Find(&channels).Error
 	if err != nil {
 		return nil, err
@@ -904,6 +897,36 @@ func DeleteChannelByStatus(status int64) (int64, error) {
 func DeleteDisabledChannel() (int64, error) {
 	result := DB.Where("status = ? or status = ?", common.ChannelStatusAutoDisabled, common.ChannelStatusManuallyDisabled).Delete(&Channel{})
 	return result.RowsAffected, result.Error
+}
+
+func GetPaginatedChannelPriorities(query *gorm.DB, offset int, limit int, sortOptions ...ChannelSortOptions) ([]int64, error) {
+	priorities := make([]int64, 0)
+	direction := "DESC"
+	if len(sortOptions) > 0 && sortOptions[0].SortBy == "priority" && sortOptions[0].SortOrder == "asc" {
+		direction = "ASC"
+	}
+
+	err := query.
+		Select("COALESCE(priority, 0) AS priority").
+		Group("COALESCE(priority, 0)").
+		Order("COALESCE(priority, 0) " + direction).
+		Offset(offset).
+		Limit(limit).
+		Find(&priorities).Error
+	return priorities, err
+}
+
+func CountChannelPriorities(query *gorm.DB) (int64, error) {
+	var total int64
+	err := query.Select("COUNT(DISTINCT COALESCE(priority, 0))").Scan(&total).Error
+	return total, err
+}
+
+func GetChannelsByPriority(query *gorm.DB, priority int64, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
+	var channels []*Channel
+	order := resolveChannelSortOptions(false, sortOptions)
+	err := order.Apply(query.Where("COALESCE(priority, 0) = ?", priority)).Omit("key").Find(&channels).Error
+	return channels, err
 }
 
 func GetPaginatedTags(offset int, limit int) ([]*string, error) {

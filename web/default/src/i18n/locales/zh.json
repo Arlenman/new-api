@@ -5725,6 +5725,8 @@
     "Maximum test latency must be an integer between 1 and 300 seconds": "最大测试延时必须是 1 到 300 之间的整数秒",
     "Zoom": "缩放",
     "Zoom in": "放大",
-    "Zoom out": "缩小"
+    "Zoom out": "缩小",
+    "Priority Aggregate": "优先级聚合",
+    "Priority Mode": "优先级模式"
   }
 }

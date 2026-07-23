@@ -23,13 +23,15 @@ import { createServer, type ViteDevServer } from 'vite'
 
 import type { Channel } from '../types.ts'
 
-type TagRowResult = Channel & {
+type AggregateRowResult = Channel & {
+  aggregateType: 'tag' | 'priority'
   children: Channel[]
   enabledCount: number
 }
 
 let server: ViteDevServer
-let aggregateChannelsByTag: (channels: Channel[]) => TagRowResult[]
+let aggregateChannelsByTag: (channels: Channel[]) => AggregateRowResult[]
+let aggregateChannelsByPriority: (channels: Channel[]) => AggregateRowResult[]
 
 function createChannel(
   id: number,
@@ -62,6 +64,7 @@ before(async () => {
     '/src/features/channels/lib/channel-utils.ts'
   )
   aggregateChannelsByTag = module.aggregateChannelsByTag
+  aggregateChannelsByPriority = module.aggregateChannelsByPriority
 })
 
 after(async () => {
@@ -123,6 +126,67 @@ describe('channel tag aggregation', () => {
     assert.deepEqual(
       input.map((channel) => channel.id),
       [3, 2, 4, 1]
+    )
+  })
+})
+
+describe('channel priority aggregation', () => {
+  test('groups channels with the same priority and tracks enabled children', () => {
+    const rows = aggregateChannelsByPriority([
+      createChannel(1, 1, { priority: 20 }),
+      createChannel(2, 2, { priority: 20 }),
+      createChannel(3, 1, { priority: 10 }),
+    ])
+
+    assert.equal(rows.length, 2)
+    assert.equal(rows[0].aggregateType, 'priority')
+    assert.equal(rows[0].priority, 20)
+    assert.deepEqual(
+      rows[0].children.map((channel) => channel.id),
+      [1, 2]
+    )
+    assert.equal(rows[0].enabledCount, 1)
+    assert.equal(rows[1].priority, 10)
+  })
+
+  test('preserves server priority-group and child ordering', () => {
+    const input = [
+      createChannel(5, 1, { priority: 30 }),
+      createChannel(2, 1, { priority: 30 }),
+      createChannel(4, 1, { priority: 10 }),
+      createChannel(1, 1, { priority: 10 }),
+    ]
+
+    const rows = aggregateChannelsByPriority(input)
+
+    assert.deepEqual(
+      rows.map((row) => row.priority),
+      [30, 10]
+    )
+    assert.deepEqual(
+      rows.map((row) => row.children.map((channel) => channel.id)),
+      [
+        [5, 2],
+        [4, 1],
+      ]
+    )
+    assert.deepEqual(
+      input.map((channel) => channel.id),
+      [5, 2, 4, 1]
+    )
+  })
+
+  test('groups null priority with explicit zero priority', () => {
+    const rows = aggregateChannelsByPriority([
+      createChannel(1, 1, { priority: null }),
+      createChannel(2, 1, { priority: 0 }),
+    ])
+
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].priority, 0)
+    assert.deepEqual(
+      rows[0].children.map((channel) => channel.id),
+      [1, 2]
     )
   })
 })

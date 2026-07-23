@@ -23,6 +23,7 @@ import {
   Settings2,
   Trash2,
   Tags,
+  ListTree,
   TestTube,
   DollarSign,
   ListChecks,
@@ -73,6 +74,8 @@ export function ChannelsPrimaryButtons() {
     setCurrentRow,
     enableTagMode,
     setEnableTagMode,
+    enablePriorityMode,
+    setEnablePriorityMode,
     idSort,
     setIdSort,
     batchMode,
@@ -91,8 +94,11 @@ export function ChannelsPrimaryButtons() {
   )
 
   const handleTagModeToggle = (checked: boolean) => {
-    localStorage.setItem('enable-tag-mode', String(checked))
     setEnableTagMode(checked)
+  }
+
+  const handlePriorityModeToggle = (checked: boolean) => {
+    setEnablePriorityMode(checked)
   }
 
   const handleIdSortToggle = (checked: boolean) => {
@@ -132,6 +138,18 @@ export function ChannelsPrimaryButtons() {
             id='tag-mode'
             checked={enableTagMode}
             onCheckedChange={handleTagModeToggle}
+          />
+        </div>
+
+        <div className='hidden items-center gap-2 rounded-md border px-3 py-1.5 sm:flex'>
+          <ListTree className='text-muted-foreground h-4 w-4' />
+          <Label htmlFor='priority-mode' className='cursor-pointer text-sm'>
+            {t('Priority Mode')}
+          </Label>
+          <Switch
+            id='priority-mode'
+            checked={enablePriorityMode}
+            onCheckedChange={handlePriorityModeToggle}
           />
         </div>
 
@@ -194,6 +212,15 @@ export function ChannelsPrimaryButtons() {
             >
               <Tags className='mr-2 h-4 w-4' />
               {t('Tag Mode')}
+            </DropdownMenuCheckboxItem>
+
+            <DropdownMenuCheckboxItem
+              className='sm:hidden'
+              checked={enablePriorityMode}
+              onCheckedChange={handlePriorityModeToggle}
+            >
+              <ListTree className='mr-2 h-4 w-4' />
+              {t('Priority Mode')}
             </DropdownMenuCheckboxItem>
 
             <DropdownMenuCheckboxItem

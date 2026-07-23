@@ -5725,6 +5725,8 @@
     "Maximum test latency must be an integer between 1 and 300 seconds": "Maximum test latency must be an integer between 1 and 300 seconds",
     "Zoom": "Zoom",
     "Zoom in": "Zoom in",
-    "Zoom out": "Zoom out"
+    "Zoom out": "Zoom out",
+    "Priority Aggregate": "Priority Aggregate",
+    "Priority Mode": "Priority Mode"
   }
 }

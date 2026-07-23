@@ -5725,6 +5725,8 @@
     "Maximum test latency must be an integer between 1 and 300 seconds": "Độ trễ kiểm tra tối đa phải là số nguyên từ 1 đến 300 giây",
     "Zoom": "Zoom",
     "Zoom in": "Zoom in",
-    "Zoom out": "Zoom out"
+    "Zoom out": "Zoom out",
+    "Priority Aggregate": "Tổng hợp ưu tiên",
+    "Priority Mode": "Chế độ ưu tiên"
   }
 }
