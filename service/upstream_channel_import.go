@@ -89,6 +89,10 @@ func importUpstreamChannelKeys(ctx context.Context, client *http.Client, upstrea
 	if err != nil {
 		return UpstreamKeyImportResult{}, err
 	}
+	normalizedBaseURL, err := NormalizeUpstreamBaseURL(row.BaseURL)
+	if err != nil {
+		return UpstreamKeyImportResult{}, err
+	}
 	if UpstreamCredentialRequiresUsername(row.Provider, row.EffectiveAuthType()) && strings.TrimSpace(row.Username) == "" {
 		return UpstreamKeyImportResult{}, errors.New("upstream username is not configured")
 	}
@@ -133,7 +137,7 @@ func importUpstreamChannelKeys(ctx context.Context, client *http.Client, upstrea
 			return UpstreamKeyImportResult{}, fmt.Errorf("upstream key %d is empty", keyID)
 		}
 		keyIndex := keyIndexByID[keyID]
-		snapshot.Keys[keyIndex].KeyFingerprint = model.UpstreamKeyFingerprint(fullKey)
+		snapshot.Keys[keyIndex].KeyFingerprint = model.UpstreamChannelKeyFingerprint(normalizedBaseURL, fullKey)
 
 		fetchedModels, modelsErr := fetchUpstreamKeyModels(importCtx, client, row.BaseURL, fullKey)
 		models := fetchedModels

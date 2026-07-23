@@ -286,7 +286,7 @@ func TestDiscoverUpstreamChannelsDeduplicatesExplicitChannelBaseURLs(t *testing.
 	require.NoError(t, err)
 	require.Len(t, rows, 3)
 	assert.Equal(t, 2, stats["https://example.com"].Total)
-	assert.Zero(t, stats["https://example.com"].Active)
+	assert.Equal(t, 1, stats["https://example.com"].Active)
 	assert.Equal(t, 1, stats["https://second.example"].Total)
 	assert.Zero(t, stats["https://second.example"].Active)
 	assert.Zero(t, stats["https://manual.example"].Total)
@@ -314,9 +314,11 @@ func TestDiscoverUpstreamChannelsCountsOnlyEnabledSnapshotKeysAsActive(t *testin
 	require.NoError(t, db.Create(&model.Channel{Key: "sk-disabled", BaseURL: &baseURL, Status: common.ChannelStatusManuallyDisabled}).Error)
 	require.NoError(t, db.Create(&model.Channel{Key: "sk-unrelated", BaseURL: &baseURL, Status: common.ChannelStatusEnabled}).Error)
 
+	enabledFingerprint := model.UpstreamChannelKeyFingerprint(baseURL, "sk-enabled")
 	snapshotJSON, err := common.Marshal(UpstreamSnapshot{Keys: []UpstreamKey{
-		{ID: 1, KeyFingerprint: model.UpstreamKeyFingerprint("sk-enabled")},
-		{ID: 2, KeyFingerprint: model.UpstreamKeyFingerprint("sk-disabled")},
+		{ID: 1, KeyFingerprint: enabledFingerprint},
+		{ID: 3, KeyFingerprint: enabledFingerprint},
+		{ID: 2, KeyFingerprint: model.UpstreamChannelKeyFingerprint(baseURL, "sk-disabled")},
 	}})
 	require.NoError(t, err)
 	require.NoError(t, db.Create(&model.UpstreamChannel{
@@ -332,34 +334,40 @@ func TestDiscoverUpstreamChannelsCountsOnlyEnabledSnapshotKeysAsActive(t *testin
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, 3, stats[baseURL].Total)
-	assert.Equal(t, 1, stats[baseURL].Active)
+	assert.Equal(t, 2, stats[baseURL].Active)
+	assert.Equal(t, 1, stats[baseURL].InUseKeyCount)
 
 	var snapshot UpstreamSnapshot
 	require.NoError(t, common.UnmarshalJsonStr(rows[0].SnapshotJSON, &snapshot))
-	require.Len(t, snapshot.Keys, 2)
+	require.Len(t, snapshot.Keys, 3)
 	assert.True(t, snapshot.Keys[0].Imported)
 	assert.True(t, snapshot.Keys[0].Active)
 	assert.True(t, snapshot.Keys[1].Imported)
-	assert.False(t, snapshot.Keys[1].Active)
+	assert.True(t, snapshot.Keys[1].Active)
+	assert.True(t, snapshot.Keys[2].Imported)
+	assert.False(t, snapshot.Keys[2].Active)
 
 	require.NoError(t, db.Model(&model.Channel{}).Where("key = ?", "sk-enabled").Update("status", common.ChannelStatusManuallyDisabled).Error)
 	rows, stats, err = DiscoverUpstreamChannels()
 	require.NoError(t, err)
-	assert.Zero(t, stats[baseURL].Active)
+	assert.Equal(t, 1, stats[baseURL].Active)
+	assert.Zero(t, stats[baseURL].InUseKeyCount)
 	require.NoError(t, common.UnmarshalJsonStr(rows[0].SnapshotJSON, &snapshot))
 	assert.False(t, snapshot.Keys[0].Active)
 
 	require.NoError(t, db.Model(&model.Channel{}).Where("key = ?", "sk-enabled").Update("status", common.ChannelStatusAutoDisabled).Error)
 	rows, stats, err = DiscoverUpstreamChannels()
 	require.NoError(t, err)
-	assert.Zero(t, stats[baseURL].Active)
+	assert.Equal(t, 1, stats[baseURL].Active)
+	assert.Zero(t, stats[baseURL].InUseKeyCount)
 	require.NoError(t, common.UnmarshalJsonStr(rows[0].SnapshotJSON, &snapshot))
 	assert.False(t, snapshot.Keys[0].Active)
 
 	require.NoError(t, db.Model(&model.Channel{}).Where("key = ?", "sk-enabled").Update("status", common.ChannelStatusEnabled).Error)
 	rows, stats, err = DiscoverUpstreamChannels()
 	require.NoError(t, err)
-	assert.Equal(t, 1, stats[baseURL].Active)
+	assert.Equal(t, 2, stats[baseURL].Active)
+	assert.Equal(t, 1, stats[baseURL].InUseKeyCount)
 	require.NoError(t, common.UnmarshalJsonStr(rows[0].SnapshotJSON, &snapshot))
 	assert.True(t, snapshot.Keys[0].Active)
 }
@@ -421,18 +429,24 @@ func TestMarkImportedUpstreamKeysUsesBaseURLAndFullKeyFingerprint(t *testing.T) 
 	require.NoError(t, db.Create(&model.Channel{BaseURL: &otherBaseURL, Key: "sk-other", Status: common.ChannelStatusEnabled}).Error)
 
 	snapshot := UpstreamSnapshot{Keys: []UpstreamKey{
-		{ID: 1, KeyFingerprint: upstreamKeyFingerprint("sk-imported")},
-		{ID: 2, KeyFingerprint: upstreamKeyFingerprint("sk-disabled")},
-		{ID: 3, KeyFingerprint: upstreamKeyFingerprint("sk-not-imported")},
-		{ID: 4, KeyFingerprint: upstreamKeyFingerprint("sk-other")},
+		{ID: 1, KeyFingerprint: upstreamKeyFingerprint(baseURL, "sk-imported")},
+		{ID: 2, KeyFingerprint: upstreamKeyFingerprint(baseURL, "sk-disabled")},
+		{ID: 3, KeyFingerprint: upstreamKeyFingerprint(baseURL, "sk-not-imported")},
+		{ID: 4, KeyFingerprint: upstreamKeyFingerprint(otherBaseURL, "sk-other")},
 	}}
 	require.NoError(t, markImportedUpstreamKeys(baseURL, &snapshot))
 	assert.True(t, snapshot.Keys[0].Imported)
 	assert.True(t, snapshot.Keys[0].Active)
+	assert.True(t, snapshot.Keys[0].Linked)
+	assert.Equal(t, UpstreamKeyInUseStatusEnabled, snapshot.Keys[0].InUseStatus)
 	assert.True(t, snapshot.Keys[1].Imported)
 	assert.False(t, snapshot.Keys[1].Active)
+	assert.True(t, snapshot.Keys[1].Linked)
+	assert.Equal(t, UpstreamKeyInUseStatusDisabled, snapshot.Keys[1].InUseStatus)
 	assert.False(t, snapshot.Keys[2].Imported)
 	assert.False(t, snapshot.Keys[2].Active)
+	assert.False(t, snapshot.Keys[2].Linked)
+	assert.Equal(t, UpstreamKeyInUseStatusUnlinked, snapshot.Keys[2].InUseStatus)
 	assert.False(t, snapshot.Keys[3].Imported)
 	assert.False(t, snapshot.Keys[3].Active)
 
@@ -442,7 +456,7 @@ func TestMarkImportedUpstreamKeysUsesBaseURLAndFullKeyFingerprint(t *testing.T) 
 	assert.Contains(t, string(encoded), "key_fingerprint")
 }
 
-func TestMarkImportedUpstreamKeysPreservesLegacyImportedState(t *testing.T) {
+func TestMarkImportedUpstreamKeysDoesNotTrustLegacyImportedStateWithoutFingerprint(t *testing.T) {
 	originalDB := model.DB
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "mark-legacy-imported-upstream.db")), &gorm.Config{})
 	require.NoError(t, err)
@@ -460,10 +474,14 @@ func TestMarkImportedUpstreamKeysPreservesLegacyImportedState(t *testing.T) {
 		{ID: 3, Imported: false},
 	}}
 	require.NoError(t, markImportedUpstreamKeys(baseURL, &snapshot))
-	assert.True(t, snapshot.Keys[0].Imported)
-	assert.True(t, snapshot.Keys[0].Active)
-	assert.True(t, snapshot.Keys[1].Imported)
+	assert.False(t, snapshot.Keys[0].Imported)
+	assert.False(t, snapshot.Keys[0].Active)
+	assert.False(t, snapshot.Keys[0].Linked)
+	assert.Equal(t, UpstreamKeyInUseStatusUnlinked, snapshot.Keys[0].InUseStatus)
+	assert.False(t, snapshot.Keys[1].Imported)
 	assert.False(t, snapshot.Keys[1].Active)
+	assert.False(t, snapshot.Keys[1].Linked)
+	assert.Equal(t, UpstreamKeyInUseStatusUnlinked, snapshot.Keys[1].InUseStatus)
 	assert.False(t, snapshot.Keys[2].Imported)
 	assert.False(t, snapshot.Keys[2].Active)
 }
@@ -579,9 +597,11 @@ func TestImportUpstreamChannelKeysCreatesAndOverwritesChannels(t *testing.T) {
 	var updatedSnapshot UpstreamSnapshot
 	require.NoError(t, common.UnmarshalJsonStr(updatedRow.SnapshotJSON, &updatedSnapshot))
 	require.Len(t, updatedSnapshot.Keys, 2)
-	assert.Equal(t, model.UpstreamKeyFingerprint("sk-imported-key"), updatedSnapshot.Keys[0].KeyFingerprint)
+	assert.Equal(t, model.UpstreamChannelKeyFingerprint(baseURL, "sk-imported-key"), updatedSnapshot.Keys[0].KeyFingerprint)
 	assert.True(t, updatedSnapshot.Keys[0].Imported)
 	assert.True(t, updatedSnapshot.Keys[0].Active)
+	assert.True(t, updatedSnapshot.Keys[0].Linked)
+	assert.Equal(t, UpstreamKeyInUseStatusEnabled, updatedSnapshot.Keys[0].InUseStatus)
 	assert.Empty(t, updatedSnapshot.Keys[1].KeyFingerprint)
 	assert.False(t, updatedSnapshot.Keys[1].Imported)
 	assert.False(t, updatedSnapshot.Keys[1].Active)
@@ -619,9 +639,11 @@ func TestImportUpstreamChannelKeysCreatesAndOverwritesChannels(t *testing.T) {
 	updatedRow, err = model.GetUpstreamChannelByID(row.Id)
 	require.NoError(t, err)
 	require.NoError(t, common.UnmarshalJsonStr(updatedRow.SnapshotJSON, &updatedSnapshot))
-	assert.Equal(t, model.UpstreamKeyFingerprint("sk-disabled-key"), updatedSnapshot.Keys[1].KeyFingerprint)
+	assert.Equal(t, model.UpstreamChannelKeyFingerprint(baseURL, "sk-disabled-key"), updatedSnapshot.Keys[1].KeyFingerprint)
 	assert.True(t, updatedSnapshot.Keys[1].Imported)
 	assert.False(t, updatedSnapshot.Keys[1].Active)
+	assert.True(t, updatedSnapshot.Keys[1].Linked)
+	assert.Equal(t, UpstreamKeyInUseStatusDisabled, updatedSnapshot.Keys[1].InUseStatus)
 
 	replacementTag := "replacement-tag"
 	replacementPrefix := "Replacement"

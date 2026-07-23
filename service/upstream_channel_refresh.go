@@ -29,8 +29,9 @@ var (
 )
 
 type UpstreamChannelSourceStats struct {
-	Total  int
-	Active int
+	Total         int
+	Active        int
+	InUseKeyCount int
 }
 
 func DiscoverUpstreamChannels() ([]*model.UpstreamChannel, map[string]UpstreamChannelSourceStats, error) {
@@ -56,6 +57,9 @@ func DiscoverUpstreamChannels() ([]*model.UpstreamChannel, map[string]UpstreamCh
 		if normalizeErr == nil {
 			channelStats := stats[normalized]
 			channelStats.Total++
+			if source.Status == common.ChannelStatusEnabled {
+				channelStats.Active++
+			}
 			stats[normalized] = channelStats
 		}
 	}
@@ -71,15 +75,13 @@ func DiscoverUpstreamChannels() ([]*model.UpstreamChannel, map[string]UpstreamCh
 		if err = markImportedUpstreamKeys(row.BaseURL, &snapshot); err != nil {
 			return nil, nil, err
 		}
-		active := 0
-		for _, key := range snapshot.Keys {
-			if key.Active {
-				active++
-			}
+		normalizedBaseURL, normalizeErr := NormalizeUpstreamBaseURL(row.BaseURL)
+		if normalizeErr != nil {
+			continue
 		}
-		channelStats := stats[row.BaseURL]
-		channelStats.Active = active
-		stats[row.BaseURL] = channelStats
+		channelStats := stats[normalizedBaseURL]
+		channelStats.InUseKeyCount = summarizeUpstreamKeyLinks(snapshot.Keys).Enabled
+		stats[normalizedBaseURL] = channelStats
 		snapshotJSON, marshalErr := common.Marshal(snapshot)
 		if marshalErr != nil {
 			return nil, nil, marshalErr
@@ -90,49 +92,7 @@ func DiscoverUpstreamChannels() ([]*model.UpstreamChannel, map[string]UpstreamCh
 }
 
 func markImportedUpstreamKeys(baseURL string, snapshot *UpstreamSnapshot) error {
-	if snapshot == nil {
-		return nil
-	}
-	states, err := model.GetChannelKeyStatesByBaseURL(baseURL)
-	if err != nil {
-		return err
-	}
-	matchedFingerprints := make(map[string]struct{}, len(snapshot.Keys))
-	legacyImportedIndexes := make([]int, 0)
-	for i := range snapshot.Keys {
-		snapshot.Keys[i].Active = false
-		fingerprint := snapshot.Keys[i].KeyFingerprint
-		if fingerprint == "" {
-			if snapshot.Keys[i].Imported {
-				legacyImportedIndexes = append(legacyImportedIndexes, i)
-			}
-			continue
-		}
-		enabled, imported := states[fingerprint]
-		snapshot.Keys[i].Imported = imported
-		snapshot.Keys[i].Active = imported && enabled
-		if imported {
-			matchedFingerprints[fingerprint] = struct{}{}
-		}
-	}
-	legacyActiveCount := 0
-	for fingerprint, enabled := range states {
-		if !enabled {
-			continue
-		}
-		if _, matched := matchedFingerprints[fingerprint]; matched {
-			continue
-		}
-		legacyActiveCount++
-	}
-	for _, index := range legacyImportedIndexes {
-		if legacyActiveCount == 0 {
-			break
-		}
-		snapshot.Keys[index].Active = true
-		legacyActiveCount--
-	}
-	return nil
+	return reconcileUpstreamKeyLinks(baseURL, snapshot)
 }
 
 func RefreshUpstreamChannel(ctx context.Context, id int) (*model.UpstreamChannel, UpstreamSnapshot, error) {

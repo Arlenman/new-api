@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -701,4 +702,43 @@ func TestFetchUpstreamModelsAllowsEmptyModelListAndMissingSub2APIPricingEndpoint
 	require.NoError(t, err)
 	assert.Empty(t, models)
 	assert.False(t, pricingRequested)
+}
+
+func TestDoUpstreamJSONCollapsesHTMLHTTPError(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Status:     "403 Forbidden",
+			Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+			Body: io.NopCloser(strings.NewReader(
+				`<html><head><title>403 Forbidden</title></head><body>` + strings.Repeat("blocked", 500) + `</body></html>`,
+			)),
+		}, nil
+	})}
+
+	err := doUpstreamJSON(context.Background(), client, http.MethodGet, "https://example.com/api/v1/groups/available", nil, nil, nil)
+
+	require.Error(t, err)
+	assert.Equal(t, "upstream returned HTTP 403: Forbidden", err.Error())
+	assert.Equal(t, http.StatusForbidden, UpstreamHTTPStatus(err))
+}
+
+func TestDoUpstreamJSONUsesJSONMessageForHTTPError(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusUnauthorized, `{"success":false,"message":"invalid access token"}`, nil), nil
+	})}
+	var target newAPIEnvelope
+
+	err := doUpstreamJSON(context.Background(), client, http.MethodGet, "https://example.com/api/user/self", nil, nil, &target)
+
+	require.Error(t, err)
+	assert.Equal(t, "invalid access token", target.Message)
+	assert.Equal(t, "upstream returned HTTP 401: invalid access token", err.Error())
+	assert.Equal(t, http.StatusUnauthorized, UpstreamHTTPStatus(err))
+}
+
+func TestUpstreamHTTPStatusFindsWrappedError(t *testing.T) {
+	err := fmt.Errorf("fetch groups: %w", &UpstreamHTTPError{StatusCode: http.StatusTooManyRequests, Message: "rate limited"})
+
+	assert.Equal(t, http.StatusTooManyRequests, UpstreamHTTPStatus(err))
 }

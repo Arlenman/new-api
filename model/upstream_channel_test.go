@@ -134,17 +134,35 @@ func TestGetChannelKeyStatesByBaseURLTracksDistinctKeyEnablement(t *testing.T) {
 	require.NoError(t, db.Create(&Channel{BaseURL: &baseURL, Key: "sk-disabled", Status: common.ChannelStatusManuallyDisabled}).Error)
 	require.NoError(t, db.Create(&Channel{BaseURL: &baseURL, Key: "sk-duplicate", Status: common.ChannelStatusManuallyDisabled}).Error)
 	require.NoError(t, db.Create(&Channel{BaseURL: &baseURL, Key: "sk-duplicate", Status: common.ChannelStatusEnabled}).Error)
+	require.NoError(t, db.Create(&Channel{BaseURL: &baseURL, Key: "sk-multi-one\nsk-multi-two", Status: common.ChannelStatusEnabled}).Error)
 	require.NoError(t, db.Create(&Channel{BaseURL: &baseURL, Key: " ", Status: common.ChannelStatusEnabled}).Error)
 	require.NoError(t, db.Create(&Channel{BaseURL: &otherBaseURL, Key: "sk-other", Status: common.ChannelStatusEnabled}).Error)
 
 	states, err := GetChannelKeyStatesByBaseURL(baseURL)
 	require.NoError(t, err)
-	require.Len(t, states, 3)
-	assert.True(t, states[UpstreamKeyFingerprint("sk-enabled")])
-	assert.False(t, states[UpstreamKeyFingerprint("sk-disabled")])
-	assert.True(t, states[UpstreamKeyFingerprint("sk-duplicate")])
-	_, containsOther := states[UpstreamKeyFingerprint("sk-other")]
+	require.Len(t, states, 5)
+	assert.True(t, states[UpstreamChannelKeyFingerprint(baseURL, "sk-enabled")])
+	assert.False(t, states[UpstreamChannelKeyFingerprint(baseURL, "sk-disabled")])
+	assert.True(t, states[UpstreamChannelKeyFingerprint(baseURL, "sk-duplicate")])
+	assert.True(t, states[UpstreamChannelKeyFingerprint(baseURL, "sk-multi-one")])
+	assert.True(t, states[UpstreamChannelKeyFingerprint(baseURL, "sk-multi-two")])
+	_, containsOther := states[UpstreamChannelKeyFingerprint(baseURL, "sk-other")]
 	assert.False(t, containsOther)
+}
+
+func TestListChannelKeySourcesExpandsMultiKeyChannels(t *testing.T) {
+	db := setupUpstreamChannelTestDB(t)
+	require.NoError(t, db.AutoMigrate(&Channel{}))
+	baseURL := "https://upstream.example"
+	require.NoError(t, db.Create(&Channel{BaseURL: &baseURL, Key: "sk-first\n\nsk-second", Status: common.ChannelStatusAutoDisabled}).Error)
+
+	sources, err := ListChannelKeySources()
+	require.NoError(t, err)
+	require.Len(t, sources, 2)
+	assert.Equal(t, []ChannelKeySource{
+		{BaseURL: baseURL, Key: "sk-first", Status: common.ChannelStatusAutoDisabled},
+		{BaseURL: baseURL, Key: "sk-second", Status: common.ChannelStatusAutoDisabled},
+	}, sources)
 }
 
 func TestEnsureUpstreamChannelsMigratesPreviousGeneratedName(t *testing.T) {

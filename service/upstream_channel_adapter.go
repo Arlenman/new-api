@@ -34,6 +34,23 @@ var (
 	)
 )
 
+type UpstreamHTTPError struct {
+	StatusCode int
+	Message    string
+}
+
+func (err *UpstreamHTTPError) Error() string {
+	return fmt.Sprintf("upstream returned HTTP %d: %s", err.StatusCode, err.Message)
+}
+
+func UpstreamHTTPStatus(err error) int {
+	var httpErr *UpstreamHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode
+	}
+	return 0
+}
+
 func UpstreamErrorCode(err error) string {
 	if errors.Is(err, ErrNewAPITurnstileRequiresAccessToken) || errors.Is(err, ErrSub2APITurnstileRequiresAccessToken) {
 		return UpstreamErrorCodeTurnstileRequiresAccessToken
@@ -78,6 +95,8 @@ type UpstreamKey struct {
 	RemainQuota    float64 `json:"remain_quota,omitempty"`
 	Imported       bool    `json:"imported"`
 	Active         bool    `json:"active"`
+	Linked         bool    `json:"linked"`
+	InUseStatus    string  `json:"in_use_status"`
 	KeyFingerprint string  `json:"key_fingerprint,omitempty"`
 }
 
@@ -284,7 +303,7 @@ func FetchUpstreamKeys(ctx context.Context, client *http.Client, baseURL string,
 			if fetchErr != nil {
 				return UpstreamSnapshot{}, fmt.Errorf("fetch new-api key %d for import status: %w", keys[i].ID, fetchErr)
 			}
-			keys[i].KeyFingerprint = upstreamKeyFingerprint(fullKey)
+			keys[i].KeyFingerprint = upstreamKeyFingerprint(normalized, fullKey)
 		}
 		return UpstreamSnapshot{Provider: resolvedProvider, Keys: keys, RetrievedAt: time.Now().Unix()}, nil
 	}
@@ -305,7 +324,7 @@ func FetchUpstreamKeys(ctx context.Context, client *http.Client, baseURL string,
 		if fetchErr != nil {
 			return UpstreamSnapshot{}, fmt.Errorf("fetch sub2api key %d for import status: %w", keys[i].ID, fetchErr)
 		}
-		keys[i].KeyFingerprint = upstreamKeyFingerprint(fullKey)
+		keys[i].KeyFingerprint = upstreamKeyFingerprint(normalized, fullKey)
 	}
 	return UpstreamSnapshot{Provider: resolvedProvider, Keys: keys, RetrievedAt: time.Now().Unix()}, nil
 }
@@ -937,7 +956,7 @@ func fetchNewAPIUpstreamSnapshot(ctx context.Context, client *http.Client, baseU
 		if fetchErr != nil {
 			return UpstreamSnapshot{}, fmt.Errorf("fetch new-api key %d for import status: %w", keys[i].ID, fetchErr)
 		}
-		keys[i].KeyFingerprint = upstreamKeyFingerprint(fullKey)
+		keys[i].KeyFingerprint = upstreamKeyFingerprint(baseURL, fullKey)
 	}
 
 	return UpstreamSnapshot{
@@ -1029,7 +1048,7 @@ func fetchNewAPIKeys(ctx context.Context, client *http.Client, baseURL string, h
 			}
 			fingerprint := ""
 			if !strings.Contains(item.Key, "...") {
-				fingerprint = upstreamKeyFingerprint(item.Key)
+				fingerprint = upstreamKeyFingerprint(baseURL, item.Key)
 			}
 			keys = append(keys, UpstreamKey{
 				ID:             item.ID,
@@ -1071,7 +1090,7 @@ func fetchSub2APIUpstreamSnapshot(ctx context.Context, client *http.Client, base
 		if fetchErr != nil {
 			return UpstreamSnapshot{}, fmt.Errorf("fetch sub2api key %d for import status: %w", keys[i].ID, fetchErr)
 		}
-		keys[i].KeyFingerprint = upstreamKeyFingerprint(fullKey)
+		keys[i].KeyFingerprint = upstreamKeyFingerprint(baseURL, fullKey)
 	}
 	groups, err := fetchSub2APIGroups(ctx, sessionClient, baseURL, headers)
 	if err != nil {
@@ -1131,7 +1150,7 @@ func fetchSub2APIKeys(ctx context.Context, client *http.Client, baseURL string, 
 		for _, item := range page.Items {
 			fingerprint := ""
 			if !strings.Contains(item.Key, "...") {
-				fingerprint = upstreamKeyFingerprint(item.Key)
+				fingerprint = upstreamKeyFingerprint(baseURL, item.Key)
 			}
 			keys = append(keys, UpstreamKey{
 				ID:             item.ID,
@@ -1342,8 +1361,8 @@ func fetchSub2APIFullKeyWithToken(ctx context.Context, client *http.Client, base
 	return data.Key, nil
 }
 
-func upstreamKeyFingerprint(key string) string {
-	return model.UpstreamKeyFingerprint(key)
+func upstreamKeyFingerprint(normalizedBaseURL string, key string) string {
+	return model.UpstreamChannelKeyFingerprint(normalizedBaseURL, key)
 }
 
 func doUpstreamJSON(ctx context.Context, client *http.Client, method string, url string, payload any, headers map[string]string, target any) error {
@@ -1375,11 +1394,8 @@ func doUpstreamJSON(ctx context.Context, client *http.Client, method string, url
 		if target != nil && len(message) > 0 {
 			_ = common.Unmarshal(message, target)
 		}
-		messageText := strings.TrimSpace(string(message))
-		if messageText == "" {
-			messageText = resp.Status
-		}
-		return fmt.Errorf("upstream returned HTTP %d: %s", resp.StatusCode, messageText)
+		messageText := summarizeUpstreamHTTPError(resp, message)
+		return &UpstreamHTTPError{StatusCode: resp.StatusCode, Message: messageText}
 	}
 	if target == nil {
 		return nil
@@ -1388,6 +1404,48 @@ func doUpstreamJSON(ctx context.Context, client *http.Client, method string, url
 		return fmt.Errorf("decode upstream response: %w", err)
 	}
 	return nil
+}
+
+func summarizeUpstreamHTTPError(resp *http.Response, body []byte) string {
+	fallback := http.StatusText(resp.StatusCode)
+	if fallback == "" {
+		fallback = strings.TrimSpace(resp.Status)
+	}
+	if fallback == "" {
+		fallback = "upstream request failed"
+	}
+
+	messageText := strings.TrimSpace(string(body))
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	lowerBody := strings.ToLower(messageText)
+	if strings.Contains(contentType, "text/html") || strings.Contains(lowerBody, "<html") || strings.Contains(lowerBody, "<!doctype") {
+		return fallback
+	}
+
+	if messageText != "" {
+		var envelope struct {
+			Message string `json:"message"`
+			Error   string `json:"error"`
+			Reason  string `json:"reason"`
+		}
+		if common.Unmarshal(body, &envelope) == nil {
+			for _, candidate := range []string{envelope.Message, envelope.Error, envelope.Reason} {
+				candidate = strings.TrimSpace(candidate)
+				if candidate != "" {
+					messageText = candidate
+					break
+				}
+			}
+		}
+	}
+	if messageText == "" {
+		return fallback
+	}
+	runes := []rune(strings.Join(strings.Fields(messageText), " "))
+	if len(runes) > 300 {
+		return string(runes[:300]) + "..."
+	}
+	return string(runes)
 }
 
 func upstreamURL(baseURL string, path string) string {

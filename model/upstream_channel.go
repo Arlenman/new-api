@@ -75,8 +75,9 @@ func UpstreamBaseURLHash(baseURL string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func UpstreamKeyFingerprint(key string) string {
-	digest := sha256.Sum256([]byte(strings.TrimSpace(key)))
+func UpstreamChannelKeyFingerprint(normalizedBaseURL string, key string) string {
+	payload := strings.TrimSpace(normalizedBaseURL) + "\x00" + strings.TrimSpace(key)
+	digest := sha256.Sum256([]byte(payload))
 	return hex.EncodeToString(digest[:])
 }
 
@@ -387,14 +388,48 @@ func GetChannelKeyStatesByBaseURL(baseURL string) (map[string]bool, error) {
 	}
 	states := make(map[string]bool, len(channels))
 	for _, channel := range channels {
-		key := strings.TrimSpace(channel.Key)
-		if key == "" {
-			continue
+		for _, rawKey := range channel.GetKeys() {
+			key := strings.TrimSpace(rawKey)
+			if key == "" {
+				continue
+			}
+			fingerprint := UpstreamChannelKeyFingerprint(baseURL, key)
+			states[fingerprint] = states[fingerprint] || channel.Status == common.ChannelStatusEnabled
 		}
-		fingerprint := UpstreamKeyFingerprint(key)
-		states[fingerprint] = states[fingerprint] || channel.Status == common.ChannelStatusEnabled
 	}
 	return states, nil
+}
+
+type ChannelKeySource struct {
+	BaseURL string `gorm:"column:base_url"`
+	Key     string `gorm:"column:key"`
+	Status  int    `gorm:"column:status"`
+}
+
+func ListChannelKeySources() ([]ChannelKeySource, error) {
+	var channels []Channel
+	err := DB.Model(&Channel{}).
+		Select("base_url", "key", "status").
+		Where("base_url IS NOT NULL AND base_url <> ''").
+		Find(&channels).Error
+	if err != nil {
+		return nil, err
+	}
+	sources := make([]ChannelKeySource, 0, len(channels))
+	for i := range channels {
+		for _, rawKey := range channels[i].GetKeys() {
+			key := strings.TrimSpace(rawKey)
+			if key == "" {
+				continue
+			}
+			sources = append(sources, ChannelKeySource{
+				BaseURL: channels[i].GetBaseURL(),
+				Key:     key,
+				Status:  channels[i].Status,
+			})
+		}
+	}
+	return sources, nil
 }
 
 func UpdateUpstreamChannelSnapshot(id int, snapshotJSON string) error {
