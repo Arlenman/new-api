@@ -39,6 +39,9 @@ import type {
   UpstreamChannel,
   UpstreamChannelConfig,
   UpstreamPrioritySchedule,
+  ClearUpstreamPriorityTasksResult,
+  UpstreamPriorityTaskPage,
+  UpstreamPriorityTaskRecord,
   UpdateUpstreamKeyGroupRequest,
 } from './types'
 
@@ -137,6 +140,42 @@ export async function updateManagedUpstreamPrioritySchedule(
     '/api/upstream-channels/priority-schedule',
     schedule,
     { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function runManagedUpstreamPrioritySchedule(): Promise<
+  ApiResponse<UpstreamPriorityTaskRecord>
+> {
+  const res = await api.post<ApiResponse<UpstreamPriorityTaskRecord>>(
+    '/api/upstream-channels/priority-schedule/run',
+    undefined,
+    { skipBusinessError: true, skipErrorHandler: true }
+  )
+  return res.data
+}
+
+export async function getManagedUpstreamPriorityTasks(
+  page = 1,
+  pageSize = 10
+): Promise<ApiResponse<UpstreamPriorityTaskPage>> {
+  const res = await api.get<ApiResponse<UpstreamPriorityTaskPage>>(
+    '/api/upstream-channels/priority-schedule/tasks',
+    {
+      params: { page, page_size: pageSize },
+      skipBusinessError: true,
+      skipErrorHandler: true,
+    }
+  )
+  return res.data
+}
+
+export async function clearManagedUpstreamPriorityTasks(): Promise<
+  ApiResponse<ClearUpstreamPriorityTasksResult>
+> {
+  const res = await api.delete<ApiResponse<ClearUpstreamPriorityTasksResult>>(
+    '/api/upstream-channels/priority-schedule/tasks',
+    { skipBusinessError: true, skipErrorHandler: true }
   )
   return res.data
 }

@@ -188,6 +188,86 @@ export interface UpstreamPrioritySchedule {
   max_test_latency_seconds: number;
 }
 
+export type UpstreamPriorityTaskStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed";
+
+export type UpstreamPriorityTaskTrigger = "scheduled" | "manual";
+
+export interface UpstreamPriorityTaskIssue {
+  channel_id?: number;
+  channel_name?: string;
+  provider?: string;
+  host?: string;
+  stage?: string;
+  http_status?: number;
+  message?: string;
+}
+
+export type UpstreamPriorityTaskActionKind =
+  | "refreshed"
+  | "ranked"
+  | "tested"
+  | "priority_updated"
+  | "skipped";
+
+export interface UpstreamPriorityTaskAction {
+  kind: UpstreamPriorityTaskActionKind;
+  channel_id?: number;
+  channel_name?: string;
+  provider?: string;
+  host?: string;
+  target_channel_id?: number;
+  target_channel_name?: string;
+  target_channel_provider?: string;
+  target_channel_host?: string;
+  model?: string;
+  effective_ratio?: string;
+  old_priority?: number;
+  new_priority?: number;
+  latency_ms?: number;
+  passed?: boolean;
+  message?: string;
+}
+
+export interface UpstreamPriorityTaskResult {
+  refreshed?: number;
+  ranked?: number;
+  tested?: number;
+  passed?: number;
+  priority_updated?: number;
+  skipped?: number;
+  issues?: UpstreamPriorityTaskIssue[];
+  errors?: Array<string | UpstreamPriorityTaskIssue>;
+  actions?: UpstreamPriorityTaskAction[];
+}
+
+export interface UpstreamPriorityTaskRecord {
+  task_id: string;
+  type: string;
+  status: UpstreamPriorityTaskStatus;
+  trigger: UpstreamPriorityTaskTrigger;
+  created_at: number;
+  started_at?: number | null;
+  completed_at?: number | null;
+  duration_ms?: number | null;
+  result?: UpstreamPriorityTaskResult | null;
+  error?: string;
+}
+
+export interface UpstreamPriorityTaskPage {
+  items: UpstreamPriorityTaskRecord[];
+  page: number;
+  page_size: number;
+  total: number;
+}
+
+export interface ClearUpstreamPriorityTasksResult {
+  deleted_count: number;
+}
+
 export interface UpstreamKeyImportConfiguration {
   groups: string[];
   tag: string;
