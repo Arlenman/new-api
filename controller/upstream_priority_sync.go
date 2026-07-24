@@ -493,6 +493,10 @@ func matchChannelsForUpstreamCandidate(candidate upstreamPriorityCandidate, chan
 	if err != nil {
 		return nil
 	}
+	provider := strings.TrimSpace(candidate.Snapshot.Provider)
+	if provider == "" {
+		provider = candidate.Channel.Provider
+	}
 	selectedFingerprints := make(map[string]struct{}, len(candidate.SelectedKeys))
 	for _, key := range candidate.SelectedKeys {
 		fingerprint := strings.TrimSpace(key.KeyFingerprint)
@@ -509,7 +513,7 @@ func matchChannelsForUpstreamCandidate(candidate upstreamPriorityCandidate, chan
 			if key == "" {
 				continue
 			}
-			if _, ok := selectedFingerprints[model.UpstreamChannelKeyFingerprint(normalized, key)]; ok {
+			if _, ok := selectedFingerprints[service.UpstreamKeyFingerprintForProvider(provider, normalized, key)]; ok {
 				found = true
 				break
 			}

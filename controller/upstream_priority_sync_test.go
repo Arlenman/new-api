@@ -131,9 +131,10 @@ func TestMatchChannelsForUpstreamCandidateRequiresBaseURLAndSelectedKey(t *testi
 	normalizedBaseURL, err := service.NormalizeUpstreamBaseURL(baseURL)
 	require.NoError(t, err)
 	candidate := upstreamPriorityCandidate{
-		Channel: &model.UpstreamChannel{BaseURL: baseURL},
+		Channel:  &model.UpstreamChannel{BaseURL: baseURL, Provider: service.UpstreamProviderNewAPI},
+		Snapshot: service.UpstreamSnapshot{Provider: service.UpstreamProviderNewAPI},
 		SelectedKeys: []service.UpstreamKey{{
-			KeyFingerprint: model.UpstreamChannelKeyFingerprint(normalizedBaseURL, selectedKey),
+			KeyFingerprint: service.UpstreamKeyFingerprintForProvider(service.UpstreamProviderNewAPI, normalizedBaseURL, "selected"),
 		}},
 	}
 	channels := []*model.Channel{
@@ -147,6 +148,30 @@ func TestMatchChannelsForUpstreamCandidateRequiresBaseURLAndSelectedKey(t *testi
 
 	require.Len(t, matched, 2)
 	assert.Equal(t, []int{1, 2}, []int{matched[0].Id, matched[1].Id})
+}
+
+func TestMatchChannelsForUpstreamCandidateKeepsSub2APIPrefixExact(t *testing.T) {
+	baseURL := "https://sub2.example"
+	normalizedBaseURL, err := service.NormalizeUpstreamBaseURL(baseURL)
+	require.NoError(t, err)
+	candidate := upstreamPriorityCandidate{
+		Channel:  &model.UpstreamChannel{BaseURL: baseURL, Provider: service.UpstreamProviderSub2API},
+		Snapshot: service.UpstreamSnapshot{Provider: service.UpstreamProviderSub2API},
+		SelectedKeys: []service.UpstreamKey{{
+			KeyFingerprint: service.UpstreamKeyFingerprintForProvider(service.UpstreamProviderSub2API, normalizedBaseURL, "strict"),
+		}},
+	}
+	prefixedKey := "sk-strict"
+	rawKey := "strict"
+	channels := []*model.Channel{
+		{Id: 1, BaseURL: &baseURL, Key: prefixedKey},
+		{Id: 2, BaseURL: &baseURL, Key: rawKey},
+	}
+
+	matched := matchChannelsForUpstreamCandidate(candidate, indexChannelsByNormalizedBaseURL(channels))
+
+	require.Len(t, matched, 1)
+	assert.Equal(t, 2, matched[0].Id)
 }
 
 func TestSelectUpstreamPriorityTestChannelPrefersDefaultModel(t *testing.T) {
