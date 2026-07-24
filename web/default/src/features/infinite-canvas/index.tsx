@@ -57,9 +57,11 @@ import {
   isTrustedInfiniteCanvasMessage,
 } from './lib/bridge'
 import {
-  type ManagedInfiniteCanvasConfiguration,
-  migrateInfiniteCanvasToManagedMode,
-} from './lib/configuration-storage'
+  isInfiniteCanvasInitialLoadPending,
+  reconcileInfiniteCanvasConfiguration,
+  type InfiniteCanvasAppliedConfiguration,
+} from './lib/configuration-state'
+import { migrateInfiniteCanvasToManagedMode } from './lib/configuration-storage'
 import { requestInfiniteCanvasRuntimeSession } from './lib/runtime-session'
 import {
   createApiKeySwitchTarget,
@@ -72,11 +74,6 @@ import {
 const TOOL_URL = '/_tools/infinite-canvas/'
 
 type BridgeStatus = 'loading' | 'configuring' | 'ready' | 'error'
-
-interface AppliedConfiguration extends ManagedInfiniteCanvasConfiguration {
-  tokenId: number | null
-  revision: number
-}
 
 type InfiniteCanvasProps = {
   active: boolean
@@ -101,7 +98,7 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
   const [apiKeys, setApiKeys] = useState<UserToolTokenOption[]>([])
   const [keysLoading, setKeysLoading] = useState(true)
   const [appliedConfiguration, setAppliedConfiguration] =
-    useState<AppliedConfiguration | null>(null)
+    useState<InfiniteCanvasAppliedConfiguration | null>(null)
   const [keySwitching, setKeySwitching] = useState(false)
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>('loading')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -152,11 +149,12 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
         )
 
         setApiKeys(response.data.items)
-        setAppliedConfiguration((current) => ({
-          ...managedConfiguration,
-          tokenId: preferredKey?.id ?? null,
-          revision: (current?.revision ?? 0) + 1,
-        }))
+        setAppliedConfiguration((current) =>
+          reconcileInfiniteCanvasConfiguration(current, {
+            ...managedConfiguration,
+            tokenId: preferredKey?.id ?? null,
+          })
+        )
         if (preferredKey) {
           if (preferredKey.id !== selectedTokenId) {
             void updateUserToolPreference('infinite-canvas', preferredKey.id)
@@ -166,11 +164,12 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
       } catch {
         if (cancelled) return
         setApiKeys([])
-        setAppliedConfiguration((current) => ({
-          ...managedConfiguration,
-          tokenId: null,
-          revision: (current?.revision ?? 0) + 1,
-        }))
+        setAppliedConfiguration((current) =>
+          reconcileInfiniteCanvasConfiguration(current, {
+            ...managedConfiguration,
+            tokenId: null,
+          })
+        )
         setErrorMessage(t('Failed to load API keys'))
       } finally {
         if (!cancelled) setKeysLoading(false)
@@ -385,7 +384,13 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
       ? status.infinite_canvas_version
       : null
 
-  if (statusLoading || keysLoading) {
+  if (
+    isInfiniteCanvasInitialLoadPending(
+      statusLoading,
+      keysLoading,
+      appliedConfiguration
+    )
+  ) {
     return (
       <SectionPageLayout fixedContent>
         <SectionPageLayout.Title>
