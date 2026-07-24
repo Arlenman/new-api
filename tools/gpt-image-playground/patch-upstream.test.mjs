@@ -794,7 +794,7 @@ test('fails closed when the upstream AgentSettings managed-mode marker no longer
   )
 })
 
-test('managed New API profiles enable hybrid Agent mode without changing tool-only streaming', async () => {
+test('managed New API profiles enable hybrid Agent mode and honor host streaming', async () => {
   const root = await createFixture()
 
   await applyUpstreamPatch(root)
@@ -807,8 +807,8 @@ test('managed New API profiles enable hybrid Agent mode without changing tool-on
   assert.match(bridgeSource, /agentApiConfigMode: 'hybrid'/)
   assert.match(bridgeSource, /agentTextProfileId: MANAGED_AGENT_PROFILE_ID/)
   assert.match(bridgeSource, /agentImageProfileId: MANAGED_IMAGE_PROFILE_ID/)
-  assert.match(bridgeSource, /streamImages: message\.mode === 'new-api'/)
-  assert.match(bridgeSource, /streamImages: true/)
+  assert.match(bridgeSource, /streamImages: configuration\.streamImages/)
+  assert.doesNotMatch(bridgeSource, /streamImages: true/)
   assert.match(bridgeSource, /useStore\.persist\.onFinishHydration/)
   assert.match(bridgeSource, /managedProfilesMatch\(useStore\.getState\(\)\.settings, activeConfigureMessage\)/)
   assert.match(bridgeSource, /useStore\.subscribe\(\(state\) =>/)

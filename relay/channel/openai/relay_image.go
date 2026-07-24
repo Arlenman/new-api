@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -111,6 +112,7 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 	// field (real OpenAI image events keep event == type).
 	usage := &dto.Usage{}
 	var lastStreamData []byte
+	var streamError string
 	var completedImages int64
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
@@ -119,11 +121,13 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 		if isOpenAIImageStreamErrorEvent(raw) {
 			// Record the error as a soft error; the scanner drives the final
 			// EndReason. HasErrors() flags the failure for logging/handling.
-			sr.Error(fmt.Errorf("%s", extractOpenAIImageStreamErrorMessage(raw)))
+			streamError = extractOpenAIImageStreamErrorMessage(raw)
+			sr.Error(fmt.Errorf("%s", streamError))
 		}
 		var chunk struct {
-			Type  string    `json:"type"`
-			Usage dto.Usage `json:"usage"`
+			Type  string          `json:"type"`
+			Usage dto.Usage       `json:"usage"`
+			Data  []dto.ImageData `json:"data"`
 		}
 		if err := common.Unmarshal(raw, &chunk); err == nil {
 			normalizeOpenAIUsage(&chunk.Usage)
@@ -131,13 +135,33 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 				usage = &chunk.Usage
 			}
 			if chunk.Type == "image_generation.completed" || chunk.Type == "image_edit.completed" {
-				completedImages++
+				completedCount := len(chunk.Data)
+				if completedCount == 0 {
+					completedCount = 1
+				}
+				completedImages += int64(completedCount)
+			} else if len(chunk.Data) > 0 {
+				completedImages += int64(len(chunk.Data))
 			}
 		}
 		if err := writeOpenaiImageStreamChunk(c, raw); err != nil {
 			sr.Stop(err)
 		}
 	})
+
+	upstreamFinished := info.StreamStatus != nil && (info.StreamStatus.EndReason == relaycommon.StreamEndReasonDone ||
+		info.StreamStatus.EndReason == relaycommon.StreamEndReasonEOF)
+	if upstreamFinished && completedImages == 0 {
+		if streamError == "" {
+			streamError = "empty image stream response"
+		}
+		return nil, types.NewOpenAIError(
+			errors.New(streamError),
+			types.ErrorCodeBadResponse,
+			http.StatusBadGateway,
+			types.ErrOptionWithSkipRetry(),
+		)
+	}
 
 	// StreamScannerHandler consumes the upstream [DONE]; re-emit it so the
 	// client still receives a terminal data: [DONE].
@@ -154,8 +178,6 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 	// guard only blocks lowering the charge: if completed events already
 	// exceed the recorded n, bill the higher actual count regardless.
 	if info.StreamStatus != nil {
-		upstreamFinished := info.StreamStatus.EndReason == relaycommon.StreamEndReasonDone ||
-			info.StreamStatus.EndReason == relaycommon.StreamEndReasonEOF
 		requestedN := 1.0
 		if n, ok := info.PriceData.OtherRatios()["n"]; ok {
 			requestedN = n

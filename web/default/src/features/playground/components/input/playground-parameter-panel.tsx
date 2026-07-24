@@ -101,6 +101,36 @@ function PlaygroundParameterContent({
         compact ? 'px-4 pb-4' : 'p-1'
       )}
     >
+      <div
+        className={cn(
+          'border-border/70 bg-background/60 flex items-start justify-between gap-3 rounded-lg border p-3 transition-opacity',
+          disabled && 'opacity-55'
+        )}
+      >
+        <div className='min-w-0 space-y-1'>
+          <label
+            className='text-sm leading-5 font-medium'
+            htmlFor='playground-image-stream'
+          >
+            {t('Stream image generation')}
+          </label>
+          <p className='text-muted-foreground text-xs leading-4'>
+            {t(
+              'Receive partial image updates while generating. Turn this off if the upstream channel does not support image streaming.'
+            )}
+          </p>
+        </div>
+
+        <Switch
+          aria-label={t('Stream image generation')}
+          checked={config.imageStream}
+          disabled={disabled}
+          id='playground-image-stream'
+          onCheckedChange={(checked) => onConfigChange('imageStream', checked)}
+          size='sm'
+        />
+      </div>
+
       {PLAYGROUND_PARAMETER_CONTROLS.map((control) => {
         const enabled = parameterEnabled[control.key]
         const value = config[control.key]
@@ -198,9 +228,10 @@ function PlaygroundParameterContent({
 export function PlaygroundParameterPanel(props: PlaygroundParameterPanelProps) {
   const { t } = useTranslation()
   const isMobile = useIsMobile()
-  const activeCount = PLAYGROUND_PARAMETER_CONTROLS.filter(
-    (control) => props.parameterEnabled[control.key]
-  ).length
+  const activeCount =
+    PLAYGROUND_PARAMETER_CONTROLS.filter(
+      (control) => props.parameterEnabled[control.key]
+    ).length + Number(props.config.imageStream)
 
   const trigger = (
     <PromptInputButton

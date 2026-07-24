@@ -13,7 +13,8 @@ describe('image playground bridge messages', () => {
     const message = createNewApiConfigureMessage(
       'https://new-api.example.com/',
       'utrs_runtime-session',
-      ' test2 · A组 '
+      ' test2 · A组 ',
+      false
     )
 
     assert.deepEqual(message, {
@@ -24,6 +25,7 @@ describe('image playground bridge messages', () => {
       apiKey: 'utrs_runtime-session',
       apiMode: 'images',
       profileName: 'New API · test2 · A组',
+      streamImages: false,
     })
     assert.equal(message.apiUrl.includes('utrs_runtime-session'), false)
   })
@@ -34,7 +36,8 @@ describe('image playground bridge messages', () => {
         createNewApiConfigureMessage(
           'https://new-api.example.com/',
           'sk-persistent-user-key',
-          'test2'
+          'test2',
+          true
         ),
       /runtime credential/
     )
@@ -46,7 +49,11 @@ describe('image playground bridge messages', () => {
       type: 'new-api:image-playground:probe',
     })
     assert.deepEqual(
-      createToolConfigureMessage('https://api.example.com/v1/', ' sk-custom '),
+      createToolConfigureMessage(
+        'https://api.example.com/v1/',
+        ' sk-custom ',
+        false
+      ),
       {
         source: 'new-api',
         type: 'new-api:image-playground:configure',
@@ -55,6 +62,7 @@ describe('image playground bridge messages', () => {
         apiKey: 'sk-custom',
         apiMode: 'images',
         profileName: 'Custom API',
+        streamImages: false,
       }
     )
   })

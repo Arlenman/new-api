@@ -41,6 +41,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import {
   createUserToolRuntimeSession,
   getAllUserToolTokens,
@@ -53,11 +54,20 @@ import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
 import {
+  isImagePlaygroundInitialLoadPending,
+  reconcileImagePlaygroundConfiguration,
+  type ImagePlaygroundAppliedConfiguration,
+} from './lib/configuration-state'
+import {
   createNewApiConfigureMessage,
   createProbeMessage,
   isTrustedImagePlaygroundMessage,
 } from './lib/bridge'
-import { resolveImagePlaygroundHostMode } from './lib/configuration-storage'
+import {
+  persistImagePlaygroundStreamImages,
+  readImagePlaygroundStreamImages,
+  resolveImagePlaygroundHostMode,
+} from './lib/configuration-storage'
 import {
   IMAGE_PLAYGROUND_TOKEN_STORAGE_KEY,
   getApiKeyDisplayLabel,
@@ -70,12 +80,6 @@ import {
 const TOOL_URL = '/_tools/gpt-image-playground/'
 
 type BridgeStatus = 'loading' | 'configuring' | 'ready' | 'error'
-
-interface AppliedConfiguration {
-  mode: 'new-api'
-  tokenId: number | null
-  revision: number
-}
 
 interface RuntimeTokenLabel {
   tokenId: number
@@ -109,7 +113,7 @@ export function ImagePlayground({
   const [apiKeys, setApiKeys] = useState<UserToolTokenOption[]>([])
   const [keysLoading, setKeysLoading] = useState(true)
   const [appliedConfiguration, setAppliedConfiguration] =
-    useState<AppliedConfiguration | null>(null)
+    useState<ImagePlaygroundAppliedConfiguration | null>(null)
   const [keySwitching, setKeySwitching] = useState(false)
   const [runtimeTokenLabel, setRuntimeTokenLabel] =
     useState<RuntimeTokenLabel | null>(null)
@@ -151,6 +155,10 @@ export function ImagePlayground({
         setKeysLoading(false)
         return
       }
+      const streamImages = readImagePlaygroundStreamImages(
+        window.localStorage,
+        userId
+      )
 
       setKeysLoading(true)
       setErrorMessage(null)
@@ -180,11 +188,13 @@ export function ImagePlayground({
         const preferredKey = selectPreferredApiKey(allApiKeys, selectedTokenId)
 
         setApiKeys(allApiKeys)
-        setAppliedConfiguration((current) => ({
-          mode: hostMode,
-          tokenId: preferredKey?.id ?? null,
-          revision: (current?.revision ?? 0) + 1,
-        }))
+        setAppliedConfiguration((current) =>
+          reconcileImagePlaygroundConfiguration(current, {
+            mode: hostMode,
+            tokenId: preferredKey?.id ?? null,
+            streamImages,
+          })
+        )
         if (preferredKey) {
           if (preferredKey.id !== selectedTokenId) {
             void updateUserToolPreference('image-playground', preferredKey.id)
@@ -194,11 +204,13 @@ export function ImagePlayground({
       } catch {
         if (cancelled) return
         setApiKeys([])
-        setAppliedConfiguration((current) => ({
-          mode: hostMode,
-          tokenId: null,
-          revision: (current?.revision ?? 0) + 1,
-        }))
+        setAppliedConfiguration((current) =>
+          reconcileImagePlaygroundConfiguration(current, {
+            mode: hostMode,
+            tokenId: null,
+            streamImages,
+          })
+        )
         setErrorMessage(t('Failed to load API keys'))
       } finally {
         if (!cancelled) setKeysLoading(false)
@@ -317,7 +329,8 @@ export function ImagePlayground({
               createNewApiConfigureMessage(
                 window.location.origin,
                 runtimeCredential,
-                tokenDisplayLabel
+                tokenDisplayLabel,
+                appliedConfiguration.streamImages
               ),
               window.location.origin
             )
@@ -419,6 +432,35 @@ export function ImagePlayground({
     }
   }
 
+  const toggleStreamImages = (streamImages: boolean) => {
+    if (
+      !userId ||
+      !appliedConfiguration ||
+      appliedConfiguration.streamImages === streamImages
+    ) {
+      return
+    }
+
+    persistImagePlaygroundStreamImages(
+      window.localStorage,
+      userId,
+      streamImages
+    )
+    configurationInFlightRef.current = null
+    configuredRevisionRef.current = null
+    runtimeCredentialRequestRef.current = null
+    runtimeExpiresAtRef.current = 0
+    setBridgeStatus('loading')
+    setErrorMessage(null)
+    const nextRevision = appliedConfiguration.revision + 1
+    appliedRevisionRef.current = nextRevision
+    setAppliedConfiguration({
+      ...appliedConfiguration,
+      streamImages,
+      revision: nextRevision,
+    })
+  }
+
   const toggleFullscreen = async () => {
     if (immersive) {
       try {
@@ -456,7 +498,13 @@ export function ImagePlayground({
       ? status.image_playground_version
       : null
 
-  if (statusLoading || keysLoading) {
+  if (
+    isImagePlaygroundInitialLoadPending(
+      statusLoading,
+      keysLoading,
+      appliedConfiguration
+    )
+  ) {
     return (
       <SectionPageLayout fixedContent immersive={immersive}>
         <SectionPageLayout.Title>
@@ -514,6 +562,24 @@ export function ImagePlayground({
         </span>
       </SectionPageLayout.Title>
       <SectionPageLayout.Actions>
+        <div
+          className='text-muted-foreground flex h-8 items-center gap-2 rounded-md border px-2.5 text-xs whitespace-nowrap'
+          title={`${t('Streaming')}: ${
+            appliedConfiguration?.streamImages ? t('Enabled') : t('Disabled')
+          }`}
+        >
+          <span>
+            {t('Streaming')}:{' '}
+            {appliedConfiguration?.streamImages ? t('Enabled') : t('Disabled')}
+          </span>
+          <Switch
+            size='sm'
+            checked={appliedConfiguration?.streamImages ?? true}
+            disabled={!appliedConfiguration}
+            aria-label={t('Streaming')}
+            onCheckedChange={toggleStreamImages}
+          />
+        </div>
         {keyOptions.length > 0 ? (
           <Select
             items={keyOptions}

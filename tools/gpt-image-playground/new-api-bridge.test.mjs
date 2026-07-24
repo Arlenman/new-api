@@ -165,11 +165,12 @@ function newApiConfiguration(overrides = {}) {
     apiKey: 'utrs_runtime-session',
     apiMode: 'images',
     profileName: 'New API · test2',
+    streamImages: true,
     ...overrides,
   }
 }
 
-function assertManagedNewApiSettings(settings) {
+function assertManagedNewApiSettings(settings, streamImages = true) {
   assert.equal(settings.activeProfileId, 'new-api-managed')
   assert.equal(settings.agentApiConfigMode, 'hybrid')
   assert.equal(settings.agentTextProfileId, 'new-api-managed-agent')
@@ -190,7 +191,7 @@ function assertManagedNewApiSettings(settings) {
     baseUrl: 'https://new-api.example.com/pg',
     apiMode: 'images',
     apiKey: 'utrs_runtime-session',
-    streamImages: true,
+    streamImages,
   })
   assert.deepEqual(agentProfile && {
     name: agentProfile.name,
@@ -205,7 +206,7 @@ function assertManagedNewApiSettings(settings) {
     baseUrl: 'https://new-api.example.com/pg',
     apiMode: 'responses',
     apiKey: 'utrs_runtime-session',
-    streamImages: true,
+    streamImages,
   })
 }
 
@@ -220,6 +221,20 @@ test('reapplies managed Images and Responses profiles after every persisted-stat
   harness.finishHydration()
   assertManagedNewApiSettings(harness.getSettings())
   assert.equal(harness.localStorage.serializedValues().includes('utrs_runtime-session'), false)
+})
+
+test('applies the host streaming preference to both managed image and agent profiles', () => {
+  const harness = loadBridge()
+  harness.bridge.installNewApiBridge()
+
+  harness.dispatch(newApiConfiguration({ streamImages: false }))
+  assertManagedNewApiSettings(harness.getSettings(), false)
+
+  harness.finishHydration()
+  assertManagedNewApiSettings(harness.getSettings(), false)
+
+  harness.dispatch(newApiConfiguration({ streamImages: true }))
+  assertManagedNewApiSettings(harness.getSettings(), true)
 })
 
 test('keeps the managed profile active when hydration finishes during configure application', () => {
@@ -359,6 +374,7 @@ test('normalizes the managed New API endpoint to the exact same-origin /pg route
 
 test('rejects persistent keys and every New API endpoint outside the restricted /pg route', () => {
   const invalidConfigurations = [
+    { streamImages: undefined },
     { apiKey: 'sk-persistent-user-key' },
     { apiUrl: 'https://new-api.example.com/v1' },
     { apiUrl: 'https://new-api.example.com/pg?route=v1' },
@@ -392,6 +408,7 @@ test('clears the in-memory managed configuration when switching back to an unman
     source: 'new-api',
     type: 'new-api:image-playground:configure',
     mode: 'tool',
+    streamImages: false,
   })
   harness.finishHydration()
 

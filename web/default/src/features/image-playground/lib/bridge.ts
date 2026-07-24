@@ -34,6 +34,7 @@ export interface ImagePlaygroundConfigureMessage {
   apiKey?: string
   apiMode?: 'images'
   profileName?: string
+  streamImages: boolean
 }
 
 export interface ImagePlaygroundChildMessage {
@@ -58,7 +59,8 @@ export function createProbeMessage(): ImagePlaygroundProbeMessage {
 export function createNewApiConfigureMessage(
   origin: string,
   apiKey: string,
-  apiKeyDisplayLabel?: string
+  apiKeyDisplayLabel: string | undefined,
+  streamImages: boolean
 ): ImagePlaygroundConfigureMessage {
   const apiUrl = `${new URL(origin).origin}/pg`
   const normalizedApiKey = apiKey.trim()
@@ -76,12 +78,14 @@ export function createNewApiConfigureMessage(
     profileName: normalizedApiKeyDisplayLabel
       ? `New API · ${normalizedApiKeyDisplayLabel}`
       : 'New API',
+    streamImages,
   }
 }
 
 export function createToolConfigureMessage(
   apiUrl: string,
-  apiKey: string
+  apiKey: string,
+  streamImages: boolean
 ): ImagePlaygroundConfigureMessage {
   return {
     source: PARENT_SOURCE,
@@ -91,6 +95,7 @@ export function createToolConfigureMessage(
     apiKey: apiKey.trim(),
     apiMode: 'images',
     profileName: 'Custom API',
+    streamImages,
   }
 }
 

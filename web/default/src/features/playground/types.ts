@@ -220,6 +220,7 @@ export interface PlaygroundConfig {
   presence_penalty: number
   seed: number | null
   stream: boolean
+  imageStream: boolean
 }
 
 export interface ParameterEnabled {

@@ -3,6 +3,9 @@ import { describe, test } from 'node:test'
 
 import {
   IMAGE_PLAYGROUND_CONFIGURATION_STORAGE_KEY,
+  getImagePlaygroundStreamImagesStorageKey,
+  persistImagePlaygroundStreamImages,
+  readImagePlaygroundStreamImages,
   resolveImagePlaygroundHostMode,
 } from './configuration-storage.ts'
 
@@ -42,5 +45,62 @@ describe('image playground account-managed configuration', () => {
     }
 
     assert.equal(resolveImagePlaygroundHostMode(storage), 'new-api')
+  })
+})
+
+describe('image playground streaming preference', () => {
+  test('defaults to enabled and persists only a boolean per New API user', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    }
+
+    assert.equal(readImagePlaygroundStreamImages(storage, 7), true)
+
+    persistImagePlaygroundStreamImages(storage, 7, false)
+
+    assert.equal(readImagePlaygroundStreamImages(storage, 7), false)
+    assert.equal(readImagePlaygroundStreamImages(storage, 8), true)
+    assert.deepEqual(
+      [...values.entries()],
+      [[getImagePlaygroundStreamImagesStorageKey(7), 'false']]
+    )
+  })
+
+  test('fails closed to the enabled default for invalid or unavailable storage', () => {
+    const invalidValues = new Map<string, string>([
+      [getImagePlaygroundStreamImagesStorageKey(7), '"not-a-boolean"'],
+    ])
+
+    assert.equal(
+      readImagePlaygroundStreamImages(
+        { getItem: (key: string) => invalidValues.get(key) ?? null },
+        7
+      ),
+      true
+    )
+    assert.equal(
+      readImagePlaygroundStreamImages(
+        {
+          getItem: () => {
+            throw new Error('storage unavailable')
+          },
+        },
+        7
+      ),
+      true
+    )
+    assert.doesNotThrow(() =>
+      persistImagePlaygroundStreamImages(
+        {
+          setItem: () => {
+            throw new Error('storage unavailable')
+          },
+        },
+        7,
+        false
+      )
+    )
   })
 })

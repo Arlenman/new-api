@@ -63,6 +63,7 @@ export const DEFAULT_CONFIG: PlaygroundConfig = {
   presence_penalty: 0,
   seed: null,
   stream: true,
+  imageStream: true,
 }
 
 export const DEFAULT_PARAMETER_ENABLED: ParameterEnabled = {

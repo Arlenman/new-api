@@ -267,15 +267,10 @@ func TestWriteCapturedPlaygroundImageResponseConvertsStreamToJSON(t *testing.T) 
 	ctx.Writer.Header().Set("Content-Type", "text/event-stream")
 	ctx.Writer.Header().Set("Transfer-Encoding", "chunked")
 
-	rawStream := strings.Join([]string{
-		`event: image_generation.completed`,
-		`data: {"type":"image_generation.completed","b64_json":"` + base64.StdEncoding.EncodeToString([]byte("final-image")) + `","revised_prompt":"stream revised","created_at":1234}`,
-		``,
-		`data: [DONE]`,
-		``,
-	}, "\n")
-	_, err := ctx.Writer.Write([]byte(rawStream))
-	require.NoError(t, err)
+	ctx.Render(-1, common.CustomEvent{Data: "event: image_generation.completed\n"})
+	ctx.Render(-1, common.CustomEvent{Data: `data: {"type":"image_generation.completed","b64_json":"` + base64.StdEncoding.EncodeToString([]byte("final-image")) + `","revised_prompt":"stream revised","created_at":1234}`})
+	ctx.Render(-1, common.CustomEvent{Data: `data: [DONE]`})
+	require.Equal(t, http.StatusOK, captureWriter.Status())
 
 	ctx.Writer = originalWriter
 	writeCapturedPlaygroundImageResponse(ctx, captureWriter)
@@ -293,6 +288,49 @@ func TestWriteCapturedPlaygroundImageResponseConvertsStreamToJSON(t *testing.T) 
 	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("final-image")), response.Data[0].B64Json)
 	require.Empty(t, response.Data[0].Url)
 	require.Equal(t, "stream revised", response.Data[0].RevisedPrompt)
+}
+
+func TestWriteCapturedPlaygroundImageResponseUsesJSONContentTypeForStreamError(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	originalWriter := ctx.Writer
+
+	captureWriter := newPlaygroundImageCaptureWriter(ctx.Writer)
+	ctx.Writer = captureWriter
+	ctx.Writer.Header().Set("Content-Type", "text/event-stream")
+	ctx.Writer.Header().Set("Transfer-Encoding", "chunked")
+	ctx.Writer.WriteHeader(http.StatusBadGateway)
+	_, err := ctx.Writer.Write([]byte(`{"error":{"message":"empty image stream response"}}`))
+	require.NoError(t, err)
+
+	ctx.Writer = originalWriter
+	writeCapturedPlaygroundImageResponse(ctx, captureWriter)
+
+	require.Equal(t, http.StatusBadGateway, recorder.Code)
+	require.Equal(t, gin.MIMEJSON, recorder.Header().Get("Content-Type"))
+	require.Empty(t, recorder.Header().Get("Transfer-Encoding"))
+	require.Contains(t, recorder.Body.String(), "empty image stream response")
+}
+
+func TestWriteCapturedPlaygroundImageResponseRejectsEmptySuccessfulStream(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	originalWriter := ctx.Writer
+
+	captureWriter := newPlaygroundImageCaptureWriter(ctx.Writer)
+	ctx.Writer = captureWriter
+	ctx.Writer.Header().Set("Content-Type", "text/event-stream")
+	ctx.Writer.Header().Set("Transfer-Encoding", "chunked")
+	ctx.Writer.WriteHeader(http.StatusOK)
+
+	ctx.Writer = originalWriter
+	writeCapturedPlaygroundImageResponse(ctx, captureWriter)
+
+	require.GreaterOrEqual(t, recorder.Code, http.StatusInternalServerError)
+	require.Less(t, recorder.Code, 600)
+	require.Contains(t, recorder.Header().Get("Content-Type"), gin.MIMEJSON)
+	require.Empty(t, recorder.Header().Get("Transfer-Encoding"))
+	require.Contains(t, recorder.Body.String(), "empty image stream response")
 }
 
 func TestPlaygroundImageCaptureWriterDoesNotFlushOriginalResponse(t *testing.T) {

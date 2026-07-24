@@ -406,12 +406,25 @@ describe('image generation task manager', () => {
       sessionMessages: session.messages,
     }).done
 
+    await manager.start({
+      sessionId: 'session-1',
+      assistantMessageKey: 'assistant-1',
+      prompt: 'non-streaming image',
+      model: 'gpt-image-1',
+      group: 'default',
+      size: 'auto',
+      streamImages: false,
+      sessionMessages: session.messages,
+    }).done
+
     assert.equal(payloads[0].size, undefined)
     assert.equal(payloads[1].size, '1024x1024')
     assert.equal(payloads[0].stream, true)
     assert.equal(payloads[0].partial_images, 1)
     assert.equal(payloads[1].stream, true)
     assert.equal(payloads[1].partial_images, 1)
+    assert.equal(payloads[2].stream, false)
+    assert.equal(payloads[2].partial_images, undefined)
   })
 
   test('keeps response errors out of the image error UI state', async () => {

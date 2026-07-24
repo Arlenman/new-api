@@ -34,6 +34,7 @@ import type {
 } from '../../types.ts'
 import { updateCurrentVersionContent } from '../message/message-utils.ts'
 import { updatePlaygroundSessionMessages } from '../session/playground-session-utils.ts'
+import { createPlaygroundId } from '../state/playground-id-utils.ts'
 import {
   buildImageAssistantContent,
   getImageGenerationUrls,
@@ -76,6 +77,7 @@ export type StartImageGenerationTaskOptions = {
   model: string
   group?: string
   size?: string
+  streamImages?: boolean
   files?: PlaygroundImageFile[]
   sessions?: PlaygroundSession[]
   sessionMessages: Message[]
@@ -105,7 +107,7 @@ class ImageGenerationTaskTimeoutError extends Error {}
 class ImageGenerationTaskAbortError extends Error {}
 
 function fallbackId(): string {
-  return crypto.randomUUID()
+  return createPlaygroundId()
 }
 
 function isAbortError(error: unknown): boolean {
@@ -412,6 +414,10 @@ export function createImageGenerationTaskManager(
     const requestImage = startOptions.requestImage ?? options.requestImage
     const size = startOptions.size || DEFAULT_IMAGE_SIZE
     const files = startOptions.files ?? []
+    const supportsStreaming = shouldStreamPlaygroundImageGeneration(
+      startOptions.model
+    )
+    const streamImages = startOptions.streamImages ?? true
 
     if (!requestImage) {
       throw new Error('Image generation request handler is required')
@@ -449,11 +455,13 @@ export function createImageGenerationTaskManager(
       session_id: startOptions.sessionId,
       message_key: startOptions.assistantMessageKey,
       ...(size !== DEFAULT_IMAGE_SIZE ? { size } : {}),
-      ...(shouldStreamPlaygroundImageGeneration(startOptions.model)
-        ? {
-            stream: true,
-            partial_images: PLAYGROUND_IMAGE_STREAM_PARTIAL_IMAGES,
-          }
+      ...(supportsStreaming
+        ? streamImages
+          ? {
+              stream: true,
+              partial_images: PLAYGROUND_IMAGE_STREAM_PARTIAL_IMAGES,
+            }
+          : { stream: false }
         : {}),
     }
 

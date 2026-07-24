@@ -72,21 +72,42 @@ func TestGetAndValidOpenAIImageRequestMultipartStream(t *testing.T) {
 	})
 }
 
-func TestGetAndValidOpenAIImageRequestForcesPlaygroundGPTImageStream(t *testing.T) {
+func TestGetAndValidOpenAIImageRequestDefaultsPlaygroundGPTImageStream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	for _, path := range []string{"/pg/images/generations", "/pg/v1/images/generations"} {
 		t.Run(path, func(t *testing.T) {
-			body := bytes.NewBufferString(`{"model":"gpt-image-2","prompt":"draw a cat"}`)
-			c, _ := gin.CreateTestContext(httptest.NewRecorder())
-			c.Request = httptest.NewRequest(http.MethodPost, path, body)
-			c.Request.Header.Set("Content-Type", "application/json")
+			tests := []struct {
+				name       string
+				body       string
+				wantStream bool
+			}{
+				{
+					name:       "defaults to streaming when omitted",
+					body:       `{"model":"gpt-image-2","prompt":"draw a cat"}`,
+					wantStream: true,
+				},
+				{
+					name:       "preserves explicit disabled streaming",
+					body:       `{"model":"gpt-image-2","prompt":"draw a cat","stream":false}`,
+					wantStream: false,
+				},
+			}
 
-			req, err := GetAndValidOpenAIImageRequest(c, relayconstant.RelayModeImagesGenerations)
-			require.NoError(t, err)
-			require.NotNil(t, req.Stream)
-			require.True(t, *req.Stream)
-			require.True(t, req.IsStream(c))
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					body := bytes.NewBufferString(tt.body)
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					c.Request = httptest.NewRequest(http.MethodPost, path, body)
+					c.Request.Header.Set("Content-Type", "application/json")
+
+					req, err := GetAndValidOpenAIImageRequest(c, relayconstant.RelayModeImagesGenerations)
+					require.NoError(t, err)
+					require.NotNil(t, req.Stream)
+					require.Equal(t, tt.wantStream, *req.Stream)
+					require.Equal(t, tt.wantStream, req.IsStream(c))
+				})
+			}
 		})
 	}
 }

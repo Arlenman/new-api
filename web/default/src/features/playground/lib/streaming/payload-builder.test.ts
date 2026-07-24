@@ -20,6 +20,7 @@ const config: PlaygroundConfig = {
   presence_penalty: 0,
   seed: null,
   stream: true,
+  imageStream: true,
 }
 
 const parameterEnabled: ParameterEnabled = {

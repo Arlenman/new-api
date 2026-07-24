@@ -27,6 +27,7 @@ interface ConfigureMessage {
   apiKey?: string
   apiMode?: ApiMode
   profileName?: string
+  streamImages: boolean
 }
 
 interface ToolSettingsSnapshot {
@@ -40,6 +41,7 @@ interface ManagedConfiguration {
   apiUrl: string
   apiKey: string
   profileName: string
+  streamImages: boolean
 }
 
 let activeConfigureMessage: ConfigureMessage | null = null
@@ -49,7 +51,8 @@ function isConfigureMessage(value: unknown): value is ConfigureMessage {
   const message = value as Record<string, unknown>
   return message.source === MESSAGE_SOURCE &&
     message.type === 'new-api:image-playground:configure' &&
-    (message.mode === 'new-api' || message.mode === 'tool')
+    (message.mode === 'new-api' || message.mode === 'tool') &&
+    typeof message.streamImages === 'boolean'
 }
 
 function isManagedProfile(profile: ApiProfile) {
@@ -88,6 +91,7 @@ function getManagedConfiguration(message: ConfigureMessage): ManagedConfiguratio
     apiKey,
     profileName: message.profileName?.trim()
       || (message.mode === 'new-api' ? 'New API' : 'Custom API'),
+    streamImages: message.streamImages,
   }
 }
 
@@ -106,7 +110,7 @@ function managedProfilesMatch(settings: AppSettings, message: ConfigureMessage) 
     !imageProfile.model ||
     imageProfile.codexCli ||
     imageProfile.apiProxy ||
-    imageProfile.streamImages !== (message.mode === 'new-api')
+    imageProfile.streamImages !== configuration.streamImages
   ) {
     return false
   }
@@ -131,7 +135,7 @@ function managedProfilesMatch(settings: AppSettings, message: ConfigureMessage) 
     !agentProfile.model ||
     agentProfile.codexCli ||
     agentProfile.apiProxy ||
-    !agentProfile.streamImages
+    agentProfile.streamImages !== configuration.streamImages
   ) {
     return false
   }
@@ -263,7 +267,7 @@ function applyManagedProfiles(message: ConfigureMessage) {
     apiMode: 'images',
     codexCli: false,
     apiProxy: false,
-    streamImages: message.mode === 'new-api',
+    streamImages: configuration.streamImages,
   }
   const userProfiles = state.settings.profiles.filter((profile) => !isManagedProfile(profile))
 
@@ -300,7 +304,7 @@ function applyManagedProfiles(message: ConfigureMessage) {
     apiMode: 'responses',
     codexCli: false,
     apiProxy: false,
-    streamImages: true,
+    streamImages: configuration.streamImages,
   }
 
   const nextSettings: Partial<AppSettings> = {
@@ -372,6 +376,7 @@ export function installNewApiBridge() {
       apiKey: event.data.apiKey,
       apiMode: event.data.apiMode,
       profileName: event.data.profileName,
+      streamImages: event.data.streamImages,
     }
     if (!applyManagedProfiles(activeConfigureMessage)) {
       activeConfigureMessage = previousConfigureMessage

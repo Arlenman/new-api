@@ -267,7 +267,7 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 }
 
 func forcePlaygroundImageStream(c *gin.Context, imageRequest *dto.ImageRequest) {
-	if imageRequest == nil || !shouldForcePlaygroundImageStream(c, imageRequest.Model) {
+	if imageRequest == nil || imageRequest.Stream != nil || !shouldForcePlaygroundImageStream(c, imageRequest.Model) {
 		return
 	}
 	stream := true

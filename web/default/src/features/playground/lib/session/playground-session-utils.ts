@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { Message, PlaygroundSession } from '../../types'
+import { createPlaygroundId } from '../state/playground-id-utils.ts'
 
 export const DEFAULT_PLAYGROUND_SESSION_TITLE = 'New conversation'
 
@@ -39,7 +40,7 @@ type DeleteSessionResult = {
 }
 
 function fallbackId(): string {
-  return crypto.randomUUID()
+  return createPlaygroundId()
 }
 
 function sortSessionsByUpdatedAt(

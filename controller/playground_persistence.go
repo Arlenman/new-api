@@ -103,7 +103,10 @@ func (w *playgroundImageCaptureWriter) Header() http.Header {
 }
 
 func (w *playgroundImageCaptureWriter) WriteHeader(statusCode int) {
-	if w.wroteHeader {
+	// Gin uses negative status codes for body-only renders (for example,
+	// streaming chunks rendered with c.Render(-1, ...)). Its native response
+	// writer ignores those values, so the capture writer must do the same.
+	if statusCode <= 0 || w.wroteHeader {
 		return
 	}
 	w.status = statusCode
@@ -520,33 +523,39 @@ func writeCapturedPlaygroundImageResponse(c *gin.Context, writer *playgroundImag
 		contentType = gin.MIMEJSON
 	}
 
-	if status >= 200 && status < 300 && len(body) > 0 {
-		if strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {
-			streamResponse, err := playgroundImageResponseFromStream(body)
-			if err != nil {
-				c.Writer.Header().Del("Content-Length")
-				c.Writer.Header().Del("Transfer-Encoding")
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error": gin.H{
-						"message": fmt.Sprintf("failed to parse playground image stream: %s", err.Error()),
-					},
-				})
-				return
-			}
-			body, err = common.Marshal(streamResponse)
-			if err != nil {
-				c.Writer.Header().Del("Content-Length")
-				c.Writer.Header().Del("Transfer-Encoding")
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error": gin.H{
-						"message": "failed to encode playground image stream",
-					},
-				})
-				return
-			}
-			contentType = gin.MIMEJSON
+	isEventStream := strings.HasPrefix(strings.ToLower(contentType), "text/event-stream")
+	if status >= 200 && status < 300 && isEventStream {
+		streamResponse, err := playgroundImageResponseFromStream(body)
+		if err != nil {
+			c.Writer.Header().Del("Content-Length")
+			c.Writer.Header().Del("Transfer-Encoding")
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": gin.H{
+					"message": fmt.Sprintf("failed to parse playground image stream: %s", err.Error()),
+				},
+			})
+			return
 		}
+		body, err = common.Marshal(streamResponse)
+		if err != nil {
+			c.Writer.Header().Del("Content-Length")
+			c.Writer.Header().Del("Transfer-Encoding")
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": gin.H{
+					"message": "failed to encode playground image stream",
+				},
+			})
+			return
+		}
+		contentType = gin.MIMEJSON
+	} else if (status < 200 || status >= 300) && isEventStream {
+		// Streaming headers may already have been staged before the relay detects
+		// an upstream failure. PlaygroundRelay serializes that failure as JSON;
+		// do not expose a JSON error body as text/event-stream to the embedded tool.
+		contentType = gin.MIMEJSON
+	}
 
+	if status >= 200 && status < 300 && len(body) > 0 {
 		sessionID := strings.TrimSpace(c.GetHeader(playgroundSessionHeader))
 		messageKey := strings.TrimSpace(c.GetHeader(playgroundMessageKeyHeader))
 		if sessionID != "" && messageKey != "" {

@@ -1,9 +1,22 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { playgroundSessionsSchema } from './storage-schema.ts'
+import {
+  playgroundConfigSchema,
+  playgroundSessionsSchema,
+} from './storage-schema.ts'
 
 describe('playground storage schema', () => {
+  test('preserves the image streaming preference independently', () => {
+    const parsed = playgroundConfigSchema.parse({
+      stream: true,
+      imageStream: false,
+    })
+
+    assert.equal(parsed.stream, true)
+    assert.equal(parsed.imageStream, false)
+  })
+
   test('preserves chat message attachments', () => {
     const parsed = playgroundSessionsSchema.parse([
       {

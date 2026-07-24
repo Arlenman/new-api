@@ -21,15 +21,62 @@ interface ImagePlaygroundConfigurationStorage {
   removeItem(key: string): void
 }
 
+interface ImagePlaygroundPreferenceStorage {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+}
+
 export const IMAGE_PLAYGROUND_CONFIGURATION_STORAGE_KEY =
   'new-api:image-playground:configuration'
+
+const IMAGE_PLAYGROUND_STREAM_IMAGES_STORAGE_KEY_PREFIX =
+  'new-api:image-playground:stream-images:user:'
+
+export function getImagePlaygroundStreamImagesStorageKey(
+  userId: number
+): string {
+  return `${IMAGE_PLAYGROUND_STREAM_IMAGES_STORAGE_KEY_PREFIX}${userId}`
+}
+
+export function readImagePlaygroundStreamImages(
+  storage: Pick<ImagePlaygroundPreferenceStorage, 'getItem'>,
+  userId: number
+): boolean {
+  if (!Number.isInteger(userId) || userId <= 0) return true
+
+  try {
+    const persistedValue = storage.getItem(
+      getImagePlaygroundStreamImagesStorageKey(userId)
+    )
+    if (persistedValue === null) return true
+    const streamImages: unknown = JSON.parse(persistedValue)
+    return typeof streamImages === 'boolean' ? streamImages : true
+  } catch {
+    return true
+  }
+}
+
+export function persistImagePlaygroundStreamImages(
+  storage: Pick<ImagePlaygroundPreferenceStorage, 'setItem'>,
+  userId: number,
+  streamImages: boolean
+): void {
+  if (!Number.isInteger(userId) || userId <= 0) return
+
+  try {
+    storage.setItem(
+      getImagePlaygroundStreamImagesStorageKey(userId),
+      JSON.stringify(streamImages)
+    )
+  } catch {
+    // The default remains enabled when browser storage is unavailable.
+  }
+}
 
 export function resolveImagePlaygroundHostMode(
   storage: ImagePlaygroundConfigurationStorage
 ): 'new-api' {
-  if (
-    storage.getItem(IMAGE_PLAYGROUND_CONFIGURATION_STORAGE_KEY) !== null
-  ) {
+  if (storage.getItem(IMAGE_PLAYGROUND_CONFIGURATION_STORAGE_KEY) !== null) {
     storage.removeItem(IMAGE_PLAYGROUND_CONFIGURATION_STORAGE_KEY)
   }
   return 'new-api'

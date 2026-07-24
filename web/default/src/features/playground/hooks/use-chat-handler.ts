@@ -320,6 +320,7 @@ export function useChatHandler({
         model: config.model,
         group: config.group,
         size: options.imageSize || config.imageSize || DEFAULT_IMAGE_SIZE,
+        streamImages: config.imageStream,
         files: options.files ?? [],
         sessions: options.sessions,
         sessionMessages: options.sessionMessages,
@@ -329,7 +330,7 @@ export function useChatHandler({
             : sendImageGeneration(payload, signal),
       })
     },
-    [config.group, config.imageSize, config.model]
+    [config.group, config.imageSize, config.imageStream, config.model]
   )
 
   // Send chat request (stream or non-stream based on config)
