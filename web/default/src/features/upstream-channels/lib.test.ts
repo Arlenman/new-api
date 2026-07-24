@@ -9,7 +9,10 @@ import {
   getTotalAdjustedUpstreamBalance,
   getUpstreamAccessTokenRecommendation,
   getUpstreamCardTone,
+  getUpstreamChannelInUseKeyCount,
   getUpstreamChannelKeyStats,
+  getUpstreamKeyGroupOptions,
+  getUpstreamKeyInUseStatus,
   getUpstreamChannelDefaultName,
   getUpstreamChannelDisplayName,
   getUpstreamImportBaseName,
@@ -45,6 +48,7 @@ function createChannel(
     has_password: true,
     source_channel_count: 0,
     active_source_channel_count: activeSourceChannelCount,
+    in_use_key_count: activeSourceChannelCount,
     balance,
     availability_24h: null,
     average_first_token_latency_ms: null,
@@ -575,7 +579,7 @@ describe('upstream channel multiplier', () => {
     assert.equal(getTotalAdjustedUpstreamBalance(channels), 27)
   })
 
-  test('counts all snapshot keys and active imported local channels', () => {
+  test('counts all snapshot keys and only enabled in-use keys', () => {
     const firstChannel = createChannel(1, 10, 'ready', 1, 0, 2)
     firstChannel.snapshot = {
       provider: 'new-api',
@@ -586,6 +590,8 @@ describe('upstream channel multiplier', () => {
           id: 1,
           imported: true,
           active: true,
+          in_use_status: 'enabled',
+          key_fingerprint: 'enabled-key-a',
           name: 'A',
           masked_key: 'sk-a',
           status: '1',
@@ -594,6 +600,7 @@ describe('upstream channel multiplier', () => {
           id: 2,
           imported: false,
           active: false,
+          in_use_status: 'unlinked',
           name: 'B',
           masked_key: 'sk-b',
           status: '1',
@@ -601,9 +608,30 @@ describe('upstream channel multiplier', () => {
         {
           id: 3,
           imported: true,
-          active: true,
+          active: false,
+          in_use_status: 'auto_disabled',
           name: 'C',
           masked_key: 'sk-c',
+          status: '1',
+        },
+        {
+          id: 5,
+          imported: true,
+          active: true,
+          in_use_status: 'enabled',
+          key_fingerprint: 'same-enabled-key',
+          name: 'A duplicate',
+          masked_key: 'sk-a...',
+          status: '1',
+        },
+        {
+          id: 6,
+          imported: true,
+          active: true,
+          in_use_status: 'enabled',
+          key_fingerprint: 'same-enabled-key',
+          name: 'A duplicate again',
+          masked_key: 'sk-a...',
           status: '1',
         },
       ],
@@ -621,6 +649,8 @@ describe('upstream channel multiplier', () => {
           id: 4,
           imported: true,
           active: true,
+          in_use_status: 'enabled',
+          key_fingerprint: 'enabled-key-d',
           name: 'D',
           masked_key: 'sk-d',
           status: '1',
@@ -634,10 +664,59 @@ describe('upstream channel multiplier', () => {
     assert.deepEqual(
       getUpstreamChannelKeyStats([firstChannel, secondChannel]),
       {
-        total: 4,
+        total: 6,
         active: 3,
       }
     )
+  })
+
+  test('uses the backend count without a snapshot and ignores enabled keys without fingerprints', () => {
+    const channel = createChannel(1, 10, 'ready')
+    channel.in_use_key_count = 4
+
+    assert.equal(getUpstreamChannelInUseKeyCount(channel), 4)
+
+    channel.snapshot = {
+      provider: 'new-api',
+      balance: 10,
+      account: { id: 1, username: 'root', balance: 10 },
+      keys: [
+        {
+          id: 1,
+          imported: true,
+          active: true,
+          in_use_status: 'enabled',
+          name: 'Missing fingerprint',
+          masked_key: 'sk-missing',
+          status: '1',
+        },
+        {
+          id: 2,
+          imported: true,
+          active: true,
+          in_use_status: 'enabled',
+          key_fingerprint: 'linked-key',
+          name: 'Linked key',
+          masked_key: 'sk-linked',
+          status: '1',
+        },
+        {
+          id: 3,
+          imported: true,
+          active: true,
+          in_use_status: 'enabled',
+          key_fingerprint: 'linked-key',
+          name: 'Duplicate linked key',
+          masked_key: 'sk-linked...',
+          status: '1',
+        },
+      ],
+      groups: [],
+      ratios: {},
+      retrieved_at: 0,
+    }
+
+    assert.equal(getUpstreamChannelInUseKeyCount(channel), 1)
   })
 })
 
@@ -658,5 +737,145 @@ describe('upstream channel card tones', () => {
     assert.notEqual(otherTone, newAPITone)
     assert.notEqual(unknownTone, newAPITone)
     assert.notEqual(unknownTone, sub2APITone)
+  })
+})
+
+describe('upstream key management display values', () => {
+  test('uses the explicit linked-channel status and keeps legacy snapshots compatible', () => {
+    assert.equal(
+      getUpstreamKeyInUseStatus({
+        imported: false,
+        active: false,
+        in_use_status: 'auto_disabled',
+      }),
+      'auto_disabled'
+    )
+    assert.equal(
+      getUpstreamKeyInUseStatus({ imported: false, active: false }),
+      'unlinked'
+    )
+    assert.equal(
+      getUpstreamKeyInUseStatus({ imported: true, active: false }),
+      'disabled'
+    )
+    assert.equal(
+      getUpstreamKeyInUseStatus({ imported: true, active: true }),
+      'enabled'
+    )
+    assert.equal(
+      getUpstreamKeyInUseStatus({
+        imported: false,
+        linked: true,
+        active: false,
+      }),
+      'disabled'
+    )
+    assert.equal(
+      getUpstreamKeyInUseStatus({
+        imported: true,
+        linked: false,
+        active: true,
+      }),
+      'unlinked'
+    )
+  })
+
+  test('builds provider-specific group choices with the effective multiplier', () => {
+    const newAPIChannel = createChannel(1, 10, 'ready', 1.5)
+    const newAPISnapshot = {
+      provider: 'new-api' as const,
+      balance: 10,
+      account: { id: 1, username: 'root', balance: 10 },
+      keys: [],
+      groups: [
+        { name: 'cloud', ratio: 0.03 },
+        { name: 'default', ratio: 1 },
+      ],
+      ratios: { cloud: 0.03, default: 1 },
+      retrieved_at: 0,
+    }
+
+    assert.deepEqual(
+      getUpstreamKeyGroupOptions(newAPIChannel, newAPISnapshot),
+      [
+        {
+          value: 'cloud',
+          name: 'cloud',
+          ratio: 0.045,
+          request: { group: 'cloud' },
+        },
+        {
+          value: 'default',
+          name: 'default',
+          ratio: 1.5,
+          request: { group: 'default' },
+        },
+      ]
+    )
+
+    const sub2APIChannel = createChannel(2, 10, 'ready', 1)
+    sub2APIChannel.provider = 'sub2api'
+    const sub2APISnapshot = {
+      ...newAPISnapshot,
+      provider: 'sub2api' as const,
+      groups: [{ id: 24, name: 'cloud', ratio: 0.05 }],
+      ratios: { '24': 0.05 },
+    }
+    assert.deepEqual(
+      getUpstreamKeyGroupOptions(sub2APIChannel, sub2APISnapshot),
+      [
+        {
+          value: '24',
+          name: 'cloud',
+          ratio: 0.05,
+          request: { group_id: 24 },
+        },
+      ]
+    )
+  })
+
+  test('uses the detected provider for auto channels without mixing request fields', () => {
+    const autoChannel = createChannel(1, 10, 'ready', 1)
+    autoChannel.provider = 'auto'
+    const baseSnapshot = {
+      balance: 10,
+      account: { id: 1, username: 'root', balance: 10 },
+      keys: [],
+      retrieved_at: 0,
+    }
+
+    assert.deepEqual(
+      getUpstreamKeyGroupOptions(autoChannel, {
+        ...baseSnapshot,
+        provider: 'new-api',
+        groups: [{ id: 24, name: 'cloud', ratio: 0.045 }],
+        ratios: { cloud: 0.045 },
+      }),
+      [
+        {
+          value: 'cloud',
+          name: 'cloud',
+          ratio: 0.045,
+          request: { group: 'cloud' },
+        },
+      ]
+    )
+
+    assert.deepEqual(
+      getUpstreamKeyGroupOptions(autoChannel, {
+        ...baseSnapshot,
+        provider: 'sub2api',
+        groups: [{ id: 24, name: 'cloud', ratio: 0.045 }],
+        ratios: { '24': 0.045 },
+      }),
+      [
+        {
+          value: '24',
+          name: 'cloud',
+          ratio: 0.045,
+          request: { group_id: 24 },
+        },
+      ]
+    )
   })
 })

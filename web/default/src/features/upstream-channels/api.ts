@@ -34,10 +34,12 @@ import type {
   CreateUpstreamChannelConfig,
   ImportUpstreamKeysRequest,
   ImportUpstreamKeysResult,
+  LinkUpstreamKeysResult,
   RefreshAllResult,
   UpstreamChannel,
   UpstreamChannelConfig,
   UpstreamPrioritySchedule,
+  UpdateUpstreamKeyGroupRequest,
 } from './types'
 
 export async function getManagedUpstreamChannels(): Promise<
@@ -195,6 +197,30 @@ export async function refreshAllManagedUpstreamChannels(): Promise<
   const res = await api.post<ApiResponse<RefreshAllResult>>(
     '/api/upstream-channels/refresh',
     undefined,
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function linkManagedUpstreamKeys(
+  channelId: number
+): Promise<ApiResponse<LinkUpstreamKeysResult>> {
+  const res = await api.post<ApiResponse<LinkUpstreamKeysResult>>(
+    `/api/upstream-channels/${channelId}/keys/link`,
+    undefined,
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function updateManagedUpstreamKeyGroup(
+  channelId: number,
+  keyId: number,
+  request: UpdateUpstreamKeyGroupRequest
+): Promise<ApiResponse<UpstreamChannel>> {
+  const res = await api.patch<ApiResponse<UpstreamChannel>>(
+    `/api/upstream-channels/${channelId}/keys/${keyId}/group`,
+    request,
     { skipBusinessError: true }
   )
   return res.data

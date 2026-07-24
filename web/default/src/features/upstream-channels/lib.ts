@@ -24,6 +24,10 @@ import type {
   UpstreamModelPricing,
   UpstreamModelPricingInterval,
   UpstreamProvider,
+  UpstreamKey,
+  UpstreamKeyInUseStatus,
+  UpstreamSnapshot,
+  UpdateUpstreamKeyGroupRequest,
 } from './types'
 
 export type UpstreamChannelStatusFilter = 'all' | UpstreamChannelStatus
@@ -315,6 +319,76 @@ export function getTotalAdjustedUpstreamBalance(
   )
 }
 
+export function getUpstreamKeyInUseStatus(
+  key: Pick<UpstreamKey, 'imported' | 'active' | 'linked' | 'in_use_status'>
+): UpstreamKeyInUseStatus {
+  if (key.in_use_status) return key.in_use_status
+  if (key.linked != null) {
+    if (!key.linked) return 'unlinked'
+    return key.active ? 'enabled' : 'disabled'
+  }
+  if (!key.imported) return 'unlinked'
+  return key.active ? 'enabled' : 'disabled'
+}
+
+export function getUpstreamChannelInUseKeyCount(
+  channel: Pick<UpstreamChannel, 'snapshot' | 'in_use_key_count'>
+): number {
+  if (!channel.snapshot) return channel.in_use_key_count
+
+  const enabledKeyFingerprints = new Set<string>()
+  for (const key of channel.snapshot.keys) {
+    if (getUpstreamKeyInUseStatus(key) !== 'enabled') continue
+    const fingerprint = key.key_fingerprint?.trim()
+    if (!fingerprint) continue
+    enabledKeyFingerprints.add(fingerprint)
+  }
+  return enabledKeyFingerprints.size
+}
+
+export interface UpstreamKeyGroupOption {
+  value: string
+  name: string
+  ratio: number
+  request: UpdateUpstreamKeyGroupRequest
+}
+
+export function getUpstreamKeyGroupOptions(
+  channel: Pick<UpstreamChannel, 'multiplier' | 'provider'>,
+  snapshot: UpstreamSnapshot
+): UpstreamKeyGroupOption[] {
+  const provider =
+    channel.provider === 'auto' ? snapshot.provider : channel.provider
+  if (provider !== 'new-api' && provider !== 'sub2api') return []
+
+  const multiplier = getEffectiveUpstreamMultiplier(channel.multiplier)
+  return snapshot.groups.flatMap((group) => {
+    const name = group.name.trim()
+    if (!name) return []
+
+    let ratioKey = name
+    let request: UpdateUpstreamKeyGroupRequest = { group: name }
+    if (provider === 'sub2api') {
+      const groupID = group.id
+      if (groupID == null) return []
+      ratioKey = String(groupID)
+      request = { group_id: groupID }
+    }
+
+    const upstreamRatio = snapshot.ratios[ratioKey] ?? group.ratio
+    const ratio = upstreamRatio * multiplier
+    if (!Number.isFinite(ratio) || ratio < 0) return []
+    return [
+      {
+        value: provider === 'sub2api' ? String(group.id) : name,
+        name,
+        ratio,
+        request,
+      },
+    ]
+  })
+}
+
 export function getUpstreamChannelKeyStats(channels: UpstreamChannel[]): {
   total: number
   active: number
@@ -322,7 +396,7 @@ export function getUpstreamChannelKeyStats(channels: UpstreamChannel[]): {
   return channels.reduce(
     (stats, channel) => ({
       total: stats.total + (channel.snapshot?.keys.length ?? 0),
-      active: stats.active + channel.active_source_channel_count,
+      active: stats.active + getUpstreamChannelInUseKeyCount(channel),
     }),
     { total: 0, active: 0 }
   )

@@ -20,6 +20,11 @@ export type UpstreamProvider = "auto" | "new-api" | "sub2api" | "other";
 export type UpstreamAuthType = "password" | "access_token";
 export type UpstreamChannelStatus = "unconfigured" | "ready" | "error";
 export type UpstreamErrorCode = "upstream_turnstile_requires_access_token";
+export type UpstreamKeyInUseStatus =
+  | "unlinked"
+  | "enabled"
+  | "disabled"
+  | "auto_disabled";
 
 export interface UpstreamAccount {
   id: number;
@@ -34,6 +39,9 @@ export interface UpstreamKey {
   id: number;
   imported: boolean;
   active: boolean;
+  linked?: boolean;
+  in_use_status?: UpstreamKeyInUseStatus;
+  key_fingerprint?: string;
   name: string;
   masked_key: string;
   group?: string;
@@ -110,6 +118,7 @@ export interface UpstreamChannel {
   has_password: boolean;
   source_channel_count: number;
   active_source_channel_count: number;
+  in_use_key_count: number;
   balance: number;
   availability_24h: number | null;
   average_first_token_latency_ms: number | null;
@@ -153,6 +162,24 @@ export interface ApiResponse<T> {
 export interface RefreshAllResult {
   refreshed: number;
   errors: string[];
+}
+
+export type UpdateUpstreamKeyGroupRequest =
+  | { group: string; group_id?: never }
+  | { group?: never; group_id: number };
+
+export interface LinkUpstreamKeysSummary {
+  total: number;
+  linked: number;
+  enabled: number;
+  auto_disabled: number;
+  disabled: number;
+  unlinked: number;
+}
+
+export interface LinkUpstreamKeysResult {
+  channel: UpstreamChannel;
+  summary: LinkUpstreamKeysSummary;
 }
 
 export interface UpstreamPrioritySchedule {

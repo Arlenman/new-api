@@ -89,6 +89,7 @@ import {
 import type {
   AlertRule,
   AlertRuleInput,
+  ApiResponse,
   CreateUpstreamChannelConfig,
   UpstreamChannel,
   UpstreamChannelConfig,
@@ -673,7 +674,21 @@ export function UpstreamChannels() {
     saveMutation.mutate({ channel: selectedChannel, config })
   }
 
-  async function refreshChannelList() {
+  async function refreshChannelList(updatedChannel?: UpstreamChannel) {
+    if (updatedChannel) {
+      queryClient.setQueryData<ApiResponse<UpstreamChannel[]>>(
+        queryKey,
+        (current) => {
+          if (!current?.data) return current
+          return {
+            ...current,
+            data: current.data.map((channel) =>
+              channel.id === updatedChannel.id ? updatedChannel : channel
+            ),
+          }
+        }
+      )
+    }
     await queryClient.invalidateQueries({ queryKey })
   }
 

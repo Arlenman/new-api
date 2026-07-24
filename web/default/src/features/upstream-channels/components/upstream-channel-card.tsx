@@ -55,6 +55,7 @@ import {
   getUpstreamModelPricingFields,
   getUpstreamSelectedGroupMultiplier,
   getUpstreamCardTone,
+  getUpstreamChannelInUseKeyCount,
   getUpstreamChannelDisplayName,
   hasUsableUpstreamCredentials,
   isUpstreamTurnstileAccessTokenRequired,
@@ -97,7 +98,7 @@ interface UpstreamChannelCardProps {
     channel: UpstreamChannel,
     selectedGroup: string
   ) => Promise<void>
-  onDataChanged: () => Promise<void>
+  onDataChanged: (channel?: UpstreamChannel) => Promise<void>
 }
 
 export function UpstreamChannelCard({
@@ -128,6 +129,7 @@ export function UpstreamChannelCard({
   const [groupsOpen, setGroupsOpen] = useState(false)
   const [editingNote, setEditingNote] = useState(false)
   const [noteDraft, setNoteDraft] = useState(channel.note || '')
+  const inUseKeyCount = getUpstreamChannelInUseKeyCount(channel)
   const [defaultTestModelDraft, setDefaultTestModelDraft] = useState(
     channel.default_test_model || ''
   )
@@ -281,7 +283,7 @@ export function UpstreamChannelCard({
               >
                 <span className='text-muted-foreground'>{t('In use')}</span>
                 <span className='font-semibold tabular-nums'>
-                  {channel.active_source_channel_count}
+                  {inUseKeyCount}
                 </span>
               </Badge>
               <Badge
@@ -603,7 +605,7 @@ export function UpstreamChannelCard({
               <UpstreamKeysTable
                 channel={channel}
                 snapshot={snapshot}
-                onImported={onDataChanged}
+                onChannelChanged={onDataChanged}
                 refreshing={refreshingKeys}
                 onRefresh={onRefreshKeys}
               />
