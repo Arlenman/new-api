@@ -23,23 +23,29 @@ const (
 	SystemTaskTypeAsyncTaskPoll        = "async_task_poll"
 	SystemTaskTypeAlertNoticeDelivery  = "alert_notice_delivery"
 	SystemTaskTypeUpstreamPrioritySync = "upstream_priority_sync"
+	SystemTaskTypeUpstreamPriorityTest = "upstream_priority_sync_manual"
 )
 
-var ErrSystemTaskLockLost = errors.New("system task lock lost")
+var (
+	ErrSystemTaskLockLost = errors.New("system task lock lost")
+	ErrActiveSystemTasks  = errors.New("active system tasks exist")
+)
 
 type SystemTask struct {
-	ID        int64            `json:"id" gorm:"primary_key"`
-	TaskID    string           `json:"task_id" gorm:"type:varchar(64);uniqueIndex"`
-	Type      string           `json:"type" gorm:"type:varchar(64);index"`
-	Status    SystemTaskStatus `json:"status" gorm:"type:varchar(32);index"`
-	ActiveKey *string          `json:"active_key,omitempty" gorm:"type:varchar(64);uniqueIndex"`
-	Payload   string           `json:"payload" gorm:"type:text"`
-	State     string           `json:"state" gorm:"type:text"`
-	Result    string           `json:"result" gorm:"type:text"`
-	Error     string           `json:"error" gorm:"type:text"`
-	LockedBy  string           `json:"locked_by" gorm:"type:varchar(128);index"`
-	CreatedAt int64            `json:"created_at" gorm:"bigint;index"`
-	UpdatedAt int64            `json:"updated_at" gorm:"bigint;index"`
+	ID          int64            `json:"id" gorm:"primary_key"`
+	TaskID      string           `json:"task_id" gorm:"type:varchar(64);uniqueIndex"`
+	Type        string           `json:"type" gorm:"type:varchar(64);index"`
+	Status      SystemTaskStatus `json:"status" gorm:"type:varchar(32);index"`
+	ActiveKey   *string          `json:"active_key,omitempty" gorm:"type:varchar(64);uniqueIndex"`
+	Payload     string           `json:"payload" gorm:"type:text"`
+	State       string           `json:"state" gorm:"type:text"`
+	Result      string           `json:"result" gorm:"type:text"`
+	Error       string           `json:"error" gorm:"type:text"`
+	LockedBy    string           `json:"locked_by" gorm:"type:varchar(128);index"`
+	CreatedAt   int64            `json:"created_at" gorm:"bigint;index"`
+	UpdatedAt   int64            `json:"updated_at" gorm:"bigint;index"`
+	StartedAt   int64            `json:"started_at" gorm:"bigint;index"`
+	CompletedAt int64            `json:"completed_at" gorm:"bigint;index"`
 }
 
 type SystemTaskLock struct {
@@ -51,18 +57,20 @@ type SystemTaskLock struct {
 }
 
 type SystemTaskResponse struct {
-	ID        int64            `json:"id"`
-	TaskID    string           `json:"task_id"`
-	Type      string           `json:"type"`
-	Status    SystemTaskStatus `json:"status"`
-	ActiveKey *string          `json:"active_key,omitempty"`
-	Payload   any              `json:"payload"`
-	State     any              `json:"state"`
-	Result    any              `json:"result"`
-	Error     string           `json:"error"`
-	LockedBy  string           `json:"locked_by"`
-	CreatedAt int64            `json:"created_at"`
-	UpdatedAt int64            `json:"updated_at"`
+	ID          int64            `json:"id"`
+	TaskID      string           `json:"task_id"`
+	Type        string           `json:"type"`
+	Status      SystemTaskStatus `json:"status"`
+	ActiveKey   *string          `json:"active_key,omitempty"`
+	Payload     any              `json:"payload"`
+	State       any              `json:"state"`
+	Result      any              `json:"result"`
+	Error       string           `json:"error"`
+	LockedBy    string           `json:"locked_by"`
+	CreatedAt   int64            `json:"created_at"`
+	UpdatedAt   int64            `json:"updated_at"`
+	StartedAt   int64            `json:"started_at"`
+	CompletedAt int64            `json:"completed_at"`
 }
 
 func (task *SystemTask) BeforeCreate(_ *gorm.DB) error {
@@ -115,6 +123,52 @@ func CreateSystemTask(taskType string, payload any, state any) (*SystemTask, err
 	}
 
 	if err := DB.Create(task).Error; err != nil {
+		return nil, err
+	}
+	return task, nil
+}
+
+func CreateClaimedSystemTask(taskType string, payload any, state any, runnerID string, lockUntil int64) (*SystemTask, error) {
+	taskID, err := GenerateSystemTaskID()
+	if err != nil {
+		return nil, err
+	}
+	payloadText, err := marshalSystemTaskJSON(payload)
+	if err != nil {
+		return nil, err
+	}
+	stateText, err := marshalSystemTaskJSON(state)
+	if err != nil {
+		return nil, err
+	}
+
+	now := common.GetTimestamp()
+	task := &SystemTask{
+		TaskID:    taskID,
+		Type:      taskType,
+		Status:    SystemTaskStatusRunning,
+		ActiveKey: &taskType,
+		Payload:   payloadText,
+		State:     stateText,
+		LockedBy:  runnerID,
+		CreatedAt: now,
+		UpdatedAt: now,
+		StartedAt: now,
+	}
+	lock := &SystemTaskLock{
+		Type:        taskType,
+		TaskID:      taskID,
+		LockedBy:    runnerID,
+		LockedUntil: lockUntil,
+		UpdatedAt:   now,
+	}
+
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(task).Error; err != nil {
+			return err
+		}
+		return tx.Create(lock).Error
+	}); err != nil {
 		return nil, err
 	}
 	return task, nil
@@ -189,6 +243,78 @@ func ListSystemTasks(limit int) ([]*SystemTask, error) {
 	return tasks, err
 }
 
+func ListSystemTasksByTypes(taskTypes []string, limit int) ([]*SystemTask, error) {
+	if len(taskTypes) == 0 {
+		return []*SystemTask{}, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	var tasks []*SystemTask
+	err := DB.Where("type IN ?", taskTypes).Order("id desc").Limit(limit).Find(&tasks).Error
+	return tasks, err
+}
+
+func ListSystemTasksByTypesPaginated(taskTypes []string, page int, pageSize int) ([]*SystemTask, int64, error) {
+	if len(taskTypes) == 0 {
+		return []*SystemTask{}, 0, nil
+	}
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 10
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+
+	query := DB.Model(&SystemTask{}).Where("type IN ?", taskTypes)
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var tasks []*SystemTask
+	err := query.Order("id desc").Offset((page - 1) * pageSize).Limit(pageSize).Find(&tasks).Error
+	return tasks, total, err
+}
+
+func DeleteCompletedSystemTasksByTypes(taskTypes []string) (int64, error) {
+	if len(taskTypes) == 0 {
+		return 0, nil
+	}
+
+	var deletedCount int64
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var activeCount int64
+		if err := tx.Model(&SystemTask{}).
+			Where("type IN ? AND status IN ?", taskTypes, []SystemTaskStatus{SystemTaskStatusPending, SystemTaskStatusRunning}).
+			Count(&activeCount).Error; err != nil {
+			return err
+		}
+		if activeCount > 0 {
+			return ErrActiveSystemTasks
+		}
+
+		completedTaskIDs := tx.Model(&SystemTask{}).
+			Select("task_id").
+			Where("type IN ? AND status NOT IN ?", taskTypes, []SystemTaskStatus{SystemTaskStatusPending, SystemTaskStatusRunning})
+		if err := tx.Where("task_id IN (?)", completedTaskIDs).Delete(&SystemTaskLock{}).Error; err != nil {
+			return err
+		}
+		result := tx.Where("type IN ? AND status NOT IN ?", taskTypes, []SystemTaskStatus{SystemTaskStatusPending, SystemTaskStatusRunning}).Delete(&SystemTask{})
+		if result.Error != nil {
+			return result.Error
+		}
+		deletedCount = result.RowsAffected
+		return nil
+	})
+	return deletedCount, err
+}
+
 // GetLatestSystemTask returns the most recent task row of the given type
 // (any status) so the scheduler can decide whether enough time has elapsed
 // since the last run. Returns (nil, nil) when no row exists.
@@ -250,6 +376,7 @@ func ClaimSystemTask(id int64, taskType string, runnerID string, lockUntil int64
 		Updates(map[string]any{
 			"status":     SystemTaskStatusRunning,
 			"locked_by":  runnerID,
+			"started_at": now,
 			"updated_at": now,
 		})
 	if result.Error != nil {
@@ -348,13 +475,15 @@ func RenewSystemTaskLock(taskID string, lockedBy string, lockUntil int64) error 
 }
 
 func MarkSystemTaskLeaseExpired(taskID string) error {
+	now := common.GetTimestamp()
 	result := DB.Model(&SystemTask{}).
 		Where("task_id = ? AND status = ?", taskID, SystemTaskStatusRunning).
 		Updates(map[string]any{
-			"status":     SystemTaskStatusFailed,
-			"active_key": nil,
-			"error":      "task lease expired",
-			"updated_at": common.GetTimestamp(),
+			"status":       SystemTaskStatusFailed,
+			"active_key":   nil,
+			"error":        "task lease expired",
+			"completed_at": now,
+			"updated_at":   now,
 		})
 	return result.Error
 }
@@ -388,23 +517,34 @@ func FinishSystemTask(taskID string, lockedBy string, status SystemTaskStatus, r
 		return err
 	}
 	now := common.GetTimestamp()
-	result := DB.Model(&SystemTask{}).
-		Where("task_id = ? AND status = ? AND locked_by = ?", taskID, SystemTaskStatusRunning, lockedBy).
-		Where("EXISTS (SELECT 1 FROM system_task_locks WHERE system_task_locks.task_id = system_tasks.task_id AND system_task_locks.locked_by = ? AND system_task_locks.locked_until >= ?)", lockedBy, now).
-		Updates(map[string]any{
-			"status":     status,
-			"active_key": nil,
-			"result":     resultText,
-			"error":      errorMessage,
-			"updated_at": now,
-		})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return ErrSystemTaskLockLost
-	}
-	return ReleaseSystemTaskLock(taskID, lockedBy)
+	return DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&SystemTask{}).
+			Where("task_id = ? AND status = ? AND locked_by = ?", taskID, SystemTaskStatusRunning, lockedBy).
+			Where("EXISTS (SELECT 1 FROM system_task_locks WHERE system_task_locks.task_id = system_tasks.task_id AND system_task_locks.locked_by = ? AND system_task_locks.locked_until >= ?)", lockedBy, now).
+			Updates(map[string]any{
+				"status":       status,
+				"active_key":   nil,
+				"result":       resultText,
+				"error":        errorMessage,
+				"completed_at": now,
+				"updated_at":   now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrSystemTaskLockLost
+		}
+
+		lockResult := tx.Where("task_id = ? AND locked_by = ?", taskID, lockedBy).Delete(&SystemTaskLock{})
+		if lockResult.Error != nil {
+			return lockResult.Error
+		}
+		if lockResult.RowsAffected == 0 {
+			return ErrSystemTaskLockLost
+		}
+		return nil
+	})
 }
 
 func (task *SystemTask) DecodePayload(v any) error {
@@ -417,18 +557,20 @@ func (task *SystemTask) DecodeState(v any) error {
 
 func (task *SystemTask) ToResponse() SystemTaskResponse {
 	return SystemTaskResponse{
-		ID:        task.ID,
-		TaskID:    task.TaskID,
-		Type:      task.Type,
-		Status:    task.Status,
-		ActiveKey: task.ActiveKey,
-		Payload:   decodeSystemTaskJSONValue(task.Payload),
-		State:     decodeSystemTaskJSONValue(task.State),
-		Result:    decodeSystemTaskJSONValue(task.Result),
-		Error:     task.Error,
-		LockedBy:  task.LockedBy,
-		CreatedAt: task.CreatedAt,
-		UpdatedAt: task.UpdatedAt,
+		ID:          task.ID,
+		TaskID:      task.TaskID,
+		Type:        task.Type,
+		Status:      task.Status,
+		ActiveKey:   task.ActiveKey,
+		Payload:     decodeSystemTaskJSONValue(task.Payload),
+		State:       decodeSystemTaskJSONValue(task.State),
+		Result:      decodeSystemTaskJSONValue(task.Result),
+		Error:       task.Error,
+		LockedBy:    task.LockedBy,
+		CreatedAt:   task.CreatedAt,
+		UpdatedAt:   task.UpdatedAt,
+		StartedAt:   task.StartedAt,
+		CompletedAt: task.CompletedAt,
 	}
 }
 

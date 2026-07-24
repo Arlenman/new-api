@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/QuantumNous/new-api/model"
@@ -127,10 +128,12 @@ func TestMatchChannelsForUpstreamCandidateRequiresBaseURLAndSelectedKey(t *testi
 	otherBaseURL := "https://other.example"
 	selectedKey := "sk-selected"
 	otherKey := "sk-other"
+	normalizedBaseURL, err := service.NormalizeUpstreamBaseURL(baseURL)
+	require.NoError(t, err)
 	candidate := upstreamPriorityCandidate{
 		Channel: &model.UpstreamChannel{BaseURL: baseURL},
 		SelectedKeys: []service.UpstreamKey{{
-			KeyFingerprint: model.UpstreamKeyFingerprint(selectedKey),
+			KeyFingerprint: model.UpstreamChannelKeyFingerprint(normalizedBaseURL, selectedKey),
 		}},
 	}
 	channels := []*model.Channel{
@@ -153,4 +156,42 @@ func TestSelectUpstreamPriorityTestChannelPrefersDefaultModel(t *testing.T) {
 	assert.Same(t, matching, selectUpstreamPriorityTestChannel([]*model.Channel{first, matching}, "gpt-4o-mini"))
 	assert.Same(t, first, selectUpstreamPriorityTestChannel([]*model.Channel{first, matching}, "missing-model"))
 	assert.Nil(t, selectUpstreamPriorityTestChannel(nil, "gpt-4o-mini"))
+}
+
+func TestAddUpstreamPriorityIssueCapturesChannelAndHTTPContext(t *testing.T) {
+	summary := upstreamPrioritySyncSummary{Errors: []string{}}
+	channel := &model.UpstreamChannel{
+		Id:       29,
+		Name:     " aiigo ",
+		Provider: service.UpstreamProviderSub2API,
+		BaseURL:  "https://api.aiigo.cloud/",
+	}
+	err := fmt.Errorf("fetch sub2api groups failed: %w", &service.UpstreamHTTPError{
+		StatusCode: 403,
+		Message:    "Forbidden",
+	})
+
+	addUpstreamPriorityIssue(&summary, channel, "refresh_groups", err)
+
+	require.Len(t, summary.Issues, 1)
+	assert.Equal(t, upstreamPriorityIssue{
+		ChannelID:   29,
+		ChannelName: "aiigo",
+		Provider:    service.UpstreamProviderSub2API,
+		Host:        "api.aiigo.cloud",
+		Stage:       "refresh_groups",
+		HTTPStatus:  403,
+		Message:     "fetch sub2api groups failed: upstream returned HTTP 403: Forbidden",
+	}, summary.Issues[0])
+	require.Len(t, summary.Errors, 1)
+	assert.NotContains(t, summary.Errors[0], "<html")
+	require.Len(t, summary.Actions, 1)
+	assert.Equal(t, upstreamPriorityAction{
+		Kind:        "skipped",
+		ChannelID:   29,
+		ChannelName: "aiigo",
+		Provider:    service.UpstreamProviderSub2API,
+		Host:        "api.aiigo.cloud",
+		Message:     "fetch sub2api groups failed: upstream returned HTTP 403: Forbidden",
+	}, summary.Actions[0])
 }

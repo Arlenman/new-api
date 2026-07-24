@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -219,6 +220,97 @@ func EnqueueSystemTask(taskType string, payload any) (*model.SystemTask, bool, e
 	return task, true, nil
 }
 
+// RunSystemTaskImmediately creates a running task record, executes its handler
+// in the caller's request, and returns only after the handler has persisted a
+// terminal state. A separate task type can be used when an immediate action
+// must not wait behind its scheduled counterpart.
+func RunSystemTaskImmediately(ctx context.Context, handler SystemTaskHandler, payload any) (*model.SystemTask, bool, error) {
+	if handler == nil || handler.Type() == "" {
+		return nil, false, errors.New("system task handler is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+
+	taskType := handler.Type()
+	activeTask, err := model.GetActiveSystemTask(taskType)
+	if err != nil {
+		return nil, false, err
+	}
+	if activeTask != nil {
+		return activeTask, false, nil
+	}
+
+	runnerID := fmt.Sprintf("immediate-%s-%s", common.NodeName, common.GetRandomString(8))
+	task, err := model.CreateClaimedSystemTask(taskType, payload, nil, runnerID, systemTaskLockUntil())
+	if err != nil {
+		activeTask, activeErr := model.GetActiveSystemTask(taskType)
+		if activeErr == nil && activeTask != nil {
+			return activeTask, false, nil
+		}
+		return nil, false, err
+	}
+
+	runErr := runWithLeaseHeartbeat(ctx, task, runnerID, func(ctx context.Context) {
+		handler.Run(ctx, task, runnerID)
+	})
+	if runErr != nil {
+		if finishErr := model.FinishSystemTask(
+			task.TaskID,
+			runnerID,
+			model.SystemTaskStatusFailed,
+			nil,
+			runErr.Error(),
+		); finishErr != nil && !errors.Is(finishErr, model.ErrSystemTaskLockLost) {
+			runErr = fmt.Errorf("%w; failed to persist task failure: %v", runErr, finishErr)
+		}
+	}
+
+	finishedTask, err := model.GetSystemTaskByTaskID(task.TaskID)
+	if err != nil {
+		return task, true, err
+	}
+	if finishedTask == nil {
+		return task, true, errors.New("immediate system task record was not found after execution")
+	}
+	if finishedTask.Status == model.SystemTaskStatusPending || finishedTask.Status == model.SystemTaskStatusRunning {
+		handlerErr := errors.New("immediate system task handler returned without finishing the task")
+		if finishErr := model.FinishSystemTask(
+			finishedTask.TaskID,
+			runnerID,
+			model.SystemTaskStatusFailed,
+			nil,
+			handlerErr.Error(),
+		); finishErr != nil {
+			return finishedTask, true, fmt.Errorf("%w: %v", handlerErr, finishErr)
+		}
+		failedTask, reloadErr := model.GetSystemTaskByTaskID(finishedTask.TaskID)
+		if reloadErr != nil {
+			return finishedTask, true, reloadErr
+		}
+		if failedTask != nil {
+			finishedTask = failedTask
+		}
+		return finishedTask, true, handlerErr
+	}
+	if runErr != nil {
+		return finishedTask, true, runErr
+	}
+	if finishedTask.Status == model.SystemTaskStatusFailed {
+		if ctxErr := ctx.Err(); ctxErr != nil && finishedTask.Error == ctxErr.Error() {
+			return finishedTask, true, ctxErr
+		}
+		if finishedTask.Error == "" {
+			return finishedTask, true, errors.New("immediate system task failed")
+		}
+		return finishedTask, true, errors.New(finishedTask.Error)
+	}
+	return finishedTask, true, nil
+}
+
 // runSystemTaskClaimPass tries to claim one pending task per registered type
 // and dispatches each claimed task in its own goroutine so a long-running
 // handler (e.g. channel test) never blocks another type (e.g. log cleanup).
@@ -249,9 +341,21 @@ func runSystemTaskClaimPass(runnerID string) {
 		dispatchHandler := handler
 		dispatchTask := claimedTask
 		gopool.Go(func() {
-			runWithLeaseHeartbeat(dispatchTask, runnerID, func(ctx context.Context) {
+			runErr := runWithLeaseHeartbeat(context.Background(), dispatchTask, runnerID, func(ctx context.Context) {
 				dispatchHandler.Run(ctx, dispatchTask, runnerID)
 			})
+			if runErr == nil {
+				return
+			}
+			if err := model.FinishSystemTask(
+				dispatchTask.TaskID,
+				runnerID,
+				model.SystemTaskStatusFailed,
+				nil,
+				runErr.Error(),
+			); err != nil && !errors.Is(err, model.ErrSystemTaskLockLost) {
+				logger.LogWarn(context.Background(), fmt.Sprintf("system task panic cleanup failed: task_id=%s err=%v", dispatchTask.TaskID, err))
+			}
 		})
 	}
 }
@@ -305,8 +409,11 @@ func runSystemTaskScheduler() {
 // runWithLeaseHeartbeat renews the per-type lock on a background ticker while
 // fn runs. The TTL is a crash-detection window, not a task time limit: an
 // arbitrarily long handler stays alive as long as the heartbeat succeeds.
-func runWithLeaseHeartbeat(task *model.SystemTask, runnerID string, fn func(ctx context.Context)) {
-	ctx, cancel := context.WithCancel(context.Background())
+func runWithLeaseHeartbeat(parent context.Context, task *model.SystemTask, runnerID string, fn func(ctx context.Context)) (runErr error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
 	interval := systemTaskLockTTL / 3
@@ -316,11 +423,14 @@ func runWithLeaseHeartbeat(task *model.SystemTask, runnerID string, fn func(ctx 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	done := make(chan struct{})
+	defer close(done)
 
 	go func() {
 		for {
 			select {
 			case <-done:
+				return
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				if err := model.RenewSystemTaskLock(task.TaskID, runnerID, systemTaskLockUntil()); err != nil {
@@ -331,8 +441,14 @@ func runWithLeaseHeartbeat(task *model.SystemTask, runnerID string, fn func(ctx 
 		}
 	}()
 
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			runErr = fmt.Errorf("system task handler panicked: %v", recovered)
+			logger.LogWarn(context.Background(), fmt.Sprintf("%s\n%s", runErr.Error(), debug.Stack()))
+		}
+	}()
 	fn(ctx)
-	close(done)
+	return nil
 }
 
 func runLogCleanupTask(ctx context.Context, task *model.SystemTask, runnerID string) {

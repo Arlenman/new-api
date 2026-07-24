@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -26,6 +27,18 @@ const (
 type upstreamPriorityScheduleResponse struct {
 	Success bool                                      `json:"success"`
 	Data    operation_setting.UpstreamPrioritySetting `json:"data"`
+}
+
+type upstreamPriorityScheduleRunResponse struct {
+	Success bool                       `json:"success"`
+	Message string                     `json:"message"`
+	Data    upstreamPriorityTaskRecord `json:"data"`
+}
+
+type upstreamPriorityScheduleTaskListResponse struct {
+	Success bool                     `json:"success"`
+	Message string                   `json:"message"`
+	Data    upstreamPriorityTaskPage `json:"data"`
 }
 
 func setupUpstreamPriorityScheduleTest(t *testing.T, migrateSystemTasks bool) *gorm.DB {
@@ -56,7 +69,7 @@ func setupUpstreamPriorityScheduleTest(t *testing.T, migrateSystemTasks bool) *g
 	require.NoError(t, err)
 	models := []any{&model.Option{}}
 	if migrateSystemTasks {
-		models = append(models, &model.SystemTask{}, &model.SystemTaskLock{})
+		models = append(models, &model.SystemTask{}, &model.SystemTaskLock{}, &model.UpstreamChannel{})
 	}
 	require.NoError(t, db.AutoMigrate(models...))
 	model.DB = db
@@ -106,6 +119,31 @@ func performUpstreamPriorityScheduleRequest(t *testing.T, method string, request
 
 	require.Equal(t, http.StatusOK, recorder.Code)
 	var response upstreamPriorityScheduleResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	return response
+}
+
+func performUpstreamPriorityScheduleRunRequest(t *testing.T) (int, upstreamPriorityScheduleRunResponse) {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodPost, "/api/upstream-channels/priority-schedule/run", nil)
+	RunUpstreamPrioritySchedule(context)
+
+	var response upstreamPriorityScheduleRunResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	return recorder.Code, response
+}
+
+func performUpstreamPriorityScheduleTaskListRequest(t *testing.T) upstreamPriorityScheduleTaskListResponse {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodGet, "/api/upstream-channels/priority-schedule/tasks?page=1&page_size=50", nil)
+	ListUpstreamPriorityScheduleTasks(context)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response upstreamPriorityScheduleTaskListResponse
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	return response
 }
@@ -245,4 +283,249 @@ func TestUpdateUpstreamPriorityScheduleSucceedsWhenImmediateEnqueueFails(t *test
 	var optionCount int64
 	require.NoError(t, db.Model(&model.Option{}).Count(&optionCount).Error)
 	assert.Equal(t, int64(3), optionCount)
+}
+
+func TestRunUpstreamPriorityScheduleExecutesImmediatelyWhileScheduleDisabled(t *testing.T) {
+	db := setupUpstreamPriorityScheduleTest(t, true)
+
+	status, response := performUpstreamPriorityScheduleRunRequest(t)
+
+	require.Equal(t, http.StatusOK, status)
+	require.True(t, response.Success)
+	assert.Equal(t, model.SystemTaskStatusSucceeded, response.Data.Status)
+	assert.Equal(t, model.SystemTaskTypeUpstreamPriorityTest, response.Data.Type)
+	assert.Equal(t, "manual", response.Data.Trigger)
+	require.NotEmpty(t, response.Data.TaskID)
+	assert.Positive(t, response.Data.StartedAt)
+	assert.GreaterOrEqual(t, response.Data.CompletedAt, response.Data.StartedAt)
+
+	var task model.SystemTask
+	require.NoError(t, db.Where("task_id = ?", response.Data.TaskID).First(&task).Error)
+	assert.Equal(t, model.SystemTaskTypeUpstreamPriorityTest, task.Type)
+	assert.Equal(t, model.SystemTaskStatusSucceeded, task.Status)
+	assert.Nil(t, task.ActiveKey)
+	assert.Positive(t, task.StartedAt)
+	assert.GreaterOrEqual(t, task.CompletedAt, task.StartedAt)
+	payload := upstreamPrioritySyncTaskPayload{}
+	require.NoError(t, task.DecodePayload(&payload))
+	assert.True(t, payload.Manual)
+
+	var pendingCount int64
+	require.NoError(t, db.Model(&model.SystemTask{}).
+		Where("type = ? AND status = ?", model.SystemTaskTypeUpstreamPriorityTest, model.SystemTaskStatusPending).
+		Count(&pendingCount).Error)
+	assert.Zero(t, pendingCount)
+	var lockCount int64
+	require.NoError(t, db.Model(&model.SystemTaskLock{}).Where("task_id = ?", task.TaskID).Count(&lockCount).Error)
+	assert.Zero(t, lockCount)
+}
+
+func TestRunUpstreamPriorityScheduleRunsWhileScheduledTaskIsActive(t *testing.T) {
+	db := setupUpstreamPriorityScheduleTest(t, true)
+	existing, err := model.CreateSystemTask(model.SystemTaskTypeUpstreamPrioritySync, nil, nil)
+	require.NoError(t, err)
+	claimedScheduled, claimed, err := model.ClaimSystemTask(
+		existing.ID,
+		model.SystemTaskTypeUpstreamPrioritySync,
+		"scheduled-runner",
+		common.GetTimestamp()+60,
+	)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NotNil(t, claimedScheduled)
+
+	status, response := performUpstreamPriorityScheduleRunRequest(t)
+
+	require.Equal(t, http.StatusOK, status)
+	require.True(t, response.Success)
+	assert.Equal(t, model.SystemTaskStatusSucceeded, response.Data.Status)
+	assert.Equal(t, model.SystemTaskTypeUpstreamPriorityTest, response.Data.Type)
+	assert.NotEqual(t, existing.TaskID, response.Data.TaskID)
+
+	var taskCount int64
+	require.NoError(t, db.Model(&model.SystemTask{}).
+		Where("type IN ?", []string{model.SystemTaskTypeUpstreamPrioritySync, model.SystemTaskTypeUpstreamPriorityTest}).
+		Count(&taskCount).Error)
+	assert.Equal(t, int64(2), taskCount)
+
+	reloadedScheduled, err := model.GetSystemTaskByTaskID(existing.TaskID)
+	require.NoError(t, err)
+	require.NotNil(t, reloadedScheduled)
+	assert.Equal(t, model.SystemTaskStatusRunning, reloadedScheduled.Status)
+	require.NoError(t, model.FinishSystemTask(existing.TaskID, "scheduled-runner", model.SystemTaskStatusSucceeded, nil, ""))
+}
+
+func TestRunUpstreamPriorityScheduleRejectsExistingManualTask(t *testing.T) {
+	db := setupUpstreamPriorityScheduleTest(t, true)
+	existing, err := model.CreateSystemTask(model.SystemTaskTypeUpstreamPriorityTest, upstreamPrioritySyncTaskPayload{Manual: true}, nil)
+	require.NoError(t, err)
+
+	status, response := performUpstreamPriorityScheduleRunRequest(t)
+
+	require.Equal(t, http.StatusConflict, status)
+	assert.False(t, response.Success)
+	assert.Equal(t, existing.TaskID, response.Data.TaskID)
+	assert.Contains(t, response.Message, "手动上游优先级测试正在执行")
+	var taskCount int64
+	require.NoError(t, db.Model(&model.SystemTask{}).Where("type = ?", model.SystemTaskTypeUpstreamPriorityTest).Count(&taskCount).Error)
+	assert.Equal(t, int64(1), taskCount)
+}
+
+func TestListUpstreamPriorityScheduleTasksReturnsExecutionRecords(t *testing.T) {
+	db := setupUpstreamPriorityScheduleTest(t, true)
+	now := common.GetTimestamp()
+	resultJSON, err := common.Marshal(upstreamPrioritySyncSummary{
+		Refreshed:       4,
+		Ranked:          3,
+		Tested:          2,
+		Passed:          1,
+		PriorityUpdated: 2,
+		Skipped:         1,
+		Errors:          []string{"one channel failed"},
+	})
+	require.NoError(t, err)
+	legacyManualPayload, err := common.Marshal(upstreamPrioritySyncTaskPayload{Manual: true})
+	require.NoError(t, err)
+
+	tasks := []*model.SystemTask{
+		{
+			TaskID:      "systask_scheduled",
+			Type:        model.SystemTaskTypeUpstreamPrioritySync,
+			Status:      model.SystemTaskStatusSucceeded,
+			Result:      string(resultJSON),
+			CreatedAt:   now - 20,
+			UpdatedAt:   now - 12,
+			StartedAt:   now - 18,
+			CompletedAt: now - 12,
+		},
+		{
+			TaskID:    "systask_legacy_manual",
+			Type:      model.SystemTaskTypeUpstreamPrioritySync,
+			Status:    model.SystemTaskStatusFailed,
+			Payload:   string(legacyManualPayload),
+			Error:     "legacy failure",
+			CreatedAt: now - 10,
+			UpdatedAt: now - 4,
+		},
+		{
+			TaskID:      "systask_manual",
+			Type:        model.SystemTaskTypeUpstreamPriorityTest,
+			Status:      model.SystemTaskStatusSucceeded,
+			Result:      string(resultJSON),
+			CreatedAt:   now - 3,
+			UpdatedAt:   now - 1,
+			StartedAt:   now - 3,
+			CompletedAt: now - 1,
+		},
+		{
+			TaskID:    "systask_unrelated",
+			Type:      model.SystemTaskTypeLogCleanup,
+			Status:    model.SystemTaskStatusSucceeded,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+	for _, task := range tasks {
+		require.NoError(t, db.Create(task).Error)
+	}
+
+	response := performUpstreamPriorityScheduleTaskListRequest(t)
+
+	require.True(t, response.Success)
+	require.Len(t, response.Data.Items, 3)
+	assert.Equal(t, 1, response.Data.Page)
+	assert.Equal(t, 50, response.Data.PageSize)
+	assert.Equal(t, int64(3), response.Data.Total)
+	assert.Equal(t, "systask_manual", response.Data.Items[0].TaskID)
+	assert.Equal(t, "manual", response.Data.Items[0].Trigger)
+	require.NotNil(t, response.Data.Items[0].DurationMS)
+	assert.Equal(t, int64(2000), *response.Data.Items[0].DurationMS)
+	assert.Equal(t, "systask_legacy_manual", response.Data.Items[1].TaskID)
+	assert.Equal(t, "manual", response.Data.Items[1].Trigger)
+	assert.Equal(t, now-10, response.Data.Items[1].StartedAt)
+	assert.Equal(t, now-4, response.Data.Items[1].CompletedAt)
+	require.NotNil(t, response.Data.Items[1].DurationMS)
+	assert.Equal(t, int64(6000), *response.Data.Items[1].DurationMS)
+	assert.Equal(t, "legacy failure", response.Data.Items[1].Error)
+	assert.Equal(t, "systask_scheduled", response.Data.Items[2].TaskID)
+	assert.Equal(t, "scheduled", response.Data.Items[2].Trigger)
+	require.NotNil(t, response.Data.Items[2].DurationMS)
+	assert.Equal(t, int64(6000), *response.Data.Items[2].DurationMS)
+	assert.NotNil(t, response.Data.Items[2].Result)
+}
+
+func TestBuildUpstreamPriorityTaskRecordLeavesPendingDurationEmpty(t *testing.T) {
+	record := buildUpstreamPriorityTaskRecord(&model.SystemTask{
+		TaskID:    "systask_pending",
+		Type:      model.SystemTaskTypeUpstreamPrioritySync,
+		Status:    model.SystemTaskStatusPending,
+		CreatedAt: common.GetTimestamp(),
+	})
+
+	assert.Zero(t, record.StartedAt)
+	assert.Zero(t, record.CompletedAt)
+	assert.Nil(t, record.DurationMS)
+}
+
+func TestListUpstreamPriorityScheduleTasksAddsHostToLegacyErrors(t *testing.T) {
+	db := setupUpstreamPriorityScheduleTest(t, true)
+	channel := &model.UpstreamChannel{Name: "Legacy channel", BaseURL: "https://api.example.com/v1", Provider: "new-api"}
+	require.NoError(t, db.Create(channel).Error)
+	resultJSON, err := common.Marshal(map[string]any{
+		"errors": []string{"upstream channel " + strconv.Itoa(channel.Id) + " refresh failed: unauthorized"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.Create(&model.SystemTask{
+		TaskID: "systask_legacy_host",
+		Type:   model.SystemTaskTypeUpstreamPrioritySync,
+		Status: model.SystemTaskStatusFailed,
+		Result: string(resultJSON),
+	}).Error)
+
+	response := performUpstreamPriorityScheduleTaskListRequest(t)
+	require.Len(t, response.Data.Items, 1)
+	result, ok := response.Data.Items[0].Result.(map[string]any)
+	require.True(t, ok)
+	issues, ok := result["issues"].([]any)
+	require.True(t, ok)
+	require.Len(t, issues, 1)
+	issue, ok := issues[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "api.example.com", issue["host"])
+	assert.Equal(t, "Legacy channel", issue["channel_name"])
+}
+
+func TestClearUpstreamPriorityScheduleTasksDeletesCompletedRecords(t *testing.T) {
+	db := setupUpstreamPriorityScheduleTest(t, true)
+	require.NoError(t, db.Create(&model.SystemTask{TaskID: "systask_clear", Type: model.SystemTaskTypeUpstreamPrioritySync, Status: model.SystemTaskStatusSucceeded}).Error)
+	require.NoError(t, db.Create(&model.SystemTask{TaskID: "systask_keep", Type: model.SystemTaskTypeLogCleanup, Status: model.SystemTaskStatusSucceeded}).Error)
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodDelete, "/api/upstream-channels/priority-schedule/tasks", nil)
+	ClearUpstreamPriorityScheduleTasks(context)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var targetCount int64
+	require.NoError(t, db.Unscoped().Model(&model.SystemTask{}).Where("task_id = ?", "systask_clear").Count(&targetCount).Error)
+	assert.Zero(t, targetCount)
+	var unrelatedCount int64
+	require.NoError(t, db.Model(&model.SystemTask{}).Where("task_id = ?", "systask_keep").Count(&unrelatedCount).Error)
+	assert.Equal(t, int64(1), unrelatedCount)
+}
+
+func TestClearUpstreamPriorityScheduleTasksRejectsActiveTask(t *testing.T) {
+	db := setupUpstreamPriorityScheduleTest(t, true)
+	activeType := model.SystemTaskTypeUpstreamPrioritySync
+	require.NoError(t, db.Create(&model.SystemTask{TaskID: "systask_active_clear", Type: activeType, Status: model.SystemTaskStatusRunning, ActiveKey: &activeType}).Error)
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodDelete, "/api/upstream-channels/priority-schedule/tasks", nil)
+	ClearUpstreamPriorityScheduleTasks(context)
+
+	assert.Equal(t, http.StatusConflict, recorder.Code)
+	var count int64
+	require.NoError(t, db.Model(&model.SystemTask{}).Where("task_id = ?", "systask_active_clear").Count(&count).Error)
+	assert.Equal(t, int64(1), count)
 }

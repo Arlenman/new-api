@@ -57,6 +57,7 @@ func TestSystemTaskCreateAndActiveLifecycle(t *testing.T) {
 	claimedTask, claimed, err := ClaimSystemTask(task.ID, SystemTaskTypeLogCleanup, runnerID, common.GetTimestamp()+60)
 	require.NoError(t, err)
 	require.True(t, claimed)
+	assert.Positive(t, claimedTask.StartedAt)
 
 	err = FinishSystemTask(claimedTask.TaskID, runnerID, SystemTaskStatusSucceeded, map[string]int64{"deleted_count": 0}, "")
 	require.NoError(t, err)
@@ -65,6 +66,8 @@ func TestSystemTaskCreateAndActiveLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, finishedTask)
 	assert.Nil(t, finishedTask.ActiveKey)
+	assert.Positive(t, finishedTask.CompletedAt)
+	assert.GreaterOrEqual(t, finishedTask.CompletedAt, finishedTask.StartedAt)
 
 	activeTask, err = GetActiveSystemTask(SystemTaskTypeLogCleanup)
 	require.NoError(t, err)
@@ -72,6 +75,61 @@ func TestSystemTaskCreateAndActiveLifecycle(t *testing.T) {
 
 	_, err = CreateSystemTask(SystemTaskTypeLogCleanup, payload, state)
 	require.NoError(t, err)
+}
+
+func TestCreateClaimedSystemTaskCreatesRunningTaskAndLock(t *testing.T) {
+	truncateTables(t)
+
+	runnerID := "runner-immediate"
+	task, err := CreateClaimedSystemTask(
+		SystemTaskTypeUpstreamPriorityTest,
+		testSystemTaskPayload{TargetTimestamp: 1000, BatchSize: 100},
+		testSystemTaskState{},
+		runnerID,
+		common.GetTimestamp()+60,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	assert.Equal(t, SystemTaskStatusRunning, task.Status)
+	assert.Equal(t, runnerID, task.LockedBy)
+	assert.Positive(t, task.StartedAt)
+	require.NotNil(t, task.ActiveKey)
+	assert.Equal(t, SystemTaskTypeUpstreamPriorityTest, *task.ActiveKey)
+
+	var lock SystemTaskLock
+	require.NoError(t, DB.Where("task_id = ?", task.TaskID).First(&lock).Error)
+	assert.Equal(t, SystemTaskTypeUpstreamPriorityTest, lock.Type)
+	assert.Equal(t, runnerID, lock.LockedBy)
+
+	var pendingCount int64
+	require.NoError(t, DB.Model(&SystemTask{}).
+		Where("task_id = ? AND status = ?", task.TaskID, SystemTaskStatusPending).
+		Count(&pendingCount).Error)
+	assert.Zero(t, pendingCount)
+
+	require.NoError(t, FinishSystemTask(task.TaskID, runnerID, SystemTaskStatusSucceeded, nil, ""))
+}
+
+func TestListSystemTasksByTypesFiltersAndOrders(t *testing.T) {
+	truncateTables(t)
+
+	tasks := []*SystemTask{
+		{TaskID: "systask_priority_scheduled", Type: SystemTaskTypeUpstreamPrioritySync, Status: SystemTaskStatusSucceeded},
+		{TaskID: "systask_unrelated", Type: SystemTaskTypeLogCleanup, Status: SystemTaskStatusSucceeded},
+		{TaskID: "systask_priority_manual", Type: SystemTaskTypeUpstreamPriorityTest, Status: SystemTaskStatusFailed},
+	}
+	for _, task := range tasks {
+		require.NoError(t, DB.Create(task).Error)
+	}
+
+	listed, err := ListSystemTasksByTypes([]string{
+		SystemTaskTypeUpstreamPrioritySync,
+		SystemTaskTypeUpstreamPriorityTest,
+	}, 50)
+	require.NoError(t, err)
+	require.Len(t, listed, 2)
+	assert.Equal(t, "systask_priority_manual", listed[0].TaskID)
+	assert.Equal(t, "systask_priority_scheduled", listed[1].TaskID)
 }
 
 func TestSystemTaskActiveKeyPreventsDuplicateActiveRun(t *testing.T) {
@@ -349,4 +407,61 @@ func TestSystemTaskUpdatesRequireUnexpiredLock(t *testing.T) {
 	require.NotNil(t, reloaded)
 	assert.Equal(t, SystemTaskStatusRunning, reloaded.Status)
 	assert.Empty(t, reloaded.State)
+}
+
+func TestListSystemTasksByTypesPaginated(t *testing.T) {
+	truncateTables(t)
+	for index := 1; index <= 5; index++ {
+		require.NoError(t, DB.Create(&SystemTask{
+			TaskID: "systask_page_" + string(rune('0'+index)),
+			Type:   SystemTaskTypeUpstreamPrioritySync,
+			Status: SystemTaskStatusSucceeded,
+		}).Error)
+	}
+	require.NoError(t, DB.Create(&SystemTask{TaskID: "systask_other", Type: SystemTaskTypeLogCleanup, Status: SystemTaskStatusSucceeded}).Error)
+
+	tasks, total, err := ListSystemTasksByTypesPaginated([]string{SystemTaskTypeUpstreamPrioritySync}, 2, 2)
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), total)
+	require.Len(t, tasks, 2)
+	assert.Equal(t, "systask_page_3", tasks[0].TaskID)
+	assert.Equal(t, "systask_page_2", tasks[1].TaskID)
+}
+
+func TestDeleteCompletedSystemTasksByTypesPhysicallyDeletesOnlyTargetTasks(t *testing.T) {
+	truncateTables(t)
+	target := &SystemTask{TaskID: "systask_delete_target", Type: SystemTaskTypeUpstreamPrioritySync, Status: SystemTaskStatusSucceeded}
+	unrelated := &SystemTask{TaskID: "systask_keep_other", Type: SystemTaskTypeLogCleanup, Status: SystemTaskStatusSucceeded}
+	require.NoError(t, DB.Create(target).Error)
+	require.NoError(t, DB.Create(unrelated).Error)
+	require.NoError(t, DB.Create(&SystemTaskLock{Type: SystemTaskTypeUpstreamPrioritySync, TaskID: target.TaskID, LockedBy: "old"}).Error)
+
+	deleted, err := DeleteCompletedSystemTasksByTypes([]string{SystemTaskTypeUpstreamPrioritySync, SystemTaskTypeUpstreamPriorityTest})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), deleted)
+	var targetCount int64
+	require.NoError(t, DB.Unscoped().Model(&SystemTask{}).Where("task_id = ?", target.TaskID).Count(&targetCount).Error)
+	assert.Zero(t, targetCount)
+	var lockCount int64
+	require.NoError(t, DB.Model(&SystemTaskLock{}).Where("task_id = ?", target.TaskID).Count(&lockCount).Error)
+	assert.Zero(t, lockCount)
+	var unrelatedCount int64
+	require.NoError(t, DB.Model(&SystemTask{}).Where("task_id = ?", unrelated.TaskID).Count(&unrelatedCount).Error)
+	assert.Equal(t, int64(1), unrelatedCount)
+}
+
+func TestDeleteCompletedSystemTasksByTypesRejectsActiveTasks(t *testing.T) {
+	truncateTables(t)
+	activeType := SystemTaskTypeUpstreamPrioritySync
+	active := &SystemTask{TaskID: "systask_active", Type: activeType, Status: SystemTaskStatusRunning, ActiveKey: &activeType}
+	completed := &SystemTask{TaskID: "systask_completed", Type: SystemTaskTypeUpstreamPriorityTest, Status: SystemTaskStatusFailed}
+	require.NoError(t, DB.Create(active).Error)
+	require.NoError(t, DB.Create(completed).Error)
+
+	deleted, err := DeleteCompletedSystemTasksByTypes([]string{SystemTaskTypeUpstreamPrioritySync, SystemTaskTypeUpstreamPriorityTest})
+	require.ErrorIs(t, err, ErrActiveSystemTasks)
+	assert.Zero(t, deleted)
+	var count int64
+	require.NoError(t, DB.Model(&SystemTask{}).Where("task_id IN ?", []string{active.TaskID, completed.TaskID}).Count(&count).Error)
+	assert.Equal(t, int64(2), count)
 }

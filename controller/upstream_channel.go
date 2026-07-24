@@ -2,9 +2,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -93,6 +96,26 @@ type updateUpstreamPriorityScheduleRequest struct {
 	Enabled               bool `json:"enabled"`
 	IntervalSeconds       int  `json:"interval_seconds"`
 	MaxTestLatencySeconds int  `json:"max_test_latency_seconds"`
+}
+
+type upstreamPriorityTaskPage struct {
+	Items    []upstreamPriorityTaskRecord `json:"items"`
+	Page     int                          `json:"page"`
+	PageSize int                          `json:"page_size"`
+	Total    int64                        `json:"total"`
+}
+
+type upstreamPriorityTaskRecord struct {
+	TaskID      string                 `json:"task_id"`
+	Type        string                 `json:"type"`
+	Status      model.SystemTaskStatus `json:"status"`
+	Trigger     string                 `json:"trigger"`
+	CreatedAt   int64                  `json:"created_at"`
+	StartedAt   int64                  `json:"started_at"`
+	CompletedAt int64                  `json:"completed_at"`
+	DurationMS  *int64                 `json:"duration_ms"`
+	Result      any                    `json:"result"`
+	Error       string                 `json:"error"`
 }
 
 type importUpstreamChannelKeysRequest struct {
@@ -400,6 +423,173 @@ func UpdateUpstreamChannelDefaultTestModel(c *gin.Context) {
 
 func GetUpstreamPrioritySchedule(c *gin.Context) {
 	common.ApiSuccess(c, operation_setting.GetUpstreamPrioritySetting())
+}
+
+func RunUpstreamPrioritySchedule(c *gin.Context) {
+	task, started, err := service.RunSystemTaskImmediately(c.Request.Context(), upstreamPriorityTestHandler{}, upstreamPrioritySyncTaskPayload{Manual: true})
+	if err != nil {
+		if task == nil {
+			common.ApiError(c, err)
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": err.Error(),
+			"data":    buildUpstreamPriorityTaskRecord(task),
+		})
+		return
+	}
+	if !started {
+		c.JSON(http.StatusConflict, gin.H{
+			"success": false,
+			"message": "已有手动上游优先级测试正在执行，请等待本次测试完成",
+			"data":    buildUpstreamPriorityTaskRecord(task),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    buildUpstreamPriorityTaskRecord(task),
+	})
+}
+
+func ListUpstreamPriorityScheduleTasks(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 10
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	taskTypes := []string{
+		model.SystemTaskTypeUpstreamPrioritySync,
+		model.SystemTaskTypeUpstreamPriorityTest,
+	}
+	tasks, total, err := model.ListSystemTasksByTypesPaginated(taskTypes, page, pageSize)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	channelIDPattern := regexp.MustCompile(`(?i)upstream channel\s+(\d+)`)
+	channelCache := map[int]*model.UpstreamChannel{}
+	records := make([]upstreamPriorityTaskRecord, 0, len(tasks))
+	for _, task := range tasks {
+		record := buildUpstreamPriorityTaskRecord(task)
+		resultMap, ok := record.Result.(map[string]any)
+		if !ok {
+			resultBytes, marshalErr := common.Marshal(record.Result)
+			if marshalErr == nil {
+				_ = common.Unmarshal(resultBytes, &resultMap)
+			}
+		}
+		if resultMap != nil {
+			issues, hasIssues := resultMap["issues"].([]any)
+			if !hasIssues || len(issues) == 0 {
+				legacyErrors, _ := resultMap["errors"].([]any)
+				for _, legacyError := range legacyErrors {
+					message, ok := legacyError.(string)
+					if !ok {
+						continue
+					}
+					matches := channelIDPattern.FindStringSubmatch(message)
+					if len(matches) != 2 {
+						continue
+					}
+					channelID, parseErr := strconv.Atoi(matches[1])
+					if parseErr != nil {
+						continue
+					}
+					channel, cached := channelCache[channelID]
+					if !cached {
+						channel, _ = model.GetUpstreamChannelByID(channelID)
+						channelCache[channelID] = channel
+					}
+					issue := map[string]any{"channel_id": channelID, "message": message}
+					if channel != nil {
+						issue["channel_name"] = strings.TrimSpace(channel.Name)
+						issue["provider"] = strings.TrimSpace(channel.Provider)
+						if parsedURL, parseURLErr := url.Parse(strings.TrimSpace(channel.BaseURL)); parseURLErr == nil {
+							issue["host"] = parsedURL.Hostname()
+						}
+					}
+					issues = append(issues, issue)
+				}
+				if len(issues) > 0 {
+					resultMap["issues"] = issues
+					record.Result = resultMap
+				}
+			}
+		}
+		records = append(records, record)
+	}
+	common.ApiSuccess(c, upstreamPriorityTaskPage{Items: records, Page: page, PageSize: pageSize, Total: total})
+}
+
+func ClearUpstreamPriorityScheduleTasks(c *gin.Context) {
+	deletedCount, err := model.DeleteCompletedSystemTasksByTypes([]string{
+		model.SystemTaskTypeUpstreamPrioritySync,
+		model.SystemTaskTypeUpstreamPriorityTest,
+	})
+	if err != nil {
+		if errors.Is(err, model.ErrActiveSystemTasks) {
+			c.JSON(http.StatusConflict, gin.H{"success": false, "message": "存在正在执行的优先级任务，请等待任务完成后再清空"})
+			return
+		}
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, gin.H{"deleted_count": deletedCount})
+}
+
+func buildUpstreamPriorityTaskRecord(task *model.SystemTask) upstreamPriorityTaskRecord {
+	if task == nil {
+		return upstreamPriorityTaskRecord{}
+	}
+
+	payload := upstreamPrioritySyncTaskPayload{}
+	_ = task.DecodePayload(&payload)
+	trigger := "scheduled"
+	if task.Type == model.SystemTaskTypeUpstreamPriorityTest || payload.Manual {
+		trigger = "manual"
+	}
+
+	startedAt := task.StartedAt
+	if startedAt == 0 && task.Status != model.SystemTaskStatusPending {
+		startedAt = task.CreatedAt
+	}
+	completedAt := task.CompletedAt
+	if completedAt == 0 && (task.Status == model.SystemTaskStatusSucceeded || task.Status == model.SystemTaskStatusFailed) {
+		completedAt = task.UpdatedAt
+	}
+	endAt := completedAt
+	if endAt == 0 && task.Status == model.SystemTaskStatusRunning {
+		endAt = common.GetTimestamp()
+	}
+	var durationMS *int64
+	if startedAt > 0 && endAt >= startedAt {
+		value := (endAt - startedAt) * 1000
+		durationMS = &value
+	}
+
+	return upstreamPriorityTaskRecord{
+		TaskID:      task.TaskID,
+		Type:        task.Type,
+		Status:      task.Status,
+		Trigger:     trigger,
+		CreatedAt:   task.CreatedAt,
+		StartedAt:   startedAt,
+		CompletedAt: completedAt,
+		DurationMS:  durationMS,
+		Result:      task.ToResponse().Result,
+		Error:       task.Error,
+	}
 }
 
 func UpdateUpstreamPrioritySchedule(c *gin.Context) {

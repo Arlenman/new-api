@@ -232,3 +232,197 @@ func TestEnqueueSystemTaskReportsCreatedAndExistingActive(t *testing.T) {
 	require.NotNil(t, second)
 	assert.NotEqual(t, first.TaskID, second.TaskID)
 }
+
+func TestRunSystemTaskImmediatelyExecutesToTerminalState(t *testing.T) {
+	truncate(t)
+
+	handler := &stubScheduledHandler{
+		taskType: "test_immediate_success",
+		onRun: func(_ context.Context, task *model.SystemTask, runnerID string) {
+			require.Equal(t, model.SystemTaskStatusRunning, task.Status)
+			require.NoError(t, model.FinishSystemTask(
+				task.TaskID,
+				runnerID,
+				model.SystemTaskStatusSucceeded,
+				map[string]int{"completed": 1},
+				"",
+			))
+		},
+	}
+
+	task, started, err := RunSystemTaskImmediately(context.Background(), handler, map[string]bool{"manual": true})
+	require.NoError(t, err)
+	require.True(t, started)
+	require.NotNil(t, task)
+	assert.Equal(t, model.SystemTaskStatusSucceeded, task.Status)
+	assert.Positive(t, task.StartedAt)
+	assert.GreaterOrEqual(t, task.CompletedAt, task.StartedAt)
+	assert.Equal(t, int64(1), countSystemTasks(t, handler.taskType))
+
+	var pendingCount int64
+	require.NoError(t, model.DB.Model(&model.SystemTask{}).
+		Where("type = ? AND status = ?", handler.taskType, model.SystemTaskStatusPending).
+		Count(&pendingCount).Error)
+	assert.Zero(t, pendingCount)
+	var lockCount int64
+	require.NoError(t, model.DB.Model(&model.SystemTaskLock{}).Where("task_id = ?", task.TaskID).Count(&lockCount).Error)
+	assert.Zero(t, lockCount)
+}
+
+func TestRunSystemTaskImmediatelyReturnsExistingSameTypeTask(t *testing.T) {
+	truncate(t)
+
+	handlerRan := false
+	handler := &stubScheduledHandler{
+		taskType: "test_immediate_dedup",
+		onRun: func(_ context.Context, _ *model.SystemTask, _ string) {
+			handlerRan = true
+		},
+	}
+	existing, err := model.CreateSystemTask(handler.taskType, nil, nil)
+	require.NoError(t, err)
+
+	task, started, err := RunSystemTaskImmediately(context.Background(), handler, nil)
+	require.NoError(t, err)
+	require.False(t, started)
+	require.NotNil(t, task)
+	assert.Equal(t, existing.TaskID, task.TaskID)
+	assert.False(t, handlerRan)
+	assert.Equal(t, int64(1), countSystemTasks(t, handler.taskType))
+}
+
+func TestRunSystemTaskImmediatelyFailsHandlerThatDoesNotFinish(t *testing.T) {
+	truncate(t)
+
+	handler := &stubScheduledHandler{taskType: "test_immediate_unfinished"}
+	task, started, err := RunSystemTaskImmediately(context.Background(), handler, nil)
+	require.Error(t, err)
+	require.True(t, started)
+	require.NotNil(t, task)
+	assert.Equal(t, model.SystemTaskStatusFailed, task.Status)
+	assert.Contains(t, task.Error, "returned without finishing")
+	assert.Positive(t, task.CompletedAt)
+
+	var lockCount int64
+	require.NoError(t, model.DB.Model(&model.SystemTaskLock{}).Where("task_id = ?", task.TaskID).Count(&lockCount).Error)
+	assert.Zero(t, lockCount)
+}
+
+func TestRunSystemTaskImmediatelyCleansUpPanickingHandler(t *testing.T) {
+	truncate(t)
+
+	panicHandler := &stubScheduledHandler{
+		taskType: "test_immediate_panic",
+		onRun: func(_ context.Context, _ *model.SystemTask, _ string) {
+			panic("boom")
+		},
+	}
+
+	task, started, err := RunSystemTaskImmediately(context.Background(), panicHandler, nil)
+	require.Error(t, err)
+	require.True(t, started)
+	require.NotNil(t, task)
+	assert.Equal(t, model.SystemTaskStatusFailed, task.Status)
+	assert.Contains(t, task.Error, "handler panicked: boom")
+	assert.Positive(t, task.CompletedAt)
+
+	var lockCount int64
+	require.NoError(t, model.DB.Model(&model.SystemTaskLock{}).Where("task_id = ?", task.TaskID).Count(&lockCount).Error)
+	assert.Zero(t, lockCount)
+
+	recoveryHandler := &stubScheduledHandler{
+		taskType: panicHandler.taskType,
+		onRun: func(_ context.Context, task *model.SystemTask, runnerID string) {
+			require.NoError(t, model.FinishSystemTask(task.TaskID, runnerID, model.SystemTaskStatusSucceeded, nil, ""))
+		},
+	}
+	recoveredTask, recoveredStarted, recoveredErr := RunSystemTaskImmediately(context.Background(), recoveryHandler, nil)
+	require.NoError(t, recoveredErr)
+	require.True(t, recoveredStarted)
+	require.NotNil(t, recoveredTask)
+	assert.Equal(t, model.SystemTaskStatusSucceeded, recoveredTask.Status)
+}
+
+func TestRunSystemTaskImmediatelyAllowsOnlyOneConcurrentRun(t *testing.T) {
+	truncate(t)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	firstResult := make(chan stubSystemTaskRunResult, 1)
+	handler := &stubScheduledHandler{
+		taskType: "test_immediate_concurrent",
+		onRun: func(_ context.Context, task *model.SystemTask, runnerID string) {
+			close(entered)
+			<-release
+			firstResult <- stubSystemTaskRunResult{
+				taskID: task.TaskID,
+				err: model.FinishSystemTask(
+					task.TaskID,
+					runnerID,
+					model.SystemTaskStatusSucceeded,
+					nil,
+					"",
+				),
+			}
+		},
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, _, err := RunSystemTaskImmediately(context.Background(), handler, nil)
+		firstDone <- err
+	}()
+	<-entered
+
+	existing, started, err := RunSystemTaskImmediately(context.Background(), handler, nil)
+	require.NoError(t, err)
+	require.False(t, started)
+	require.NotNil(t, existing)
+	assert.Equal(t, model.SystemTaskStatusRunning, existing.Status)
+	assert.Equal(t, int64(1), countSystemTasks(t, handler.taskType))
+
+	close(release)
+	runResult := <-firstResult
+	require.NoError(t, runResult.err)
+	assert.Equal(t, existing.TaskID, runResult.taskID)
+	require.NoError(t, <-firstDone)
+}
+
+func TestRunSystemTaskImmediatelyPropagatesRequestCancellation(t *testing.T) {
+	truncate(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	entered := make(chan struct{})
+	handler := &stubScheduledHandler{
+		taskType: "test_immediate_cancel",
+		onRun: func(ctx context.Context, task *model.SystemTask, runnerID string) {
+			close(entered)
+			<-ctx.Done()
+			require.NoError(t, model.FinishSystemTask(
+				task.TaskID,
+				runnerID,
+				model.SystemTaskStatusFailed,
+				nil,
+				ctx.Err().Error(),
+			))
+		},
+	}
+
+	type immediateResult struct {
+		task *model.SystemTask
+		err  error
+	}
+	done := make(chan immediateResult, 1)
+	go func() {
+		task, _, err := RunSystemTaskImmediately(ctx, handler, nil)
+		done <- immediateResult{task: task, err: err}
+	}()
+	<-entered
+	cancel()
+
+	result := <-done
+	require.ErrorIs(t, result.err, context.Canceled)
+	require.NotNil(t, result.task)
+	assert.Equal(t, model.SystemTaskStatusFailed, result.task.Status)
+	assert.Equal(t, context.Canceled.Error(), result.task.Error)
+}
