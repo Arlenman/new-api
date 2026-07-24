@@ -303,6 +303,132 @@ func TestFetchNewAPIKeysLoadsEveryPage(t *testing.T) {
 	assert.Equal(t, int64(2), keys[1].ID)
 }
 
+func TestFetchUpstreamKeysRevealsAsteriskMaskedNewAPIKey(t *testing.T) {
+	const fullKey = "new-api-key-without-prefix"
+	revealRequested := false
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/api/status":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"quota_per_unit":1000000}}`, nil), nil
+		case "/api/token":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"page":1,"page_size":100,"total":1,"items":[{"id":7,"name":"masked","key":"new-**********efix","group":"default","status":1}]}}`, nil), nil
+		case "/api/token/7/key":
+			revealRequested = true
+			require.Equal(t, http.MethodPost, r.Method)
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"`+fullKey+`"}}`, nil), nil
+		default:
+			require.Failf(t, "unexpected upstream request", "%s %s", r.Method, r.URL.String())
+			return nil, nil
+		}
+	})}
+
+	snapshot, err := FetchUpstreamKeys(context.Background(), client, "https://upstream.test", UpstreamProviderNewAPI, UpstreamCredential{
+		AuthType: model.UpstreamAuthTypeAccessToken,
+		Username: "42",
+		Password: "management-token",
+	})
+	require.NoError(t, err)
+	require.Len(t, snapshot.Keys, 1)
+	assert.True(t, revealRequested)
+	assert.Equal(t, UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, "https://upstream.test", fullKey), snapshot.Keys[0].KeyFingerprint)
+	assert.NotEqual(t, fullKey, snapshot.Keys[0].MaskedKey)
+}
+
+func TestMaskedUpstreamKeyCouldMatchAnyUsesProviderSemantics(t *testing.T) {
+	tests := []struct {
+		name       string
+		provider   string
+		maskedKey  string
+		localKeys  []string
+		couldMatch bool
+	}{
+		{
+			name:       "new-api local sk prefix is optional",
+			provider:   UpstreamProviderNewAPI,
+			maskedKey:  "abcd****...wxyz",
+			localKeys:  []string{"sk-abcd-middle-wxyz"},
+			couldMatch: true,
+		},
+		{
+			name:       "new-api masked sk prefix is optional",
+			provider:   UpstreamProviderNewAPI,
+			maskedKey:  "sk-abcd...wxyz",
+			localKeys:  []string{"abcd-middle-wxyz"},
+			couldMatch: true,
+		},
+		{
+			name:       "sub2api keeps sk prefix exact",
+			provider:   UpstreamProviderSub2API,
+			maskedKey:  "abcd****...wxyz",
+			localKeys:  []string{"sk-abcd-middle-wxyz"},
+			couldMatch: false,
+		},
+		{
+			name:       "visible suffix excludes candidate",
+			provider:   UpstreamProviderNewAPI,
+			maskedKey:  "abcd****...wxyz",
+			localKeys:  []string{"sk-abcd-middle-nope"},
+			couldMatch: false,
+		},
+		{
+			name:       "fully masked key cannot be safely excluded",
+			provider:   UpstreamProviderNewAPI,
+			maskedKey:  "****",
+			localKeys:  []string{"sk-any-local-key"},
+			couldMatch: true,
+		},
+		{
+			name:       "no local candidates need no reveal",
+			provider:   UpstreamProviderNewAPI,
+			maskedKey:  "****",
+			localKeys:  nil,
+			couldMatch: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.couldMatch, maskedUpstreamKeyCouldMatchAny(test.provider, test.maskedKey, test.localKeys))
+		})
+	}
+}
+
+func TestFetchUpstreamKeysForLinkUsesSub2APIRevealRouteForMatchingCandidateOnly(t *testing.T) {
+	const accessToken = "sub2-link-access-token"
+	revealedKeyIDs := make([]string, 0, 1)
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		require.Equal(t, "Bearer "+accessToken, request.Header.Get("Authorization"))
+		switch request.URL.Path {
+		case "/api/v1/keys":
+			return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":{"page":1,"page_size":100,"total":2,"pages":1,"items":[{"id":3,"name":"matching","key":"sk-m****...cret","group_id":5,"status":"active"},{"id":4,"name":"prefix differs","key":"stri****...cret","group_id":5,"status":"active"}]}}`, nil), nil
+		case "/api/v1/keys/3":
+			revealedKeyIDs = append(revealedKeyIDs, "3")
+			require.Equal(t, http.MethodGet, request.Method)
+			return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":{"key":"sk-match-secret"}}`, nil), nil
+		case "/api/v1/keys/4":
+			revealedKeyIDs = append(revealedKeyIDs, "4")
+			return jsonResponse(http.StatusTooManyRequests, `{"message":"too many requests"}`, nil), nil
+		default:
+			require.Failf(t, "unexpected upstream request", "%s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	})}
+
+	snapshot, err := FetchUpstreamKeysForLink(
+		context.Background(),
+		client,
+		"https://sub2.test",
+		UpstreamProviderSub2API,
+		UpstreamCredential{AuthType: model.UpstreamAuthTypeAccessToken, Password: accessToken},
+		[]string{"sk-match-secret"},
+	)
+	require.NoError(t, err)
+	require.Len(t, snapshot.Keys, 2)
+	assert.Equal(t, []string{"3"}, revealedKeyIDs)
+	assert.Equal(t, UpstreamKeyFingerprintForProvider(UpstreamProviderSub2API, "https://sub2.test", "sk-match-secret"), snapshot.Keys[0].KeyFingerprint)
+	assert.Empty(t, snapshot.Keys[1].KeyFingerprint)
+}
+
 func TestFetchSub2APIKeysLoadsEveryPage(t *testing.T) {
 	requestedPages := make([]string, 0, 2)
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

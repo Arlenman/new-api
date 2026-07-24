@@ -17,6 +17,18 @@ const (
 	UpstreamProviderOther   = "other"
 )
 
+func UpstreamKeyFingerprintForProvider(provider string, normalizedBaseURL string, key string) string {
+	return model.UpstreamChannelKeyFingerprint(normalizedBaseURL, normalizeUpstreamKeyForProvider(provider, key))
+}
+
+func normalizeUpstreamKeyForProvider(provider string, key string) string {
+	key = strings.TrimSpace(key)
+	if strings.ToLower(strings.TrimSpace(provider)) == UpstreamProviderNewAPI {
+		key = strings.TrimPrefix(key, "sk-")
+	}
+	return key
+}
+
 func UpstreamCredentialRequiresUsername(provider string, authType string) bool {
 	return strings.TrimSpace(provider) != UpstreamProviderSub2API ||
 		model.NormalizeUpstreamAuthType(authType) != model.UpstreamAuthTypeAccessToken

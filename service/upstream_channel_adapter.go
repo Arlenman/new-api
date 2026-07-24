@@ -278,6 +278,16 @@ func FetchUpstreamBalance(ctx context.Context, client *http.Client, baseURL stri
 
 // FetchUpstreamKeys authenticates with an upstream and retrieves only its key list.
 func FetchUpstreamKeys(ctx context.Context, client *http.Client, baseURL string, provider string, credential UpstreamCredential) (UpstreamSnapshot, error) {
+	return fetchUpstreamKeys(ctx, client, baseURL, provider, credential, nil, false)
+}
+
+// FetchUpstreamKeysForLink retrieves the key list and reveals only masked keys
+// whose visible portions could belong to one of the supplied local channel keys.
+func FetchUpstreamKeysForLink(ctx context.Context, client *http.Client, baseURL string, provider string, credential UpstreamCredential, localKeys []string) (UpstreamSnapshot, error) {
+	return fetchUpstreamKeys(ctx, client, baseURL, provider, credential, localKeys, true)
+}
+
+func fetchUpstreamKeys(ctx context.Context, client *http.Client, baseURL string, provider string, credential UpstreamCredential, localKeys []string, revealCandidatesOnly bool) (UpstreamSnapshot, error) {
 	normalized, resolvedProvider, err := prepareUpstreamProvider(ctx, client, baseURL, provider, credential)
 	if err != nil {
 		return UpstreamSnapshot{}, err
@@ -299,11 +309,14 @@ func FetchUpstreamKeys(ctx context.Context, client *http.Client, baseURL string,
 			if keys[i].KeyFingerprint != "" {
 				continue
 			}
+			if revealCandidatesOnly && !maskedUpstreamKeyCouldMatchAny(resolvedProvider, keys[i].MaskedKey, localKeys) {
+				continue
+			}
 			fullKey, fetchErr := fetchNewAPIFullKeyWithSession(ctx, sessionClient, normalized, headers, keys[i].ID)
 			if fetchErr != nil {
 				return UpstreamSnapshot{}, fmt.Errorf("fetch new-api key %d for import status: %w", keys[i].ID, fetchErr)
 			}
-			keys[i].KeyFingerprint = upstreamKeyFingerprint(normalized, fullKey)
+			keys[i].KeyFingerprint = UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, normalized, fullKey)
 		}
 		return UpstreamSnapshot{Provider: resolvedProvider, Keys: keys, RetrievedAt: time.Now().Unix()}, nil
 	}
@@ -320,11 +333,14 @@ func FetchUpstreamKeys(ctx context.Context, client *http.Client, baseURL string,
 		if keys[i].KeyFingerprint != "" {
 			continue
 		}
+		if revealCandidatesOnly && !maskedUpstreamKeyCouldMatchAny(resolvedProvider, keys[i].MaskedKey, localKeys) {
+			continue
+		}
 		fullKey, fetchErr := fetchSub2APIFullKeyWithToken(ctx, sessionClient, normalized, headers, keys[i].ID)
 		if fetchErr != nil {
 			return UpstreamSnapshot{}, fmt.Errorf("fetch sub2api key %d for import status: %w", keys[i].ID, fetchErr)
 		}
-		keys[i].KeyFingerprint = upstreamKeyFingerprint(normalized, fullKey)
+		keys[i].KeyFingerprint = UpstreamKeyFingerprintForProvider(UpstreamProviderSub2API, normalized, fullKey)
 	}
 	return UpstreamSnapshot{Provider: resolvedProvider, Keys: keys, RetrievedAt: time.Now().Unix()}, nil
 }
@@ -956,7 +972,7 @@ func fetchNewAPIUpstreamSnapshot(ctx context.Context, client *http.Client, baseU
 		if fetchErr != nil {
 			return UpstreamSnapshot{}, fmt.Errorf("fetch new-api key %d for import status: %w", keys[i].ID, fetchErr)
 		}
-		keys[i].KeyFingerprint = upstreamKeyFingerprint(baseURL, fullKey)
+		keys[i].KeyFingerprint = UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, fullKey)
 	}
 
 	return UpstreamSnapshot{
@@ -1047,8 +1063,8 @@ func fetchNewAPIKeys(ctx context.Context, client *http.Client, baseURL string, h
 				quotaUsed /= unit
 			}
 			fingerprint := ""
-			if !strings.Contains(item.Key, "...") {
-				fingerprint = upstreamKeyFingerprint(baseURL, item.Key)
+			if strings.TrimSpace(item.Key) != "" && !isMaskedUpstreamKey(item.Key) {
+				fingerprint = UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, item.Key)
 			}
 			keys = append(keys, UpstreamKey{
 				ID:             item.ID,
@@ -1090,7 +1106,7 @@ func fetchSub2APIUpstreamSnapshot(ctx context.Context, client *http.Client, base
 		if fetchErr != nil {
 			return UpstreamSnapshot{}, fmt.Errorf("fetch sub2api key %d for import status: %w", keys[i].ID, fetchErr)
 		}
-		keys[i].KeyFingerprint = upstreamKeyFingerprint(baseURL, fullKey)
+		keys[i].KeyFingerprint = UpstreamKeyFingerprintForProvider(UpstreamProviderSub2API, baseURL, fullKey)
 	}
 	groups, err := fetchSub2APIGroups(ctx, sessionClient, baseURL, headers)
 	if err != nil {
@@ -1149,8 +1165,8 @@ func fetchSub2APIKeys(ctx context.Context, client *http.Client, baseURL string, 
 		}
 		for _, item := range page.Items {
 			fingerprint := ""
-			if !strings.Contains(item.Key, "...") {
-				fingerprint = upstreamKeyFingerprint(baseURL, item.Key)
+			if strings.TrimSpace(item.Key) != "" && !isMaskedUpstreamKey(item.Key) {
+				fingerprint = UpstreamKeyFingerprintForProvider(UpstreamProviderSub2API, baseURL, item.Key)
 			}
 			keys = append(keys, UpstreamKey{
 				ID:             item.ID,
@@ -1361,8 +1377,46 @@ func fetchSub2APIFullKeyWithToken(ctx context.Context, client *http.Client, base
 	return data.Key, nil
 }
 
-func upstreamKeyFingerprint(normalizedBaseURL string, key string) string {
-	return model.UpstreamChannelKeyFingerprint(normalizedBaseURL, key)
+func isMaskedUpstreamKey(key string) bool {
+	return strings.Contains(key, "...") || strings.ContainsRune(key, '*')
+}
+
+func maskedUpstreamKeyCouldMatchAny(provider string, maskedKey string, localKeys []string) bool {
+	if len(localKeys) == 0 {
+		return false
+	}
+	maskedKey = normalizeUpstreamKeyForProvider(provider, maskedKey)
+	firstWildcard := len(maskedKey)
+	if index := strings.Index(maskedKey, "..."); index >= 0 && index < firstWildcard {
+		firstWildcard = index
+	}
+	if index := strings.IndexByte(maskedKey, '*'); index >= 0 && index < firstWildcard {
+		firstWildcard = index
+	}
+	if firstWildcard == len(maskedKey) {
+		return true
+	}
+
+	lastWildcardEnd := firstWildcard
+	if index := strings.LastIndex(maskedKey, "..."); index >= 0 && index+3 > lastWildcardEnd {
+		lastWildcardEnd = index + 3
+	}
+	if index := strings.LastIndexByte(maskedKey, '*'); index >= 0 && index+1 > lastWildcardEnd {
+		lastWildcardEnd = index + 1
+	}
+	prefix := maskedKey[:firstWildcard]
+	suffix := maskedKey[lastWildcardEnd:]
+	for _, localKey := range localKeys {
+		candidate := normalizeUpstreamKeyForProvider(provider, localKey)
+		if candidate == "" {
+			continue
+		}
+		if (prefix == "" || strings.HasPrefix(candidate, prefix)) &&
+			(suffix == "" || strings.HasSuffix(candidate, suffix)) {
+			return true
+		}
+	}
+	return false
 }
 
 func doUpstreamJSON(ctx context.Context, client *http.Client, method string, url string, payload any, headers map[string]string, target any) error {

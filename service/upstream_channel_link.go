@@ -41,7 +41,16 @@ func LinkUpstreamChannelKeys(ctx context.Context, upstreamChannelID int) (*model
 	linkCtx, cancel, client := refreshUpstreamClient(ctx)
 	defer cancel()
 
-	fetched, err := FetchUpstreamKeys(linkCtx, client, row.BaseURL, row.Provider, credential)
+	localSources, err := listMatchingChannelKeySources(row.BaseURL)
+	if err != nil {
+		return row, UpstreamSnapshot{}, UpstreamKeyLinkSummary{}, err
+	}
+	localKeys := make([]string, 0, len(localSources))
+	for _, source := range localSources {
+		localKeys = append(localKeys, source.Key)
+	}
+
+	fetched, err := FetchUpstreamKeysForLink(linkCtx, client, row.BaseURL, row.Provider, credential, localKeys)
 	attemptedAt := time.Now().Unix()
 	if err != nil {
 		message := truncateUpstreamError(err.Error())
@@ -76,22 +85,18 @@ func reconcileUpstreamKeyLinks(baseURL string, snapshot *UpstreamSnapshot) error
 	if snapshot == nil {
 		return nil
 	}
-	normalizedBaseURL, err := NormalizeUpstreamBaseURL(baseURL)
+	sources, err := listMatchingChannelKeySources(baseURL)
 	if err != nil {
 		return err
 	}
-	sources, err := model.ListChannelKeySources()
+	normalizedBaseURL, err := NormalizeUpstreamBaseURL(baseURL)
 	if err != nil {
 		return err
 	}
 
 	statuses := make(map[string]string)
 	for _, source := range sources {
-		normalizedSourceURL, normalizeErr := NormalizeUpstreamBaseURL(source.BaseURL)
-		if normalizeErr != nil || normalizedSourceURL != normalizedBaseURL {
-			continue
-		}
-		fingerprint := model.UpstreamChannelKeyFingerprint(normalizedSourceURL, source.Key)
+		fingerprint := UpstreamKeyFingerprintForProvider(snapshot.Provider, normalizedBaseURL, source.Key)
 		candidate := localChannelInUseStatus(source.Status)
 		if inUseStatusRank(candidate) > inUseStatusRank(statuses[fingerprint]) {
 			statuses[fingerprint] = candidate
@@ -119,6 +124,26 @@ func reconcileUpstreamKeyLinks(baseURL string, snapshot *UpstreamSnapshot) error
 		key.Active = status == UpstreamKeyInUseStatusEnabled
 	}
 	return nil
+}
+
+func listMatchingChannelKeySources(baseURL string) ([]model.ChannelKeySource, error) {
+	normalizedBaseURL, err := NormalizeUpstreamBaseURL(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	sources, err := model.ListChannelKeySources()
+	if err != nil {
+		return nil, err
+	}
+	matching := make([]model.ChannelKeySource, 0)
+	for _, source := range sources {
+		normalizedSourceURL, normalizeErr := NormalizeUpstreamBaseURL(source.BaseURL)
+		if normalizeErr != nil || normalizedSourceURL != normalizedBaseURL {
+			continue
+		}
+		matching = append(matching, source)
+	}
+	return matching, nil
 }
 
 func localChannelInUseStatus(status int) string {

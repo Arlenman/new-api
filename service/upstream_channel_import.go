@@ -137,7 +137,7 @@ func importUpstreamChannelKeys(ctx context.Context, client *http.Client, upstrea
 			return UpstreamKeyImportResult{}, fmt.Errorf("upstream key %d is empty", keyID)
 		}
 		keyIndex := keyIndexByID[keyID]
-		snapshot.Keys[keyIndex].KeyFingerprint = model.UpstreamChannelKeyFingerprint(normalizedBaseURL, fullKey)
+		snapshot.Keys[keyIndex].KeyFingerprint = UpstreamKeyFingerprintForProvider(provider, normalizedBaseURL, fullKey)
 
 		fetchedModels, modelsErr := fetchUpstreamKeyModels(importCtx, client, row.BaseURL, fullKey)
 		models := fetchedModels

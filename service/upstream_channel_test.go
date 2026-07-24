@@ -18,6 +18,23 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestUpstreamKeyFingerprintForProviderNormalizesOnlyNewAPIPrefix(t *testing.T) {
+	baseURL := "https://upstream.example"
+
+	assert.Equal(t,
+		UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, "key-value"),
+		UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, "sk-key-value"),
+	)
+	assert.NotEqual(t,
+		UpstreamKeyFingerprintForProvider(UpstreamProviderSub2API, baseURL, "key-value"),
+		UpstreamKeyFingerprintForProvider(UpstreamProviderSub2API, baseURL, "sk-key-value"),
+	)
+	assert.NotEqual(t,
+		UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, "key-value"),
+		UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, "different-key"),
+	)
+}
+
 func TestRefreshUpstreamChannelPersistsTurnstileRecoveryState(t *testing.T) {
 	originalDB := model.DB
 	originalLogDB := model.LOG_DB
@@ -314,11 +331,11 @@ func TestDiscoverUpstreamChannelsCountsOnlyEnabledSnapshotKeysAsActive(t *testin
 	require.NoError(t, db.Create(&model.Channel{Key: "sk-disabled", BaseURL: &baseURL, Status: common.ChannelStatusManuallyDisabled}).Error)
 	require.NoError(t, db.Create(&model.Channel{Key: "sk-unrelated", BaseURL: &baseURL, Status: common.ChannelStatusEnabled}).Error)
 
-	enabledFingerprint := model.UpstreamChannelKeyFingerprint(baseURL, "sk-enabled")
-	snapshotJSON, err := common.Marshal(UpstreamSnapshot{Keys: []UpstreamKey{
+	enabledFingerprint := UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, "enabled")
+	snapshotJSON, err := common.Marshal(UpstreamSnapshot{Provider: UpstreamProviderNewAPI, Keys: []UpstreamKey{
 		{ID: 1, KeyFingerprint: enabledFingerprint},
 		{ID: 3, KeyFingerprint: enabledFingerprint},
-		{ID: 2, KeyFingerprint: model.UpstreamChannelKeyFingerprint(baseURL, "sk-disabled")},
+		{ID: 2, KeyFingerprint: UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, "disabled")},
 	}})
 	require.NoError(t, err)
 	require.NoError(t, db.Create(&model.UpstreamChannel{
@@ -428,11 +445,11 @@ func TestMarkImportedUpstreamKeysUsesBaseURLAndFullKeyFingerprint(t *testing.T) 
 	require.NoError(t, db.Create(&model.Channel{BaseURL: &baseURL, Key: "sk-disabled", Status: common.ChannelStatusManuallyDisabled}).Error)
 	require.NoError(t, db.Create(&model.Channel{BaseURL: &otherBaseURL, Key: "sk-other", Status: common.ChannelStatusEnabled}).Error)
 
-	snapshot := UpstreamSnapshot{Keys: []UpstreamKey{
-		{ID: 1, KeyFingerprint: upstreamKeyFingerprint(baseURL, "sk-imported")},
-		{ID: 2, KeyFingerprint: upstreamKeyFingerprint(baseURL, "sk-disabled")},
-		{ID: 3, KeyFingerprint: upstreamKeyFingerprint(baseURL, "sk-not-imported")},
-		{ID: 4, KeyFingerprint: upstreamKeyFingerprint(otherBaseURL, "sk-other")},
+	snapshot := UpstreamSnapshot{Provider: UpstreamProviderNewAPI, Keys: []UpstreamKey{
+		{ID: 1, KeyFingerprint: UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, "imported")},
+		{ID: 2, KeyFingerprint: UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, "disabled")},
+		{ID: 3, KeyFingerprint: UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, "not-imported")},
+		{ID: 4, KeyFingerprint: UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, otherBaseURL, "other")},
 	}}
 	require.NoError(t, markImportedUpstreamKeys(baseURL, &snapshot))
 	assert.True(t, snapshot.Keys[0].Imported)
@@ -597,7 +614,7 @@ func TestImportUpstreamChannelKeysCreatesAndOverwritesChannels(t *testing.T) {
 	var updatedSnapshot UpstreamSnapshot
 	require.NoError(t, common.UnmarshalJsonStr(updatedRow.SnapshotJSON, &updatedSnapshot))
 	require.Len(t, updatedSnapshot.Keys, 2)
-	assert.Equal(t, model.UpstreamChannelKeyFingerprint(baseURL, "sk-imported-key"), updatedSnapshot.Keys[0].KeyFingerprint)
+	assert.Equal(t, UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, "sk-imported-key"), updatedSnapshot.Keys[0].KeyFingerprint)
 	assert.True(t, updatedSnapshot.Keys[0].Imported)
 	assert.True(t, updatedSnapshot.Keys[0].Active)
 	assert.True(t, updatedSnapshot.Keys[0].Linked)
@@ -639,7 +656,7 @@ func TestImportUpstreamChannelKeysCreatesAndOverwritesChannels(t *testing.T) {
 	updatedRow, err = model.GetUpstreamChannelByID(row.Id)
 	require.NoError(t, err)
 	require.NoError(t, common.UnmarshalJsonStr(updatedRow.SnapshotJSON, &updatedSnapshot))
-	assert.Equal(t, model.UpstreamChannelKeyFingerprint(baseURL, "sk-disabled-key"), updatedSnapshot.Keys[1].KeyFingerprint)
+	assert.Equal(t, UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, "sk-disabled-key"), updatedSnapshot.Keys[1].KeyFingerprint)
 	assert.True(t, updatedSnapshot.Keys[1].Imported)
 	assert.False(t, updatedSnapshot.Keys[1].Active)
 	assert.True(t, updatedSnapshot.Keys[1].Linked)

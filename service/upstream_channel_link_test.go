@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -33,13 +35,13 @@ func TestReconcileUpstreamKeyLinksNormalizesBaseURLAndAggregatesStatuses(t *test
 	createChannel("https://upstream.example", "sk-unused\nsk-multi", common.ChannelStatusEnabled)
 	createChannel("https://other.example", "sk-other", common.ChannelStatusEnabled)
 
-	snapshot := UpstreamSnapshot{Keys: []UpstreamKey{
-		{ID: 1, KeyFingerprint: model.UpstreamChannelKeyFingerprint("https://upstream.example", "sk-precedence")},
-		{ID: 2, KeyFingerprint: model.UpstreamChannelKeyFingerprint("https://upstream.example", "sk-auto")},
-		{ID: 3, KeyFingerprint: model.UpstreamChannelKeyFingerprint("https://upstream.example", "sk-disabled")},
-		{ID: 4, KeyFingerprint: model.UpstreamChannelKeyFingerprint("https://other.example", "sk-other")},
-		{ID: 5, KeyFingerprint: model.UpstreamChannelKeyFingerprint("https://upstream.example", "sk-multi")},
-		{ID: 6, KeyFingerprint: model.UpstreamChannelKeyFingerprint("https://upstream.example", "sk-precedence")},
+	snapshot := UpstreamSnapshot{Provider: UpstreamProviderNewAPI, Keys: []UpstreamKey{
+		{ID: 1, KeyFingerprint: UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, "https://upstream.example", "precedence")},
+		{ID: 2, KeyFingerprint: UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, "https://upstream.example", "auto")},
+		{ID: 3, KeyFingerprint: UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, "https://upstream.example", "disabled")},
+		{ID: 4, KeyFingerprint: UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, "https://other.example", "other")},
+		{ID: 5, KeyFingerprint: UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, "https://upstream.example", "multi")},
+		{ID: 6, KeyFingerprint: UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, "https://upstream.example", "precedence")},
 	}}
 	require.NoError(t, reconcileUpstreamKeyLinks("https://UPSTREAM.example:443/api/v1/", &snapshot))
 
@@ -65,6 +67,28 @@ func TestReconcileUpstreamKeyLinksNormalizesBaseURLAndAggregatesStatuses(t *test
 	assert.NotContains(t, string(encoded), "sk-auto")
 }
 
+func TestReconcileUpstreamKeyLinksKeepsSub2APIPrefixExact(t *testing.T) {
+	originalDB := model.DB
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "reconcile-sub2api-prefix.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}))
+	model.DB = db
+	t.Cleanup(func() { model.DB = originalDB })
+
+	baseURL := "https://sub2.example"
+	require.NoError(t, db.Create(&model.Channel{BaseURL: &baseURL, Key: "sk-strict", Status: common.ChannelStatusEnabled}).Error)
+	snapshot := UpstreamSnapshot{Provider: UpstreamProviderSub2API, Keys: []UpstreamKey{
+		{ID: 1, KeyFingerprint: UpstreamKeyFingerprintForProvider(UpstreamProviderSub2API, baseURL, "strict")},
+		{ID: 2, KeyFingerprint: UpstreamKeyFingerprintForProvider(UpstreamProviderSub2API, baseURL, "sk-strict")},
+	}}
+
+	require.NoError(t, reconcileUpstreamKeyLinks(baseURL, &snapshot))
+	assert.False(t, snapshot.Keys[0].Linked)
+	assert.Equal(t, UpstreamKeyInUseStatusUnlinked, snapshot.Keys[0].InUseStatus)
+	assert.True(t, snapshot.Keys[1].Linked)
+	assert.Equal(t, UpstreamKeyInUseStatusEnabled, snapshot.Keys[1].InUseStatus)
+}
+
 func TestLinkUpstreamChannelKeysRecoversFingerprintsAndPersistsFreshState(t *testing.T) {
 	originalDB := model.DB
 	originalLogDB := model.LOG_DB
@@ -83,9 +107,9 @@ func TestLinkUpstreamChannelKeysRecoversFingerprintsAndPersistsFreshState(t *tes
 		common.CryptoSecret = originalCryptoSecret
 	})
 
-	const fullKey = "sk-link-secret-value"
+	const fullKey = "link-secret-value"
 	localBaseURL := "https://UPSTREAM.example:443/api/v1/"
-	require.NoError(t, db.Create(&model.Channel{BaseURL: &localBaseURL, Key: fullKey, Status: common.ChannelStatusEnabled}).Error)
+	require.NoError(t, db.Create(&model.Channel{BaseURL: &localBaseURL, Key: "sk-" + fullKey, Status: common.ChannelStatusEnabled}).Error)
 
 	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Path {
@@ -94,7 +118,7 @@ func TestLinkUpstreamChannelKeysRecoversFingerprintsAndPersistsFreshState(t *tes
 		case "/api/token":
 			assert.Equal(t, "Bearer management-token", request.Header.Get("Authorization"))
 			assert.Equal(t, "42", request.Header.Get("New-Api-User"))
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"page":1,"page_size":100,"total":1,"items":[{"id":7,"name":"linked key","key":"sk-link...alue","group":"default","status":1}]}}`, nil), nil
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"page":1,"page_size":100,"total":1,"items":[{"id":7,"name":"linked key","key":"link********alue","group":"default","status":1}]}}`, nil), nil
 		case "/api/token/7/key":
 			require.Equal(t, http.MethodPost, request.Method)
 			assert.Equal(t, "Bearer management-token", request.Header.Get("Authorization"))
@@ -131,7 +155,7 @@ func TestLinkUpstreamChannelKeysRecoversFingerprintsAndPersistsFreshState(t *tes
 	require.NoError(t, err)
 	require.NotNil(t, updatedRow)
 	require.Len(t, snapshot.Keys, 1)
-	assert.Equal(t, model.UpstreamChannelKeyFingerprint("https://upstream.example", fullKey), snapshot.Keys[0].KeyFingerprint)
+	assert.Equal(t, UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, "https://upstream.example", fullKey), snapshot.Keys[0].KeyFingerprint)
 	assert.Equal(t, UpstreamKeyInUseStatusEnabled, snapshot.Keys[0].InUseStatus)
 	assert.True(t, snapshot.Keys[0].Linked)
 	assert.Equal(t, UpstreamKeyLinkSummary{Total: 1, Linked: 1, Enabled: 1}, summary)
@@ -142,4 +166,116 @@ func TestLinkUpstreamChannelKeysRecoversFingerprintsAndPersistsFreshState(t *tes
 	assert.Equal(t, UpstreamKeyInUseStatusEnabled, persisted.Keys[0].InUseStatus)
 	assert.Equal(t, "default", persisted.Keys[0].Group)
 	assert.NotContains(t, updatedRow.SnapshotJSON, fullKey)
+}
+
+func TestLinkUpstreamChannelKeysRevealsOnlyPossibleLocalMatches(t *testing.T) {
+	originalDB := model.DB
+	originalLogDB := model.LOG_DB
+	originalHTTPClient := httpClient
+	originalCryptoSecret := common.CryptoSecret
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "link-upstream-candidates.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}))
+	model.DB = db
+	model.LOG_DB = db
+	common.CryptoSecret = "link-upstream-candidate-test-secret"
+	t.Cleanup(func() {
+		model.DB = originalDB
+		model.LOG_DB = originalLogDB
+		httpClient = originalHTTPClient
+		common.CryptoSecret = originalCryptoSecret
+	})
+
+	localBaseURL := "https://UPSTREAM.example:443/api/v1/"
+	require.NoError(t, db.Create(&model.Channel{BaseURL: &localBaseURL, Key: "sk-first-matching-key-A001", Status: common.ChannelStatusEnabled}).Error)
+	require.NoError(t, db.Create(&model.Channel{BaseURL: &localBaseURL, Key: "sk-second-matching-key-B002", Status: common.ChannelStatusAutoDisabled}).Error)
+	otherBaseURL := "https://other.example"
+	require.NoError(t, db.Create(&model.Channel{BaseURL: &otherBaseURL, Key: "sk-skip04-unused-Z004", Status: common.ChannelStatusEnabled}).Error)
+
+	items := []map[string]any{
+		{"id": 1, "name": "first", "key": "firs****...A001", "group": "default", "status": 1},
+		{"id": 2, "name": "second", "key": "seco****...B002", "group": "default", "status": 1},
+		{"id": 3, "name": "same visible edges", "key": "firs****...A001", "group": "default", "status": 1},
+	}
+	for keyID := 4; keyID <= 25; keyID++ {
+		items = append(items, map[string]any{
+			"id":     keyID,
+			"name":   fmt.Sprintf("unrelated-%d", keyID),
+			"key":    fmt.Sprintf("skip%02d****...Z%03d", keyID, keyID),
+			"group":  "default",
+			"status": 1,
+		})
+	}
+	encodedKeyList, err := common.Marshal(map[string]any{
+		"success": true,
+		"data": map[string]any{
+			"page":      1,
+			"page_size": 100,
+			"total":     len(items),
+			"items":     items,
+		},
+	})
+	require.NoError(t, err)
+
+	revealedKeyIDs := make([]string, 0, 3)
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/api/status":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"quota_per_unit":1000000}}`, nil), nil
+		case "/api/token":
+			assert.Equal(t, "Bearer management-token", request.Header.Get("Authorization"))
+			assert.Equal(t, "42", request.Header.Get("New-Api-User"))
+			return jsonResponse(http.StatusOK, string(encodedKeyList), nil), nil
+		case "/api/token/1/key":
+			revealedKeyIDs = append(revealedKeyIDs, "1")
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"first-matching-key-A001"}}`, nil), nil
+		case "/api/token/2/key":
+			revealedKeyIDs = append(revealedKeyIDs, "2")
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"second-matching-key-B002"}}`, nil), nil
+		case "/api/token/3/key":
+			revealedKeyIDs = append(revealedKeyIDs, "3")
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"first-different-key-A001"}}`, nil), nil
+		default:
+			if strings.HasPrefix(request.URL.Path, "/api/token/") {
+				revealedKeyIDs = append(revealedKeyIDs, strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/api/token/"), "/key"))
+				return jsonResponse(http.StatusTooManyRequests, `{"message":"too many requests"}`, nil), nil
+			}
+			return jsonResponse(http.StatusNotFound, `{}`, nil), nil
+		}
+	})}
+
+	encrypted, err := common.EncryptSecret("upstream-channel-password", "management-token")
+	require.NoError(t, err)
+	previousSnapshot, err := common.Marshal(UpstreamSnapshot{
+		Provider: UpstreamProviderNewAPI,
+		Groups:   []UpstreamGroup{{Name: "default", Ratio: 1}},
+		Ratios:   map[string]float64{"default": 1},
+	})
+	require.NoError(t, err)
+	row := &model.UpstreamChannel{
+		BaseURL:             "https://upstream.example",
+		BaseURLHash:         model.UpstreamBaseURLHash("https://upstream.example"),
+		Provider:            UpstreamProviderNewAPI,
+		AuthType:            model.UpstreamAuthTypeAccessToken,
+		Username:            "42",
+		PasswordCiphertext:  encrypted,
+		SnapshotJSON:        string(previousSnapshot),
+		AutoRefreshInterval: 300,
+		Status:              model.UpstreamChannelStatusReady,
+	}
+	require.NoError(t, db.Create(row).Error)
+
+	updatedRow, snapshot, summary, err := LinkUpstreamChannelKeys(context.Background(), row.Id)
+	require.NoError(t, err)
+	require.NotNil(t, updatedRow)
+	require.Len(t, snapshot.Keys, 25)
+	assert.Equal(t, []string{"1", "2", "3"}, revealedKeyIDs)
+	assert.Equal(t, UpstreamKeyLinkSummary{Total: 25, Linked: 2, Enabled: 1, AutoDisabled: 1, Unlinked: 23}, summary)
+	assert.Equal(t, UpstreamKeyInUseStatusEnabled, snapshot.Keys[0].InUseStatus)
+	assert.Equal(t, UpstreamKeyInUseStatusAutoDisabled, snapshot.Keys[1].InUseStatus)
+	assert.Equal(t, UpstreamKeyInUseStatusUnlinked, snapshot.Keys[2].InUseStatus)
+	for _, key := range snapshot.Keys[3:] {
+		assert.Empty(t, key.KeyFingerprint)
+		assert.Equal(t, UpstreamKeyInUseStatusUnlinked, key.InUseStatus)
+	}
 }
