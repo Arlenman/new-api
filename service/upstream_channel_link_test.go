@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -119,11 +118,16 @@ func TestLinkUpstreamChannelKeysRecoversFingerprintsAndPersistsFreshState(t *tes
 			assert.Equal(t, "Bearer management-token", request.Header.Get("Authorization"))
 			assert.Equal(t, "42", request.Header.Get("New-Api-User"))
 			return jsonResponse(http.StatusOK, `{"success":true,"data":{"page":1,"page_size":100,"total":1,"items":[{"id":7,"name":"linked key","key":"link********alue","group":"default","status":1}]}}`, nil), nil
-		case "/api/token/7/key":
+		case "/api/token/batch/keys":
 			require.Equal(t, http.MethodPost, request.Method)
 			assert.Equal(t, "Bearer management-token", request.Header.Get("Authorization"))
 			assert.Equal(t, "42", request.Header.Get("New-Api-User"))
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"`+fullKey+`"}}`, nil), nil
+			var payload struct {
+				IDs []int64 `json:"ids"`
+			}
+			require.NoError(t, common.DecodeJson(request.Body, &payload))
+			assert.Equal(t, []int64{7}, payload.IDs)
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"keys":{"7":"`+fullKey+`"}}}`, nil), nil
 		default:
 			return jsonResponse(http.StatusNotFound, `{}`, nil), nil
 		}
@@ -217,7 +221,7 @@ func TestLinkUpstreamChannelKeysRevealsOnlyPossibleLocalMatches(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	revealedKeyIDs := make([]string, 0, 3)
+	requestedKeyIDs := make([]int64, 0, 3)
 	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Path {
 		case "/api/status":
@@ -226,20 +230,17 @@ func TestLinkUpstreamChannelKeysRevealsOnlyPossibleLocalMatches(t *testing.T) {
 			assert.Equal(t, "Bearer management-token", request.Header.Get("Authorization"))
 			assert.Equal(t, "42", request.Header.Get("New-Api-User"))
 			return jsonResponse(http.StatusOK, string(encodedKeyList), nil), nil
-		case "/api/token/1/key":
-			revealedKeyIDs = append(revealedKeyIDs, "1")
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"first-matching-key-A001"}}`, nil), nil
-		case "/api/token/2/key":
-			revealedKeyIDs = append(revealedKeyIDs, "2")
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"second-matching-key-B002"}}`, nil), nil
-		case "/api/token/3/key":
-			revealedKeyIDs = append(revealedKeyIDs, "3")
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"first-different-key-A001"}}`, nil), nil
-		default:
-			if strings.HasPrefix(request.URL.Path, "/api/token/") {
-				revealedKeyIDs = append(revealedKeyIDs, strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/api/token/"), "/key"))
-				return jsonResponse(http.StatusTooManyRequests, `{"message":"too many requests"}`, nil), nil
+		case "/api/token/batch/keys":
+			require.Equal(t, http.MethodPost, request.Method)
+			assert.Equal(t, "Bearer management-token", request.Header.Get("Authorization"))
+			assert.Equal(t, "42", request.Header.Get("New-Api-User"))
+			var payload struct {
+				IDs []int64 `json:"ids"`
 			}
+			require.NoError(t, common.DecodeJson(request.Body, &payload))
+			requestedKeyIDs = append(requestedKeyIDs, payload.IDs...)
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"keys":{"1":"first-matching-key-A001","2":"second-matching-key-B002","3":"first-different-key-A001"}}}`, nil), nil
+		default:
 			return jsonResponse(http.StatusNotFound, `{}`, nil), nil
 		}
 	})}
@@ -269,7 +270,7 @@ func TestLinkUpstreamChannelKeysRevealsOnlyPossibleLocalMatches(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, updatedRow)
 	require.Len(t, snapshot.Keys, 25)
-	assert.Equal(t, []string{"1", "2", "3"}, revealedKeyIDs)
+	assert.Equal(t, []int64{1, 2, 3}, requestedKeyIDs)
 	assert.Equal(t, UpstreamKeyLinkSummary{Total: 25, Linked: 2, Enabled: 1, AutoDisabled: 1, Unlinked: 23}, summary)
 	assert.Equal(t, UpstreamKeyInUseStatusEnabled, snapshot.Keys[0].InUseStatus)
 	assert.Equal(t, UpstreamKeyInUseStatusAutoDisabled, snapshot.Keys[1].InUseStatus)

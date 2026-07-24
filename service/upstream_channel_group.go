@@ -133,6 +133,7 @@ func UpdateUpstreamChannelKeyGroup(ctx context.Context, upstreamChannelID int, k
 		return row, previous, fmt.Errorf("remote key group was updated, but refreshing authoritative upstream groups failed: %w", err)
 	}
 	refreshed := previous
+	preserveUpstreamKeyFingerprints(previous.Keys, refreshedKeys.Keys)
 	refreshed.Provider = provider
 	refreshed.Keys = refreshedKeys.Keys
 	refreshed.Groups = refreshedGroups.Groups

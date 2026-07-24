@@ -39,6 +39,7 @@ func TestFetchNewAPIUpstreamSnapshot(t *testing.T) {
 	common.QuotaPerUnit = 500000
 	t.Cleanup(func() { common.QuotaPerUnit = originalQuotaPerUnit })
 
+	singleRevealRequested := false
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.Path {
 		case "/api/status":
@@ -58,7 +59,9 @@ func TestFetchNewAPIUpstreamSnapshot(t *testing.T) {
 		case "/api/token":
 			return jsonResponse(http.StatusOK, `{"success":true,"data":{"items":[{"id":7,"name":"primary","key":"sk-abcd...wxyz","group":"default","status":1,"remain_quota":1000,"used_quota":50}]}}`, nil), nil
 		case "/api/token/7/key":
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-new-api-full-key"}}`, nil), nil
+			singleRevealRequested = true
+			require.Fail(t, "snapshot refresh must not reveal masked keys one by one")
+			return nil, nil
 		default:
 			return jsonResponse(http.StatusNotFound, `{}`, nil), nil
 		}
@@ -71,7 +74,8 @@ func TestFetchNewAPIUpstreamSnapshot(t *testing.T) {
 	assert.Equal(t, "root", snapshot.Account.Username)
 	require.Len(t, snapshot.Keys, 1)
 	assert.Equal(t, "sk-abcd...wxyz", snapshot.Keys[0].MaskedKey)
-	assert.NotEmpty(t, snapshot.Keys[0].KeyFingerprint)
+	assert.False(t, singleRevealRequested)
+	assert.Empty(t, snapshot.Keys[0].KeyFingerprint)
 	require.Len(t, snapshot.Groups, 2)
 	assert.Equal(t, 0.8, snapshot.Ratios["vip"])
 }
@@ -303,9 +307,8 @@ func TestFetchNewAPIKeysLoadsEveryPage(t *testing.T) {
 	assert.Equal(t, int64(2), keys[1].ID)
 }
 
-func TestFetchUpstreamKeysRevealsAsteriskMaskedNewAPIKey(t *testing.T) {
-	const fullKey = "new-api-key-without-prefix"
-	revealRequested := false
+func TestFetchUpstreamKeysDoesNotRevealAsteriskMaskedNewAPIKey(t *testing.T) {
+	singleRevealRequested := false
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.Path {
 		case "/api/status":
@@ -313,9 +316,9 @@ func TestFetchUpstreamKeysRevealsAsteriskMaskedNewAPIKey(t *testing.T) {
 		case "/api/token":
 			return jsonResponse(http.StatusOK, `{"success":true,"data":{"page":1,"page_size":100,"total":1,"items":[{"id":7,"name":"masked","key":"new-**********efix","group":"default","status":1}]}}`, nil), nil
 		case "/api/token/7/key":
-			revealRequested = true
-			require.Equal(t, http.MethodPost, r.Method)
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"`+fullKey+`"}}`, nil), nil
+			singleRevealRequested = true
+			require.Fail(t, "ordinary key refresh must not reveal masked keys one by one")
+			return nil, nil
 		default:
 			require.Failf(t, "unexpected upstream request", "%s %s", r.Method, r.URL.String())
 			return nil, nil
@@ -329,9 +332,9 @@ func TestFetchUpstreamKeysRevealsAsteriskMaskedNewAPIKey(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, snapshot.Keys, 1)
-	assert.True(t, revealRequested)
-	assert.Equal(t, UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, "https://upstream.test", fullKey), snapshot.Keys[0].KeyFingerprint)
-	assert.NotEqual(t, fullKey, snapshot.Keys[0].MaskedKey)
+	assert.False(t, singleRevealRequested)
+	assert.Equal(t, "new-****...efix", snapshot.Keys[0].MaskedKey)
+	assert.Empty(t, snapshot.Keys[0].KeyFingerprint)
 }
 
 func TestMaskedUpstreamKeyCouldMatchAnyUsesProviderSemantics(t *testing.T) {
@@ -479,6 +482,142 @@ func TestFetchNewAPIUpstreamSnapshotUsesUpstreamQuotaPerUnit(t *testing.T) {
 	assert.InDelta(t, 10, snapshot.Balance, 0.000001)
 }
 
+func TestFetchNewAPIFullKeysWithSessionBatchesMultipleIDs(t *testing.T) {
+	requestCount := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requestCount++
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "/api/token/batch/keys", r.URL.Path)
+		require.Equal(t, "Bearer management-token", r.Header.Get("Authorization"))
+
+		var payload struct {
+			IDs []int64 `json:"ids"`
+		}
+		require.NoError(t, common.DecodeJson(r.Body, &payload))
+		assert.Equal(t, []int64{7, 8, 9}, payload.IDs)
+		return jsonResponse(http.StatusOK, `{"success":true,"data":{"keys":{"7":"sk-seven","8":"sk-eight","9":"sk-nine"}}}`, nil), nil
+	})}
+
+	keys, err := fetchNewAPIFullKeysWithSession(
+		context.Background(),
+		client,
+		"https://upstream.test",
+		map[string]string{"Authorization": "Bearer management-token"},
+		[]int64{7, 8, 9},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, requestCount)
+	assert.Equal(t, map[int64]string{7: "sk-seven", 8: "sk-eight", 9: "sk-nine"}, keys)
+}
+
+func TestFetchNewAPIFullKeysWithSessionSplitsRequestsAtBatchLimit(t *testing.T) {
+	keyIDs := make([]int64, 205)
+	for i := range keyIDs {
+		keyIDs[i] = int64(i + 1)
+	}
+
+	requestedBatches := make([][]int64, 0, 3)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "/api/token/batch/keys", r.URL.Path)
+		var payload struct {
+			IDs []int64 `json:"ids"`
+		}
+		require.NoError(t, common.DecodeJson(r.Body, &payload))
+		requestedBatches = append(requestedBatches, append([]int64(nil), payload.IDs...))
+
+		responseKeys := make(map[int64]string, len(payload.IDs))
+		for _, keyID := range payload.IDs {
+			responseKeys[keyID] = fmt.Sprintf("sk-%d", keyID)
+		}
+		body, err := common.Marshal(map[string]any{
+			"success": true,
+			"data":    map[string]any{"keys": responseKeys},
+		})
+		require.NoError(t, err)
+		return jsonResponse(http.StatusOK, string(body), nil), nil
+	})}
+
+	keys, err := fetchNewAPIFullKeysWithSession(context.Background(), client, "https://upstream.test", nil, keyIDs)
+	require.NoError(t, err)
+	require.Len(t, requestedBatches, 3)
+	assert.Equal(t, keyIDs[:100], requestedBatches[0])
+	assert.Equal(t, keyIDs[100:200], requestedBatches[1])
+	assert.Equal(t, keyIDs[200:], requestedBatches[2])
+	require.Len(t, keys, len(keyIDs))
+	assert.Equal(t, "sk-1", keys[1])
+	assert.Equal(t, "sk-100", keys[100])
+	assert.Equal(t, "sk-101", keys[101])
+	assert.Equal(t, "sk-205", keys[205])
+}
+
+func TestFetchNewAPIFullKeysWithSessionFallsBackWhenBatchEndpointIsUnsupported(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			batchRequestCount := 0
+			singleKeyRequests := make([]int64, 0, 2)
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				switch r.URL.Path {
+				case "/api/token/batch/keys":
+					batchRequestCount++
+					var payload struct {
+						IDs []int64 `json:"ids"`
+					}
+					require.NoError(t, common.DecodeJson(r.Body, &payload))
+					assert.Equal(t, []int64{11, 12}, payload.IDs)
+					return jsonResponse(status, `{}`, nil), nil
+				case "/api/token/11/key":
+					singleKeyRequests = append(singleKeyRequests, 11)
+					return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-eleven"}}`, nil), nil
+				case "/api/token/12/key":
+					singleKeyRequests = append(singleKeyRequests, 12)
+					return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-twelve"}}`, nil), nil
+				default:
+					require.Failf(t, "unexpected upstream request", "%s %s", r.Method, r.URL.String())
+					return nil, nil
+				}
+			})}
+
+			keys, err := fetchNewAPIFullKeysWithSession(context.Background(), client, "https://upstream.test", nil, []int64{11, 12})
+			require.NoError(t, err)
+			assert.Equal(t, 1, batchRequestCount)
+			assert.Equal(t, []int64{11, 12}, singleKeyRequests)
+			assert.Equal(t, map[int64]string{11: "sk-eleven", 12: "sk-twelve"}, keys)
+		})
+	}
+}
+
+func TestFetchNewAPIFullKeysWithSessionDoesNotFallBackOnRateLimit(t *testing.T) {
+	batchRequestCount := 0
+	singleRevealRequested := false
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/api/token/batch/keys":
+			batchRequestCount++
+			var payload struct {
+				IDs []int64 `json:"ids"`
+			}
+			require.NoError(t, common.DecodeJson(r.Body, &payload))
+			assert.Equal(t, []int64{21, 22}, payload.IDs)
+			return jsonResponse(http.StatusTooManyRequests, `{"success":false,"message":"rate limited"}`, nil), nil
+		case "/api/token/21/key", "/api/token/22/key":
+			singleRevealRequested = true
+			require.Fail(t, "rate limits must not trigger single-key fallback requests")
+			return nil, nil
+		default:
+			require.Failf(t, "unexpected upstream request", "%s %s", r.Method, r.URL.String())
+			return nil, nil
+		}
+	})}
+
+	keys, err := fetchNewAPIFullKeysWithSession(context.Background(), client, "https://upstream.test", nil, []int64{21, 22})
+	require.Error(t, err)
+	assert.Nil(t, keys)
+	assert.Equal(t, http.StatusTooManyRequests, UpstreamHTTPStatus(err))
+	assert.Equal(t, 1, batchRequestCount)
+	assert.False(t, singleRevealRequested)
+}
+
 func TestFetchNewAPIFullKey(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.Path {
@@ -566,16 +705,17 @@ func TestFetchSub2APIFullKeyUsesExplicitAccessToken(t *testing.T) {
 }
 
 func TestFetchUpstreamModelsFromNewAPI(t *testing.T) {
-	requestedKeyIDs := make([]string, 0)
+	requestedKeyIDs := make([]int64, 0)
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Path {
-		case "/api/token/3/key":
-			requestedKeyIDs = append(requestedKeyIDs, "3")
+		case "/api/token/batch/keys":
 			require.Equal(t, "Bearer management-token", request.Header.Get("Authorization"))
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-vip"}}`, nil), nil
-		case "/api/token/2/key":
-			requestedKeyIDs = append(requestedKeyIDs, "2")
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-default"}}`, nil), nil
+			var payload struct {
+				IDs []int64 `json:"ids"`
+			}
+			require.NoError(t, common.DecodeJson(request.Body, &payload))
+			requestedKeyIDs = append(requestedKeyIDs, payload.IDs...)
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"keys":{"2":"sk-default","3":"sk-vip"}}}`, nil), nil
 		case "/v1/models":
 			switch request.Header.Get("Authorization") {
 			case "Bearer sk-vip":
@@ -611,7 +751,7 @@ func TestFetchUpstreamModelsFromNewAPI(t *testing.T) {
 		"vip",
 	)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"3", "2"}, requestedKeyIDs)
+	assert.Equal(t, []int64{3, 2}, requestedKeyIDs)
 	require.Len(t, models, 3)
 	assert.Equal(t, []string{"gpt-4o", "gpt-4o-mini", "vip-only"}, []string{models[0].ID, models[1].ID, models[2].ID})
 
@@ -638,18 +778,16 @@ func TestFetchUpstreamModelsFromNewAPI(t *testing.T) {
 }
 
 func TestFetchUpstreamModelsProbesAllEligibleKeysAndSkipsFailures(t *testing.T) {
-	requestedKeyIDs := make([]string, 0)
+	requestedKeyIDs := make([]int64, 0)
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Path {
-		case "/api/token/1/key":
-			requestedKeyIDs = append(requestedKeyIDs, "1")
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-first"}}`, nil), nil
-		case "/api/token/2/key":
-			requestedKeyIDs = append(requestedKeyIDs, "2")
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-second"}}`, nil), nil
-		case "/api/token/3/key":
-			requestedKeyIDs = append(requestedKeyIDs, "3")
-			return jsonResponse(http.StatusUnauthorized, `{"success":false,"message":"key unavailable"}`, nil), nil
+		case "/api/token/batch/keys":
+			var payload struct {
+				IDs []int64 `json:"ids"`
+			}
+			require.NoError(t, common.DecodeJson(request.Body, &payload))
+			requestedKeyIDs = append(requestedKeyIDs, payload.IDs...)
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"keys":{"1":"sk-first","2":"sk-second"}}}`, nil), nil
 		case "/v1/models":
 			switch request.Header.Get("Authorization") {
 			case "Bearer sk-first":
@@ -682,7 +820,7 @@ func TestFetchUpstreamModelsProbesAllEligibleKeysAndSkipsFailures(t *testing.T) 
 		"default",
 	)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"1", "2"}, requestedKeyIDs)
+	assert.Equal(t, []int64{1, 2}, requestedKeyIDs)
 	assert.Equal(t, []string{"claude-sonnet-4-5", "gpt-4o"}, []string{models[0].ID, models[1].ID})
 }
 
@@ -726,8 +864,13 @@ func TestFetchUpstreamModelsSupportsSub2APIPricingShapeVariants(t *testing.T) {
 func TestFetchUpstreamModelsKeepsModelsWhenNewAPIPricingIsUnavailable(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Path {
-		case "/api/token/1/key":
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-model"}}`, nil), nil
+		case "/api/token/batch/keys":
+			var payload struct {
+				IDs []int64 `json:"ids"`
+			}
+			require.NoError(t, common.DecodeJson(request.Body, &payload))
+			assert.Equal(t, []int64{1}, payload.IDs)
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"keys":{"1":"sk-model"}}}`, nil), nil
 		case "/v1/models":
 			return jsonResponse(http.StatusOK, `{"data":[{"id":"gpt-4o"}]}`, nil), nil
 		case "/api/ratio_config":

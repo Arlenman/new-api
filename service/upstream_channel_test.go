@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"path/filepath"
@@ -884,6 +885,119 @@ func TestNormalizeUpstreamKeyImportOptionsRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestRefreshUpstreamChannelKeysAvoidsPerKeyRevealAndPreservesLinkedStatus(t *testing.T) {
+	originalDB := model.DB
+	originalLogDB := model.LOG_DB
+	originalHTTPClient := httpClient
+	originalCryptoSecret := common.CryptoSecret
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "refresh-keys-without-reveal.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}))
+	model.DB = db
+	model.LOG_DB = db
+	common.CryptoSecret = "refresh-keys-without-reveal-test-secret"
+	t.Cleanup(func() {
+		model.DB = originalDB
+		model.LOG_DB = originalLogDB
+		httpClient = originalHTTPClient
+		common.CryptoSecret = originalCryptoSecret
+	})
+
+	const (
+		baseURL         = "https://upstream.test"
+		managementToken = "management-token"
+		linkedKey       = "sk-preserved-secret"
+	)
+	items := make([]map[string]any, 0, 25)
+	for keyID := 1; keyID <= 25; keyID++ {
+		items = append(items, map[string]any{
+			"id":     keyID,
+			"name":   fmt.Sprintf("key-%d", keyID),
+			"key":    fmt.Sprintf("sk-key-%02d...mask", keyID),
+			"group":  "default",
+			"status": 1,
+		})
+	}
+	encodedKeyList, err := common.Marshal(map[string]any{
+		"success": true,
+		"data": map[string]any{
+			"page":      1,
+			"page_size": 100,
+			"total":     len(items),
+			"items":     items,
+		},
+	})
+	require.NoError(t, err)
+
+	revealRequests := 0
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/api/status":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"quota_per_unit":1000000}}`, nil), nil
+		case "/api/token":
+			return jsonResponse(http.StatusOK, string(encodedKeyList), nil), nil
+		default:
+			if strings.HasPrefix(request.URL.Path, "/api/token/") {
+				revealRequests++
+				return jsonResponse(http.StatusTooManyRequests, `{"message":"too many requests"}`, nil), nil
+			}
+			require.Failf(t, "unexpected upstream request", "%s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	})}
+
+	localBaseURL := baseURL
+	require.NoError(t, db.Create(&model.Channel{
+		BaseURL: &localBaseURL,
+		Key:     linkedKey,
+		Status:  common.ChannelStatusEnabled,
+	}).Error)
+	ciphertext, err := common.EncryptSecret("upstream-channel-password", managementToken)
+	require.NoError(t, err)
+	fingerprint := UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, linkedKey)
+	oldSnapshot, err := common.Marshal(UpstreamSnapshot{
+		Provider: UpstreamProviderNewAPI,
+		Keys: []UpstreamKey{{
+			ID:             1,
+			Name:           "key-1",
+			KeyFingerprint: fingerprint,
+			Linked:         true,
+			Imported:       true,
+			Active:         true,
+			InUseStatus:    UpstreamKeyInUseStatusEnabled,
+		}},
+		Groups: []UpstreamGroup{{Name: "default", Ratio: 1}},
+		Ratios: map[string]float64{"default": 1},
+	})
+	require.NoError(t, err)
+	row := &model.UpstreamChannel{
+		BaseURL:            baseURL,
+		BaseURLHash:        model.UpstreamBaseURLHash(baseURL),
+		Provider:           UpstreamProviderNewAPI,
+		AuthType:           model.UpstreamAuthTypeAccessToken,
+		Username:           "42",
+		PasswordCiphertext: ciphertext,
+		SnapshotJSON:       string(oldSnapshot),
+		Status:             model.UpstreamChannelStatusReady,
+	}
+	require.NoError(t, db.Create(row).Error)
+
+	updatedRow, snapshot, err := RefreshUpstreamChannelKeys(context.Background(), row.Id)
+	require.NoError(t, err)
+	require.NotNil(t, updatedRow)
+	assert.Zero(t, revealRequests)
+	require.Len(t, snapshot.Keys, 25)
+	assert.Equal(t, fingerprint, snapshot.Keys[0].KeyFingerprint)
+	assert.True(t, snapshot.Keys[0].Linked)
+	assert.True(t, snapshot.Keys[0].Imported)
+	assert.True(t, snapshot.Keys[0].Active)
+	assert.Equal(t, UpstreamKeyInUseStatusEnabled, snapshot.Keys[0].InUseStatus)
+	assert.Empty(t, snapshot.Keys[1].KeyFingerprint)
+	assert.False(t, snapshot.Keys[1].Linked)
+	assert.Equal(t, UpstreamKeyInUseStatusUnlinked, snapshot.Keys[1].InUseStatus)
+	assert.Empty(t, updatedRow.LastError)
+}
+
 func TestRefreshUpstreamChannelGroupsUsesLatestKeysAndPersistsDiscoveredModels(t *testing.T) {
 	originalDB := model.DB
 	originalLogDB := model.LOG_DB
@@ -903,6 +1017,7 @@ func TestRefreshUpstreamChannelGroupsUsesLatestKeysAndPersistsDiscoveredModels(t
 	})
 
 	const managementToken = "management-token"
+	batchKeyRequests := 0
 	requestedModelKeys := make([]string, 0, 2)
 	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Path {
@@ -912,10 +1027,9 @@ func TestRefreshUpstreamChannelGroupsUsesLatestKeysAndPersistsDiscoveredModels(t
 			return jsonResponse(http.StatusOK, `{"success":true,"data":{"quota_per_unit":1000000}}`, nil), nil
 		case "/api/token":
 			return jsonResponse(http.StatusOK, `{"success":true,"data":{"page":1,"page_size":100,"total":2,"items":[{"id":1,"name":"first","key":"sk-first...cret","group":"default","status":1},{"id":2,"name":"new","key":"sk-new...cret","group":"default","status":1}]}}`, nil), nil
-		case "/api/token/1/key":
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-first-secret"}}`, nil), nil
-		case "/api/token/2/key":
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-new-secret"}}`, nil), nil
+		case "/api/token/batch/keys":
+			batchKeyRequests++
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"keys":{"1":"sk-first-secret","2":"sk-new-secret"}}}`, nil), nil
 		case "/v1/models":
 			requestedModelKeys = append(requestedModelKeys, request.Header.Get("Authorization"))
 			switch request.Header.Get("Authorization") {
@@ -962,6 +1076,7 @@ func TestRefreshUpstreamChannelGroupsUsesLatestKeysAndPersistsDiscoveredModels(t
 	assert.Equal(t, model.UpstreamChannelStatusReady, refreshed.Status)
 	assert.Equal(t, []int64{1, 2}, []int64{snapshot.Keys[0].ID, snapshot.Keys[1].ID})
 	assert.Equal(t, []string{"claude-sonnet-4-5", "gpt-4o", "shared"}, []string{snapshot.Models[0].ID, snapshot.Models[1].ID, snapshot.Models[2].ID})
+	assert.Equal(t, 1, batchKeyRequests)
 	assert.Equal(t, []string{"Bearer sk-first-secret", "Bearer sk-new-secret"}, requestedModelKeys)
 
 	stored, err := model.GetUpstreamChannelByID(row.Id)
@@ -973,6 +1088,89 @@ func TestRefreshUpstreamChannelGroupsUsesLatestKeysAndPersistsDiscoveredModels(t
 	assert.Equal(t, "claude-sonnet-4-5", storedSnapshot.Models[0].ID)
 	assert.Equal(t, 0.5, *storedSnapshot.Models[1].Pricing[0].ModelRatio)
 	assert.Empty(t, stored.DefaultTestModel)
+}
+
+func TestRefreshUpstreamChannelGroupsSucceedsWhenBatchKeyRevealIsRateLimited(t *testing.T) {
+	originalDB := model.DB
+	originalLogDB := model.LOG_DB
+	originalHTTPClient := httpClient
+	originalCryptoSecret := common.CryptoSecret
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "refresh-groups-rate-limited-model-discovery.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}))
+	model.DB = db
+	model.LOG_DB = db
+	common.CryptoSecret = "refresh-groups-rate-limited-model-discovery-test-secret"
+	t.Cleanup(func() {
+		model.DB = originalDB
+		model.LOG_DB = originalLogDB
+		httpClient = originalHTTPClient
+		common.CryptoSecret = originalCryptoSecret
+	})
+
+	const managementToken = "management-token"
+	batchKeyRequests := 0
+	singleRevealRequests := 0
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/api/user/self/groups":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"default":{"ratio":1,"desc":"Default"}}}`, nil), nil
+		case "/api/status":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"quota_per_unit":1000000}}`, nil), nil
+		case "/api/token":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"page":1,"page_size":100,"total":1,"items":[{"id":1,"name":"first","key":"sk-first...cret","group":"default","status":1}]}}`, nil), nil
+		case "/api/token/batch/keys":
+			batchKeyRequests++
+			return jsonResponse(http.StatusTooManyRequests, `{"message":"too many requests"}`, nil), nil
+		case "/api/token/1/key":
+			singleRevealRequests++
+			require.Fail(t, "rate limits must not trigger single-key fallback requests")
+			return nil, nil
+		default:
+			require.Failf(t, "unexpected upstream request", "%s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	})}
+
+	ciphertext, err := common.EncryptSecret("upstream-channel-password", managementToken)
+	require.NoError(t, err)
+	fingerprint := UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, "https://upstream.test", "sk-first-secret")
+	oldSnapshot, err := common.Marshal(UpstreamSnapshot{
+		Provider: UpstreamProviderNewAPI,
+		Keys:     []UpstreamKey{{ID: 1, Name: "first", KeyFingerprint: fingerprint}},
+		Groups:   []UpstreamGroup{{Name: "old-group", Ratio: 1}},
+		Ratios:   map[string]float64{"old-group": 1},
+		Models:   []UpstreamModel{{ID: "previous-model"}},
+	})
+	require.NoError(t, err)
+	row := &model.UpstreamChannel{
+		BaseURL:            "https://upstream.test",
+		BaseURLHash:        model.UpstreamBaseURLHash("https://upstream.test"),
+		Provider:           UpstreamProviderNewAPI,
+		AuthType:           model.UpstreamAuthTypeAccessToken,
+		Username:           "42",
+		DefaultTestModel:   "previous-model",
+		PasswordCiphertext: ciphertext,
+		SnapshotJSON:       string(oldSnapshot),
+		Status:             model.UpstreamChannelStatusError,
+		LastError:          "upstream returned HTTP 429: Too Many Requests",
+	}
+	require.NoError(t, db.Create(row).Error)
+
+	updatedRow, snapshot, err := RefreshUpstreamChannelGroups(context.Background(), row.Id)
+	require.NoError(t, err)
+	require.NotNil(t, updatedRow)
+	assert.Equal(t, 1, batchKeyRequests)
+	assert.Zero(t, singleRevealRequests)
+	assert.Equal(t, model.UpstreamChannelStatusReady, updatedRow.Status)
+	assert.Empty(t, updatedRow.LastError)
+	require.Len(t, snapshot.Keys, 1)
+	assert.Equal(t, fingerprint, snapshot.Keys[0].KeyFingerprint)
+	require.Len(t, snapshot.Groups, 1)
+	assert.Equal(t, "default", snapshot.Groups[0].Name)
+	require.Len(t, snapshot.Models, 1)
+	assert.Equal(t, "previous-model", snapshot.Models[0].ID)
+	assert.Equal(t, "previous-model", updatedRow.DefaultTestModel)
 }
 
 func TestRefreshUpstreamChannelGroupsKeepsPreviousPricingWhenPricingEndpointFails(t *testing.T) {
@@ -994,6 +1192,7 @@ func TestRefreshUpstreamChannelGroupsKeepsPreviousPricingWhenPricingEndpointFail
 	})
 
 	const managementToken = "management-token"
+	batchKeyRequests := 0
 	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Path {
 		case "/api/user/self/groups":
@@ -1002,8 +1201,9 @@ func TestRefreshUpstreamChannelGroupsKeepsPreviousPricingWhenPricingEndpointFail
 			return jsonResponse(http.StatusOK, `{"success":true,"data":{"quota_per_unit":1000000}}`, nil), nil
 		case "/api/token":
 			return jsonResponse(http.StatusOK, `{"success":true,"data":{"page":1,"page_size":100,"total":1,"items":[{"id":1,"name":"first","key":"sk-first...cret","group":"default","status":1}]}}`, nil), nil
-		case "/api/token/1/key":
-			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-first-secret"}}`, nil), nil
+		case "/api/token/batch/keys":
+			batchKeyRequests++
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"keys":{"1":"sk-first-secret"}}}`, nil), nil
 		case "/v1/models":
 			return jsonResponse(http.StatusOK, `{"data":[{"id":"gpt-4o"},{"id":"new-model"}]}`, nil), nil
 		case "/api/ratio_config":
@@ -1038,6 +1238,7 @@ func TestRefreshUpstreamChannelGroupsKeepsPreviousPricingWhenPricingEndpointFail
 
 	_, snapshot, err := RefreshUpstreamChannelGroups(context.Background(), row.Id)
 	require.NoError(t, err)
+	assert.Equal(t, 1, batchKeyRequests)
 	require.Len(t, snapshot.Models, 2)
 	assert.Equal(t, "gpt-4o", snapshot.Models[0].ID)
 	require.Len(t, snapshot.Models[0].Pricing, 1)

@@ -305,18 +305,23 @@ func fetchUpstreamKeys(ctx context.Context, client *http.Client, baseURL string,
 		if err != nil {
 			return UpstreamSnapshot{}, err
 		}
-		for i := range keys {
-			if keys[i].KeyFingerprint != "" {
-				continue
+		if revealCandidatesOnly {
+			keyIDs := make([]int64, 0, len(keys))
+			for i := range keys {
+				if keys[i].KeyFingerprint != "" || !maskedUpstreamKeyCouldMatchAny(resolvedProvider, keys[i].MaskedKey, localKeys) {
+					continue
+				}
+				keyIDs = append(keyIDs, keys[i].ID)
 			}
-			if revealCandidatesOnly && !maskedUpstreamKeyCouldMatchAny(resolvedProvider, keys[i].MaskedKey, localKeys) {
-				continue
-			}
-			fullKey, fetchErr := fetchNewAPIFullKeyWithSession(ctx, sessionClient, normalized, headers, keys[i].ID)
+			fullKeys, fetchErr := fetchNewAPIFullKeysWithSession(ctx, sessionClient, normalized, headers, keyIDs)
 			if fetchErr != nil {
-				return UpstreamSnapshot{}, fmt.Errorf("fetch new-api key %d for import status: %w", keys[i].ID, fetchErr)
+				return UpstreamSnapshot{}, fmt.Errorf("fetch new-api keys for link status: %w", fetchErr)
 			}
-			keys[i].KeyFingerprint = UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, normalized, fullKey)
+			for i := range keys {
+				if fullKey := strings.TrimSpace(fullKeys[keys[i].ID]); fullKey != "" {
+					keys[i].KeyFingerprint = UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, normalized, fullKey)
+				}
+			}
 		}
 		return UpstreamSnapshot{Provider: resolvedProvider, Keys: keys, RetrievedAt: time.Now().Unix()}, nil
 	}
@@ -423,16 +428,31 @@ func fetchUpstreamModelsWithPricingStatus(ctx context.Context, client *http.Clie
 
 	modelSet := make(map[string]struct{})
 	probeErrors := make([]string, 0)
+	newAPIKeys := make(map[int64]string)
+	if resolvedProvider == UpstreamProviderNewAPI {
+		keyIDs := make([]int64, 0, len(probeKeys))
+		for _, key := range probeKeys {
+			keyIDs = append(keyIDs, key.ID)
+		}
+		newAPIKeys, err = fetchNewAPIFullKeysWithSession(ctx, sessionClient, normalized, headers, keyIDs)
+		if err != nil {
+			return upstreamModelDiscoveryResult{}, fmt.Errorf("fetch new-api keys for model discovery: %w", err)
+		}
+	}
 	for _, key := range probeKeys {
 		var fullKey string
 		if resolvedProvider == UpstreamProviderNewAPI {
-			fullKey, err = fetchNewAPIFullKeyWithSession(ctx, sessionClient, normalized, headers, key.ID)
+			fullKey = strings.TrimSpace(newAPIKeys[key.ID])
+			if fullKey == "" {
+				probeErrors = append(probeErrors, fmt.Sprintf("key %d: batch response omitted key", key.ID))
+				continue
+			}
 		} else {
 			fullKey, err = fetchSub2APIFullKeyWithToken(ctx, sessionClient, normalized, headers, key.ID)
-		}
-		if err != nil {
-			probeErrors = append(probeErrors, fmt.Sprintf("key %d: fetch key: %v", key.ID, err))
-			continue
+			if err != nil {
+				probeErrors = append(probeErrors, fmt.Sprintf("key %d: fetch key: %v", key.ID, err))
+				continue
+			}
 		}
 		keyModels, fetchErr := fetchUpstreamKeyModelsAllowEmpty(ctx, sessionClient, normalized, fullKey)
 		if fetchErr != nil {
@@ -964,17 +984,6 @@ func fetchNewAPIUpstreamSnapshot(ctx context.Context, client *http.Client, baseU
 	if err != nil {
 		return UpstreamSnapshot{}, err
 	}
-	for i := range keys {
-		if keys[i].KeyFingerprint != "" {
-			continue
-		}
-		fullKey, fetchErr := fetchNewAPIFullKeyWithSession(ctx, sessionClient, baseURL, headers, keys[i].ID)
-		if fetchErr != nil {
-			return UpstreamSnapshot{}, fmt.Errorf("fetch new-api key %d for import status: %w", keys[i].ID, fetchErr)
-		}
-		keys[i].KeyFingerprint = UpstreamKeyFingerprintForProvider(UpstreamProviderNewAPI, baseURL, fullKey)
-	}
-
 	return UpstreamSnapshot{
 		Provider: UpstreamProviderNewAPI,
 		Balance:  balance,
@@ -1327,6 +1336,53 @@ func newAPIManagementAccessHeaders(credential UpstreamCredential) (map[string]st
 		"Authorization": "Bearer " + managementToken,
 		"New-Api-User":  strconv.FormatInt(userID, 10),
 	}, nil
+}
+
+func fetchNewAPIFullKeysWithSession(ctx context.Context, client *http.Client, baseURL string, headers map[string]string, keyIDs []int64) (map[int64]string, error) {
+	keys := make(map[int64]string, len(keyIDs))
+	if len(keyIDs) == 0 {
+		return keys, nil
+	}
+
+	for start := 0; start < len(keyIDs); start += upstreamKeyPageSize {
+		end := start + upstreamKeyPageSize
+		if end > len(keyIDs) {
+			end = len(keyIDs)
+		}
+		var envelope newAPIEnvelope
+		payload := struct {
+			IDs []int64 `json:"ids"`
+		}{IDs: keyIDs[start:end]}
+		err := doUpstreamJSON(ctx, client, http.MethodPost, upstreamURL(baseURL, "/api/token/batch/keys"), payload, headers, &envelope)
+		if err != nil {
+			if start != 0 || (UpstreamHTTPStatus(err) != http.StatusNotFound && UpstreamHTTPStatus(err) != http.StatusMethodNotAllowed) {
+				return nil, err
+			}
+			for _, keyID := range keyIDs {
+				fullKey, fetchErr := fetchNewAPIFullKeyWithSession(ctx, client, baseURL, headers, keyID)
+				if fetchErr != nil {
+					return nil, fetchErr
+				}
+				keys[keyID] = fullKey
+			}
+			return keys, nil
+		}
+		if !envelope.Success {
+			return nil, upstreamEnvelopeError("fetch new-api keys", envelope.Message)
+		}
+		var data struct {
+			Keys map[int64]string `json:"keys"`
+		}
+		if err = common.Unmarshal(envelope.Data, &data); err != nil {
+			return nil, fmt.Errorf("decode new-api batch key response: %w", err)
+		}
+		for keyID, fullKey := range data.Keys {
+			if fullKey = strings.TrimSpace(fullKey); fullKey != "" {
+				keys[keyID] = fullKey
+			}
+		}
+	}
+	return keys, nil
 }
 
 func fetchNewAPIFullKeyWithSession(ctx context.Context, client *http.Client, baseURL string, headers map[string]string, keyID int64) (string, error) {

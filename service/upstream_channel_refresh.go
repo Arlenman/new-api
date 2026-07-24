@@ -95,6 +95,21 @@ func markImportedUpstreamKeys(baseURL string, snapshot *UpstreamSnapshot) error 
 	return reconcileUpstreamKeyLinks(baseURL, snapshot)
 }
 
+func preserveUpstreamKeyFingerprints(previousKeys []UpstreamKey, refreshedKeys []UpstreamKey) {
+	fingerprints := make(map[int64]string, len(previousKeys))
+	for _, key := range previousKeys {
+		if fingerprint := strings.TrimSpace(key.KeyFingerprint); key.ID > 0 && fingerprint != "" {
+			fingerprints[key.ID] = fingerprint
+		}
+	}
+	for i := range refreshedKeys {
+		if strings.TrimSpace(refreshedKeys[i].KeyFingerprint) != "" {
+			continue
+		}
+		refreshedKeys[i].KeyFingerprint = fingerprints[refreshedKeys[i].ID]
+	}
+}
+
 func RefreshUpstreamChannel(ctx context.Context, id int) (*model.UpstreamChannel, UpstreamSnapshot, error) {
 	lock := upstreamRefreshLock(id)
 	lock.Lock()
@@ -128,11 +143,12 @@ func RefreshUpstreamChannel(ctx context.Context, id int) (*model.UpstreamChannel
 		}
 		return row, UpstreamSnapshot{}, err
 	}
+	if previous, loadErr := loadUpstreamSnapshot(row); loadErr == nil {
+		preserveUpstreamKeyFingerprints(previous.Keys, snapshot.Keys)
+		snapshot.Models = previous.Models
+	}
 	if err = markImportedUpstreamKeys(row.BaseURL, &snapshot); err != nil {
 		return row, UpstreamSnapshot{}, errorsWithRefreshState(row.Id, err.Error())
-	}
-	if previous, loadErr := loadUpstreamSnapshot(row); loadErr == nil {
-		snapshot.Models = previous.Models
 	}
 	NormalizeUpstreamSnapshot(&snapshot)
 
@@ -315,16 +331,17 @@ func RefreshUpstreamChannelKeys(ctx context.Context, id int) (*model.UpstreamCha
 		}
 		return row, UpstreamSnapshot{}, err
 	}
-	if err = markImportedUpstreamKeys(row.BaseURL, &fetched); err != nil {
-		return row, UpstreamSnapshot{}, errorsWithRefreshState(row.Id, err.Error())
-	}
 	snapshot, err := loadUpstreamSnapshot(row)
 	if err != nil {
 		return row, UpstreamSnapshot{}, errorsWithRefreshState(row.Id, err.Error())
 	}
+	preserveUpstreamKeyFingerprints(snapshot.Keys, fetched.Keys)
 	snapshot.Provider = fetched.Provider
 	applyUpstreamGroupNames(fetched.Keys, snapshot.Groups)
 	snapshot.Keys = fetched.Keys
+	if err = markImportedUpstreamKeys(row.BaseURL, &snapshot); err != nil {
+		return row, UpstreamSnapshot{}, errorsWithRefreshState(row.Id, err.Error())
+	}
 	snapshot.RetrievedAt = fetched.RetrievedAt
 	row, err = savePartialUpstreamSnapshot(row, snapshot, attemptedAt, "")
 	if err != nil {
@@ -371,9 +388,8 @@ func RefreshUpstreamChannelGroups(ctx context.Context, id int) (*model.UpstreamC
 		if len(snapshot.Keys) == 0 {
 			return row, UpstreamSnapshot{}, errorsWithRefreshState(row.Id, keysErr.Error())
 		}
-	} else if markErr := markImportedUpstreamKeys(row.BaseURL, &fetchedKeys); markErr != nil {
-		return row, UpstreamSnapshot{}, errorsWithRefreshState(row.Id, markErr.Error())
 	} else {
+		preserveUpstreamKeyFingerprints(snapshot.Keys, fetchedKeys.Keys)
 		snapshot.Keys = fetchedKeys.Keys
 		if len(snapshot.Keys) == 0 {
 			snapshot.Models = []UpstreamModel{}
@@ -384,6 +400,9 @@ func RefreshUpstreamChannelGroups(ctx context.Context, id int) (*model.UpstreamC
 	snapshot.Groups = fetched.Groups
 	snapshot.Ratios = fetched.Ratios
 	applyUpstreamGroupNames(snapshot.Keys, snapshot.Groups)
+	if err = markImportedUpstreamKeys(row.BaseURL, &snapshot); err != nil {
+		return row, UpstreamSnapshot{}, errorsWithRefreshState(row.Id, err.Error())
+	}
 	if len(snapshot.Keys) > 0 {
 		modelResult, modelsErr := fetchUpstreamModelsWithPricingStatus(refreshCtx, client, row.BaseURL, fetched.Provider, credential, snapshot.Keys, row.SelectedGroup)
 		if modelsErr == nil {
