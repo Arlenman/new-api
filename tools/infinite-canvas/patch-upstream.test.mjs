@@ -83,7 +83,7 @@ export const localForageStorage: StateStorage = {
 };
 `,
   "web/src/stores/use-prompt-source-store.ts": `import { persist } from "zustand/middleware";
-const PROMPT_SOURCE_STORE_KEY = "infinite-canvas:prompt_source_store";
+const PROMPT_SOURCE_STORE_KEY = "infinite-canvas:prompt_source_store_v2";
 `,
   "web/src/stores/use-theme-store.ts": `import { persist } from "zustand/middleware";
 { name: "infinite-canvas:theme_store" }

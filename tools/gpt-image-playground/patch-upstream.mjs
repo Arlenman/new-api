@@ -102,11 +102,28 @@ export function deleteImageThumbnail(id: string): Promise<undefined> {
   return dbTransaction(STORE_THUMBNAILS, 'readwrite', (s) => s.delete(id))
 }
 `
-const DB_REPLACE_AGENT_COMPLETE_MARKER = `        tx.oncomplete = () => resolve(undefined)
+const DB_COMMIT_TASK_DELETION_COMPLETE_MARKER = `        for (const conversation of updatedConversations) conversationStore.put(conversation)
+        tx.oncomplete = () => resolve(undefined)
         tx.onerror = () => reject(tx.error)
         tx.onabort = () => reject(tx.error)
 `
-const DB_REPLACE_AGENT_COMPLETE_REPLACEMENT = `        tx.oncomplete = () => {
+const DB_COMMIT_TASK_DELETION_COMPLETE_REPLACEMENT = `        for (const conversation of updatedConversations) conversationStore.put(conversation)
+        tx.oncomplete = () => {
+          notifyNewApiImagePlaygroundStorageChanged()
+          resolve(undefined)
+        }
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+`
+const DB_REPLACE_AGENT_COMPLETE_MARKER = `        store.clear()
+        for (const conversation of conversations) store.put(conversation)
+        tx.oncomplete = () => resolve(undefined)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+`
+const DB_REPLACE_AGENT_COMPLETE_REPLACEMENT = `        store.clear()
+        for (const conversation of conversations) store.put(conversation)
+        tx.oncomplete = () => {
           notifyNewApiImagePlaygroundStorageChanged()
           resolve(undefined)
         }
@@ -167,8 +184,7 @@ const STORE_REFRESH_REPLACEMENT = `async function refreshNewApiImagePlaygroundSt
     ? currentActiveConversationId
     : conversations[0]?.id ?? null
   lastStoredAgentConversations = conversations
-  imageCache.clear()
-  thumbnailCache.clear()
+  clearImageCaches()
   useStore.setState((state) => {
     const agentInputDrafts = cleanStaleAgentInputDrafts(
       normalizeAgentInputDrafts(state.agentInputDrafts, conversations),
@@ -223,28 +239,32 @@ const SERVICE_WORKER_REPLACEMENT = `if ('serviceWorker' in navigator) {
   })
 }
 `
+const INPUT_BAR_LAYOUT_IMPORT_MARKER = `import { getContentEditableCursor, getContentEditablePlainText, getContentEditableSelection, getMentionTagHtml, setContentEditableCursor, setContentEditableSelection, syncMentionTagSelection } from '../lib/contentEditableMentions'
+`
+const INPUT_BAR_LAYOUT_IMPORT_REPLACEMENT = `import { clampRightPanelWidth, DEFAULT_RIGHT_PANEL_WIDTH, getContentEditableCursor, getContentEditablePlainText, getContentEditableSelection, getMentionTagHtml, IMAGE_PLAYGROUND_LAYOUT_STORAGE_KEY, IMAGE_PLAYGROUND_LAYOUT_VERSION, MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH, readPlaygroundLayout, RIGHT_LAYOUT_MIN_VIEWPORT_WIDTH, setContentEditableCursor, setContentEditableSelection, syncMentionTagSelection, type PlaygroundEditorPosition, type PlaygroundLayoutConfig } from '../lib/contentEditableMentions'
+`
 const INPUT_BAR_LAYOUT_HELPERS_MARKER = `function getMentionTagTextLength(el: Element) {
 `
-const INPUT_BAR_LAYOUT_HELPERS_REPLACEMENT = `const IMAGE_PLAYGROUND_LAYOUT_STORAGE_KEY = 'gpt-image-playground:layout'
-const IMAGE_PLAYGROUND_LAYOUT_VERSION = 1
-const MIN_RIGHT_PANEL_WIDTH = 320
-const MAX_RIGHT_PANEL_WIDTH = 640
-const DEFAULT_RIGHT_PANEL_WIDTH = 400
-const RIGHT_LAYOUT_MIN_VIEWPORT_WIDTH = 900
+const INPUT_BAR_LAYOUT_HELPERS_REPLACEMENT = `export const IMAGE_PLAYGROUND_LAYOUT_STORAGE_KEY = 'gpt-image-playground:layout'
+export const IMAGE_PLAYGROUND_LAYOUT_VERSION = 1
+export const MIN_RIGHT_PANEL_WIDTH = 320
+export const MAX_RIGHT_PANEL_WIDTH = 640
+export const DEFAULT_RIGHT_PANEL_WIDTH = 400
+export const RIGHT_LAYOUT_MIN_VIEWPORT_WIDTH = 900
 
-type PlaygroundEditorPosition = 'bottom' | 'right'
+export type PlaygroundEditorPosition = 'bottom' | 'right'
 
-type PlaygroundLayoutConfig = {
+export type PlaygroundLayoutConfig = {
   version: 1
   editorPosition: PlaygroundEditorPosition
   rightPanelWidth: number
 }
 
-function clampRightPanelWidth(width: number) {
+export function clampRightPanelWidth(width: number) {
   return Math.min(MAX_RIGHT_PANEL_WIDTH, Math.max(MIN_RIGHT_PANEL_WIDTH, Math.round(width)))
 }
 
-function readPlaygroundLayout(): PlaygroundLayoutConfig {
+export function readPlaygroundLayout(): PlaygroundLayoutConfig {
   const fallback: PlaygroundLayoutConfig = {
     version: IMAGE_PLAYGROUND_LAYOUT_VERSION,
     editorPosition: 'bottom',
@@ -505,7 +525,8 @@ const AGENT_SCROLL_STYLE_REPLACEMENT = `          style={{
           aria-label="滚动到底部"
 `
 const PERSISTENCE_MARKER = `export function getPersistedState(state: AppState) {
-  const settings = normalizeSettings(state.settings)
+  return createPersistedState(state, agentConversationMigrationPending && !agentConversationPersistenceReady)
+}
 `
 const RESPONSE_OUTPUT_MERGE_MARKER = `function mergeResponseOutputItems(previous: ResponsesOutputItem[], next: ResponsesOutputItem[]) {
   const merged = [...previous]
@@ -534,6 +555,7 @@ const RESPONSE_OUTPUT_MERGE_REPLACEMENT = `function mergeResponseOutputItems(pre
 const AGENT_IMAGE_FUNCTION_CALL_MARKER = `      if (imageFunctionCalls.length > 0) {
         for (const fc of imageFunctionCalls) {
           const output = await executeSingleImageFunctionCall(fc)
+          if (output == null) continue
           functionCallOutputs.push({
             type: 'function_call_output',
             call_id: fc.call_id,
@@ -552,6 +574,7 @@ const AGENT_IMAGE_FUNCTION_CALL_MARKER = `      if (imageFunctionCalls.length > 
           })
         }
       }
+
 `
 const AGENT_IMAGE_FUNCTION_CALL_REPLACEMENT = `      const customImageFunctionCalls: ResponsesOutputItem[] = []
       const customImageFunctionCallIndexById = new Map<string, number>()
@@ -572,43 +595,43 @@ const AGENT_IMAGE_FUNCTION_CALL_REPLACEMENT = `      const customImageFunctionCa
       }
 
       const imageFunctionCallOutputs = await Promise.all(
-        customImageFunctionCalls.map(async (fc) => ({
-          type: 'function_call_output',
-          call_id: fc.call_id,
-          output: fc.name === 'generate_image_batch'
+        customImageFunctionCalls.map(async (fc) => {
+          const output = fc.name === 'generate_image_batch'
             ? await executeBatchFunctionCall(fc)
-            : await executeSingleImageFunctionCall(fc),
-        } satisfies ResponsesOutputItem)),
+            : await executeSingleImageFunctionCall(fc)
+          if (output == null) return null
+          return {
+            type: 'function_call_output',
+            call_id: fc.call_id,
+            output,
+          } satisfies ResponsesOutputItem
+        }),
       )
-      functionCallOutputs.push(...imageFunctionCallOutputs)
+      for (const output of imageFunctionCallOutputs) {
+        if (output) functionCallOutputs.push(output)
+      }
 `
 
 const AGENT_IMAGE_TASK_DURABLE_COMPLETION_MARKER = `      updateTaskInStore(taskId, {
-        prompt: image.revisedPrompt ?? latestTask?.prompt ?? '',
+        prompt: image.revisedPrompt ?? latestBeforeUpdate.prompt,
         outputImages: [stored.id],
         actualParams,
         actualParamsByImage: { [stored.id]: actualParams },
         revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
         rawResponsePayload,
-        status: 'done',
-        error: null,
-        finishedAt: Date.now(),
-        elapsed: Date.now() - (latestTask?.createdAt ?? startedAt),
+        ...createTaskDonePatch(latestBeforeUpdate, Date.now()),
         agentToolAction: image.action,
       })
       useStore.getState().setTaskStreamPreview(taskId)
 `
 const AGENT_IMAGE_TASK_DURABLE_COMPLETION_REPLACEMENT = `      updateTaskInStore(taskId, {
-        prompt: image.revisedPrompt ?? latestTask?.prompt ?? '',
+        prompt: image.revisedPrompt ?? latestBeforeUpdate.prompt,
         outputImages: [stored.id],
         actualParams,
         actualParamsByImage: { [stored.id]: actualParams },
         revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
         rawResponsePayload,
-        status: 'done',
-        error: null,
-        finishedAt: Date.now(),
-        elapsed: Date.now() - (latestTask?.createdAt ?? startedAt),
+        ...createTaskDonePatch(latestBeforeUpdate, Date.now()),
         agentToolAction: image.action,
       })
       const completedTask = useStore.getState().tasks.find((task) => task.id === taskId)
@@ -617,16 +640,11 @@ const AGENT_IMAGE_TASK_DURABLE_COMPLETION_REPLACEMENT = `      updateTaskInStore
 `
 
 const HYBRID_BATCH_TASK_COMPLETION_MARKER = `        // If not streaming and we have an image, complete the pre-created task.
-        if (batchResult.image && !shouldStreamAssistantMessage) {
-          await completeAgentImageTask({ ...batchResult.image, toolCallId: batchToolCallId }, batchResult.rawResponsePayload)
-        }
-`
-const HYBRID_BATCH_TASK_COMPLETION_REPLACEMENT = `        // Hybrid image requests do not emit Agent image-tool completion callbacks,
-        // so always complete their pre-created task card from the returned image.
         if (batchResult.image && (requestSettings.agentApiConfigMode === 'hybrid' || !shouldStreamAssistantMessage)) {
-          await completeAgentImageTask({ ...batchResult.image, toolCallId: batchToolCallId }, batchResult.rawResponsePayload)
+          committed = (await completeAgentImageTask({ ...batchResult.image, toolCallId: batchToolCallId }, batchResult.rawResponsePayload)).committed
         }
 `
+const HYBRID_BATCH_TASK_COMPLETION_REPLACEMENT = HYBRID_BATCH_TASK_COMPLETION_MARKER
 
 const IN_PLACE_TASK_RETRY_MARKER = `/** 重试失败的任务：创建新任务并执行 */
 export async function retryTask(task: TaskRecord) {
@@ -790,8 +808,12 @@ const PERSISTENCE_REPLACEMENT = `export function getPersistedState(state: AppSta
         ? normalizedSettings.agentImageProfileId
         : activeProfileId),
   })
+  return createPersistedState(
+    { ...state, settings },
+    agentConversationMigrationPending && !agentConversationPersistenceReady,
+  )
+}
 `
-
 const SETTINGS_MANAGED_STATE_MARKER = `  const activeProfile = draft.profiles.find((profile) => profile.id === draft.activeProfileId) ?? draft.profiles[0] ?? getActiveApiProfile(draft)
 `
 const SETTINGS_MANAGED_STATE_REPLACEMENT = `${SETTINGS_MANAGED_STATE_MARKER}  const managedProfileIds = new Set([
@@ -978,6 +1000,8 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
   const syncPath = path.join(upstreamRoot, 'src', 'lib', 'newApiSync.ts')
   const dbPath = path.join(upstreamRoot, 'src', 'lib', 'db.ts')
   const storePath = path.join(upstreamRoot, 'src', 'store.ts')
+  const agentResponseStatePath = path.join(upstreamRoot, 'src', 'lib', 'agentResponseState.ts')
+  const contentEditableMentionsPath = path.join(upstreamRoot, 'src', 'lib', 'contentEditableMentions.ts')
   const appPath = path.join(upstreamRoot, 'src', 'App.tsx')
   const inputBarPath = path.join(upstreamRoot, 'src', 'components', 'InputBar.tsx')
   const agentWorkspacePath = path.join(upstreamRoot, 'src', 'components', 'AgentWorkspace.tsx')
@@ -993,6 +1017,8 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
   const mainSource = await readFile(mainPath, 'utf8')
   const dbSource = await readFile(dbPath, 'utf8')
   const storeSource = await readFile(storePath, 'utf8')
+  const agentResponseStateSource = await readFile(agentResponseStatePath, 'utf8')
+  const contentEditableMentionsSource = await readFile(contentEditableMentionsPath, 'utf8')
   const appSource = await readFile(appPath, 'utf8')
   const inputBarSource = await readFile(inputBarPath, 'utf8')
   const agentWorkspaceSource = await readFile(agentWorkspacePath, 'utf8')
@@ -1062,8 +1088,14 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
     DB_THUMBNAIL_DELETE_REPLACEMENT,
     'thumbnail delete',
   )
-  const dbWithAgentNotification = replaceExactlyOnce(
+  const dbWithTaskDeletionNotification = replaceExactlyOnce(
     dbWithThumbnailDelete,
+    DB_COMMIT_TASK_DELETION_COMPLETE_MARKER,
+    DB_COMMIT_TASK_DELETION_COMPLETE_REPLACEMENT,
+    'task deletion completion',
+  )
+  const dbWithAgentNotification = replaceExactlyOnce(
+    dbWithTaskDeletionNotification,
     DB_REPLACE_AGENT_COMPLETE_MARKER,
     DB_REPLACE_AGENT_COMPLETE_REPLACEMENT,
     'Agent conversation replacement completion',
@@ -1104,14 +1136,14 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
     PERSISTENCE_REPLACEMENT,
     'persistence',
   )
-  const storeWithMergedResponseOutput = replaceExactlyOnce(
-    storeWithPersistence,
+  const patchedAgentResponseStateSource = replaceExactlyOnce(
+    agentResponseStateSource,
     RESPONSE_OUTPUT_MERGE_MARKER,
     RESPONSE_OUTPUT_MERGE_REPLACEMENT,
     'Agent response output merge',
   )
   const storeWithAgentCalls = replaceExactlyOnce(
-    storeWithMergedResponseOutput,
+    storeWithPersistence,
     AGENT_IMAGE_FUNCTION_CALL_MARKER,
     AGENT_IMAGE_FUNCTION_CALL_REPLACEMENT,
     'Agent image function calls',
@@ -1134,14 +1166,20 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
     IN_PLACE_TASK_RETRY_REPLACEMENT,
     'task retry',
   )
-  const inputBarWithLayoutHelpers = replaceExactlyOnce(
-    inputBarSource,
+  const patchedContentEditableMentionsSource = replaceExactlyOnce(
+    contentEditableMentionsSource,
     INPUT_BAR_LAYOUT_HELPERS_MARKER,
     INPUT_BAR_LAYOUT_HELPERS_REPLACEMENT,
     'InputBar layout helpers',
   )
+  const inputBarWithLayoutImport = replaceExactlyOnce(
+    inputBarSource,
+    INPUT_BAR_LAYOUT_IMPORT_MARKER,
+    INPUT_BAR_LAYOUT_IMPORT_REPLACEMENT,
+    'InputBar layout import',
+  )
   const inputBarWithLayoutState = replaceExactlyOnce(
-    inputBarWithLayoutHelpers,
+    inputBarWithLayoutImport,
     INPUT_BAR_LAYOUT_STATE_MARKER,
     INPUT_BAR_LAYOUT_STATE_REPLACEMENT,
     'InputBar layout state',
@@ -1302,6 +1340,8 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
   await writeFile(storagePath, storageSource)
   await writeFile(syncPath, syncSource)
   await writeFile(dbPath, patchedDbSource)
+  await writeFile(agentResponseStatePath, patchedAgentResponseStateSource)
+  await writeFile(contentEditableMentionsPath, patchedContentEditableMentionsSource)
   await writeFile(storePath, patchedStoreSource)
   await writeFile(appPath, patchedAppSource)
   await writeFile(inputBarPath, patchedInputBarSource)

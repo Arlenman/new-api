@@ -48,6 +48,23 @@ export function deleteTask(id: string): Promise<undefined> {
   return dbTransaction(STORE_TASKS, 'readwrite', (s) => s.delete(id))
 }
 
+export function commitTaskDeletion(deletedTaskIds: string[], updatedTasks: TaskRecord[], updatedConversations: AgentConversation[]): Promise<undefined> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction([STORE_TASKS, STORE_AGENT_CONVERSATIONS], 'readwrite')
+        const taskStore = tx.objectStore(STORE_TASKS)
+        const conversationStore = tx.objectStore(STORE_AGENT_CONVERSATIONS)
+        for (const id of deletedTaskIds) taskStore.delete(id)
+        for (const task of updatedTasks) taskStore.put(task)
+        for (const conversation of updatedConversations) conversationStore.put(conversation)
+        tx.oncomplete = () => resolve(undefined)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+      }),
+  )
+}
+
 export function putAgentConversation(conversation: AgentConversation): Promise<IDBValidKey> {
   return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.put(conversation))
 }
@@ -128,28 +145,7 @@ if ('serviceWorker' in navigator) {
 }
 `
 
-const STORE_SOURCE = `import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
-
-function normalizeSettings(settings: unknown) {
-  return settings
-}
-
-export function getPersistedState(state: AppState) {
-  const settings = normalizeSettings(state.settings)
-  return {
-    settings,
-    params: state.params,
-  }
-}
-
-const useStore = create(
-  persist(() => ({}), {
-      name: 'gpt-image-playground',
-  }),
-)
-
-function mergeResponseOutputItems(previous: ResponsesOutputItem[], next: ResponsesOutputItem[]) {
+const AGENT_RESPONSE_STATE_SOURCE = `function mergeResponseOutputItems(previous: ResponsesOutputItem[], next: ResponsesOutputItem[]) {
   const merged = [...previous]
   for (const item of next) {
     const index = item.id ? merged.findIndex((existing) => existing.id === item.id) : -1
@@ -158,11 +154,41 @@ function mergeResponseOutputItems(previous: ResponsesOutputItem[], next: Respons
   }
   return merged
 }
+`
+
+const STORE_SOURCE = `import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
+
+function normalizeSettings(settings: unknown) {
+  return settings
+}
+
+function createPersistedState(state: AppState, includeLegacyAgentConversations = false) {
+  return {
+    settings: normalizeSettings(state.settings),
+    params: state.params,
+    includeLegacyAgentConversations,
+  }
+}
+
+let agentConversationMigrationPending = false
+let agentConversationPersistenceReady = false
+
+export function getPersistedState(state: AppState) {
+  return createPersistedState(state, agentConversationMigrationPending && !agentConversationPersistenceReady)
+}
+
+const useStore = create(
+  persist(() => ({}), {
+      name: 'gpt-image-playground',
+  }),
+)
 
 async function executeAgentFunctionCalls() {
       if (imageFunctionCalls.length > 0) {
         for (const fc of imageFunctionCalls) {
           const output = await executeSingleImageFunctionCall(fc)
+          if (output == null) continue
           functionCallOutputs.push({
             type: 'function_call_output',
             call_id: fc.call_id,
@@ -181,20 +207,25 @@ async function executeAgentFunctionCalls() {
           })
         }
       }
+
+      for (const fc of continueFunctionCalls) {
+        functionCallOutputs.push({
+          type: 'function_call_output',
+          call_id: fc.call_id,
+          output: JSON.stringify({ status: 'continued' }),
+        })
+      }
 }
 
 async function completeAgentImageTask(image: AgentApiResultImage, rawResponsePayload?: string) {
       updateTaskInStore(taskId, {
-        prompt: image.revisedPrompt ?? latestTask?.prompt ?? '',
+        prompt: image.revisedPrompt ?? latestBeforeUpdate.prompt,
         outputImages: [stored.id],
         actualParams,
         actualParamsByImage: { [stored.id]: actualParams },
         revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
         rawResponsePayload,
-        status: 'done',
-        error: null,
-        finishedAt: Date.now(),
-        elapsed: Date.now() - (latestTask?.createdAt ?? startedAt),
+        ...createTaskDonePatch(latestBeforeUpdate, Date.now()),
         agentToolAction: image.action,
       })
       useStore.getState().setTaskStreamPreview(taskId)
@@ -202,8 +233,8 @@ async function completeAgentImageTask(image: AgentApiResultImage, rawResponsePay
 
 async function completeHybridBatchTask() {
         // If not streaming and we have an image, complete the pre-created task.
-        if (batchResult.image && !shouldStreamAssistantMessage) {
-          await completeAgentImageTask({ ...batchResult.image, toolCallId: batchToolCallId }, batchResult.rawResponsePayload)
+        if (batchResult.image && (requestSettings.agentApiConfigMode === 'hybrid' || !shouldStreamAssistantMessage)) {
+          committed = (await completeAgentImageTask({ ...batchResult.image, toolCallId: batchToolCallId }, batchResult.rawResponsePayload)).committed
         }
 }
 
@@ -266,7 +297,14 @@ const APP_SOURCE = `export default function App() {
 }
 `
 
-const INPUT_BAR_SOURCE = `function getMentionTagTextLength(el: Element) {
+const CONTENT_EDITABLE_MENTIONS_SOURCE = `function getMentionTagTextLength(el: Element) {
+  return el.textContent?.length ?? 0
+}
+`
+
+const INPUT_BAR_SOURCE = `import { getContentEditableCursor, getContentEditablePlainText, getContentEditableSelection, getMentionTagHtml, setContentEditableCursor, setContentEditableSelection, syncMentionTagSelection } from '../lib/contentEditableMentions'
+
+function getMentionTagTextLength(el: Element) {
   return el.textContent?.length ?? 0
 }
 
@@ -467,12 +505,16 @@ async function createFixture(
   dbSource = DB_SOURCE,
   settingsModalSource = SETTINGS_MODAL_SOURCE,
   agentSettingsSource = AGENT_SETTINGS_SOURCE,
+  agentResponseStateSource = AGENT_RESPONSE_STATE_SOURCE,
+  contentEditableMentionsSource = CONTENT_EDITABLE_MENTIONS_SOURCE,
 ) {
   const root = await mkdtemp(path.join(tmpdir(), 'gpt-image-playground-patch-'))
   await mkdir(path.join(root, 'src', 'components', 'settings'), { recursive: true })
   await mkdir(path.join(root, 'src', 'lib'), { recursive: true })
   await writeFile(path.join(root, 'src', 'main.tsx'), mainSource)
   await writeFile(path.join(root, 'src', 'lib', 'db.ts'), dbSource)
+  await writeFile(path.join(root, 'src', 'lib', 'agentResponseState.ts'), agentResponseStateSource)
+  await writeFile(path.join(root, 'src', 'lib', 'contentEditableMentions.ts'), contentEditableMentionsSource)
   await writeFile(path.join(root, 'src', 'store.ts'), storeSource)
   await writeFile(path.join(root, 'src', 'App.tsx'), appSource)
   await writeFile(path.join(root, 'src', 'components', 'InputBar.tsx'), inputBarSource)
@@ -493,6 +535,8 @@ test('injects the New API bridge through the validated upstream entry markers', 
   const syncSource = await readFile(path.join(root, 'src', 'lib', 'newApiSync.ts'), 'utf8')
   const dbSource = await readFile(path.join(root, 'src', 'lib', 'db.ts'), 'utf8')
   const storeSource = await readFile(path.join(root, 'src', 'store.ts'), 'utf8')
+  const agentResponseStateSource = await readFile(path.join(root, 'src', 'lib', 'agentResponseState.ts'), 'utf8')
+  const contentEditableMentionsSource = await readFile(path.join(root, 'src', 'lib', 'contentEditableMentions.ts'), 'utf8')
   const appSource = await readFile(path.join(root, 'src', 'App.tsx'), 'utf8')
   const inputBarSource = await readFile(path.join(root, 'src', 'components', 'InputBar.tsx'), 'utf8')
   const agentWorkspaceSource = await readFile(path.join(root, 'src', 'components', 'AgentWorkspace.tsx'), 'utf8')
@@ -569,20 +613,24 @@ test('injects the New API bridge through the validated upstream entry markers', 
   assert.match(storeSource, /localStorage\.getItem\('new-api:image-playground:tool-settings'\)/)
   assert.match(storeSource, /const settings = normalizeSettings\(\{[\s\S]*profiles,[\s\S]*activeProfileId,[\s\S]*agentApiConfigMode,/)
   assert.doesNotMatch(storeSource, /const settings = normalizeSettings\(state\.settings\)/)
-  assert.match(storeSource, /let index = item\.id \? merged\.findIndex\(\(existing\) => existing\.id === item\.id\) : -1/)
-  assert.match(storeSource, /const callId = item\.call_id\?\.trim\(\)/)
-  assert.match(storeSource, /existing\.type === item\.type && existing\.call_id\?\.trim\(\) === callId/)
-  assert.doesNotMatch(storeSource, /const index = item\.id \? merged\.findIndex/)
+  assert.match(agentResponseStateSource, /let index = item\.id \? merged\.findIndex\(\(existing\) => existing\.id === item\.id\) : -1/)
+  assert.match(agentResponseStateSource, /const callId = item\.call_id\?\.trim\(\)/)
+  assert.match(agentResponseStateSource, /existing\.type === item\.type && existing\.call_id\?\.trim\(\) === callId/)
+  assert.doesNotMatch(agentResponseStateSource, /const index = item\.id \? merged\.findIndex/)
   assert.match(storeSource, /const customImageFunctionCallIndexById = new Map<string, number>\(\)/)
   assert.match(storeSource, /const callId = fc\.call_id\?\.trim\(\)/)
   assert.match(storeSource, /customImageFunctionCalls\[existingIndex\] = fc/)
   assert.match(storeSource, /const imageFunctionCallOutputs = await Promise\.all\(/)
   assert.match(storeSource, /customImageFunctionCalls\.map\(async \(fc\) =>/)
+  assert.match(storeSource, /if \(output == null\) return null/)
+  assert.match(storeSource, /for \(const output of imageFunctionCallOutputs\)/)
+  assert.match(storeSource, /if \(output\) functionCallOutputs\.push\(output\)/)
   assert.match(storeSource, /fc\.name === 'generate_image_batch'/)
   assert.match(storeSource, /\? await executeBatchFunctionCall\(fc\)/)
   assert.match(storeSource, /: await executeSingleImageFunctionCall\(fc\)/)
   assert.doesNotMatch(storeSource, /for \(const fc of imageFunctionCalls\)/)
   assert.doesNotMatch(storeSource, /for \(const fc of batchFunctionCalls\)/)
+  assert.match(storeSource, /clearImageCaches\(\)/)
   assert.match(storeSource, /requestSettings\.agentApiConfigMode === 'hybrid' \|\| !shouldStreamAssistantMessage/)
   assert.match(storeSource, /await completeAgentImageTask\(\{ \.\.\.batchResult\.image, toolCallId: batchToolCallId \}, batchResult\.rawResponsePayload\)/)
   assert.doesNotMatch(storeSource, /batchResult\.image && !shouldStreamAssistantMessage/)
@@ -598,14 +646,15 @@ test('injects the New API bridge through the validated upstream entry markers', 
   assert.match(storeSource, /deleteUnreferencedImageIds\(staleImageIds\)/)
   assert.doesNotMatch(storeSource, /const taskId = genId\(\)/)
   assert.doesNotMatch(storeSource, /setTasks\(\[newTask, \.\.\.latestTasks\]\)/)
-  assert.match(inputBarSource, /const IMAGE_PLAYGROUND_LAYOUT_STORAGE_KEY = 'gpt-image-playground:layout'/)
-  assert.match(inputBarSource, /const IMAGE_PLAYGROUND_LAYOUT_VERSION = 1/)
-  assert.match(inputBarSource, /const MIN_RIGHT_PANEL_WIDTH = 320/)
-  assert.match(inputBarSource, /const MAX_RIGHT_PANEL_WIDTH = 640/)
-  assert.match(inputBarSource, /const DEFAULT_RIGHT_PANEL_WIDTH = 400/)
-  assert.match(inputBarSource, /const RIGHT_LAYOUT_MIN_VIEWPORT_WIDTH = 900/)
-  assert.match(inputBarSource, /type PlaygroundEditorPosition = 'bottom' \| 'right'/)
-  assert.match(inputBarSource, /editorPosition: 'bottom'/)
+  assert.match(contentEditableMentionsSource, /const IMAGE_PLAYGROUND_LAYOUT_STORAGE_KEY = 'gpt-image-playground:layout'/)
+  assert.match(contentEditableMentionsSource, /const IMAGE_PLAYGROUND_LAYOUT_VERSION = 1/)
+  assert.match(contentEditableMentionsSource, /const MIN_RIGHT_PANEL_WIDTH = 320/)
+  assert.match(contentEditableMentionsSource, /const MAX_RIGHT_PANEL_WIDTH = 640/)
+  assert.match(contentEditableMentionsSource, /const DEFAULT_RIGHT_PANEL_WIDTH = 400/)
+  assert.match(contentEditableMentionsSource, /const RIGHT_LAYOUT_MIN_VIEWPORT_WIDTH = 900/)
+  assert.match(contentEditableMentionsSource, /type PlaygroundEditorPosition = 'bottom' \| 'right'/)
+  assert.match(contentEditableMentionsSource, /editorPosition: 'bottom'/)
+  assert.match(inputBarSource, /import \{ clampRightPanelWidth, DEFAULT_RIGHT_PANEL_WIDTH, getContentEditableCursor, getContentEditablePlainText, getContentEditableSelection, getMentionTagHtml, IMAGE_PLAYGROUND_LAYOUT_STORAGE_KEY, IMAGE_PLAYGROUND_LAYOUT_VERSION, MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH, readPlaygroundLayout, RIGHT_LAYOUT_MIN_VIEWPORT_WIDTH, setContentEditableCursor, setContentEditableSelection, syncMentionTagSelection, type PlaygroundEditorPosition, type PlaygroundLayoutConfig \} from '..\/lib\/contentEditableMentions'/)
   assert.match(inputBarSource, /window\.localStorage\.setItem\(IMAGE_PLAYGROUND_LAYOUT_STORAGE_KEY, JSON\.stringify\(next\)\)/)
   assert.match(inputBarSource, /viewportWidth < RIGHT_LAYOUT_MIN_VIEWPORT_WIDTH[\s\S]*\? 'bottom'[\s\S]*: playgroundLayout\.editorPosition/)
   assert.match(inputBarSource, /role="separator"/)
@@ -633,7 +682,7 @@ test('injects the New API bridge through the validated upstream entry markers', 
   assert.match(agentWorkspaceSource, /paddingBottom: 'var\(--image-playground-agent-content-padding-bottom/)
   assert.match(agentWorkspaceSource, /bottom: 'var\(--image-playground-agent-scroll-bottom/)
   assert.match(agentWorkspaceSource, /left: 'calc\(\(100% - var\(--image-playground-agent-content-padding-right, 0px\)\) \/ 2\)'/)
-  assert.equal(inputBarSource.match(/const IMAGE_PLAYGROUND_LAYOUT_STORAGE_KEY =/g)?.length, 1)
+  assert.equal(contentEditableMentionsSource.match(/const IMAGE_PLAYGROUND_LAYOUT_STORAGE_KEY =/g)?.length, 1)
   assert.equal(inputBarSource.match(/role="separator"/g)?.length, 1)
   assert.equal(appSource.match(/--image-playground-gallery-content-padding-right/g)?.length, 1)
   assert.equal(agentWorkspaceSource.match(/--image-playground-agent-content-padding-right/g)?.length, 2)
@@ -644,7 +693,13 @@ test('fails closed when the upstream InputBar layout marker no longer matches', 
     MAIN_SOURCE,
     STORE_SOURCE,
     APP_SOURCE,
-    INPUT_BAR_SOURCE.replace(
+    INPUT_BAR_SOURCE,
+    AGENT_WORKSPACE_SOURCE,
+    DB_SOURCE,
+    SETTINGS_MODAL_SOURCE,
+    AGENT_SETTINGS_SOURCE,
+    AGENT_RESPONSE_STATE_SOURCE,
+    CONTENT_EDITABLE_MENTIONS_SOURCE.replace(
       'function getMentionTagTextLength(el: Element) {\n',
       'function getMentionTextLength(el: Element) {\n',
     ),
@@ -662,7 +717,13 @@ test('fails closed when the upstream InputBar layout marker matches more than on
     MAIN_SOURCE,
     STORE_SOURCE,
     APP_SOURCE,
-    INPUT_BAR_SOURCE.replace(marker, marker + marker),
+    INPUT_BAR_SOURCE,
+    AGENT_WORKSPACE_SOURCE,
+    DB_SOURCE,
+    SETTINGS_MODAL_SOURCE,
+    AGENT_SETTINGS_SOURCE,
+    AGENT_RESPONSE_STATE_SOURCE,
+    CONTENT_EDITABLE_MENTIONS_SOURCE.replace(marker, marker + marker),
   )
 
   await assert.rejects(
@@ -697,8 +758,8 @@ test('fails closed when the upstream service worker marker no longer matches', a
 
 test('fails closed when the upstream persistence marker no longer matches', async () => {
   const root = await createFixture(MAIN_SOURCE, STORE_SOURCE.replace(
-    '  const settings = normalizeSettings(state.settings)\n',
-    '  const settings = migrateSettings(state.settings)\n',
+    '  return createPersistedState(state, agentConversationMigrationPending && !agentConversationPersistenceReady)\n',
+    '  return createPersistedState(state, agentConversationMigrationPending || agentConversationPersistenceReady)\n',
   ))
 
   await assert.rejects(
@@ -709,10 +770,20 @@ test('fails closed when the upstream persistence marker no longer matches', asyn
 
 
 test('fails closed when the upstream Agent response output merge marker no longer matches', async () => {
-  const root = await createFixture(MAIN_SOURCE, STORE_SOURCE.replace(
-    '  const merged = [...previous]\n',
-    '  const merged = previous.slice()\n',
-  ))
+  const root = await createFixture(
+    MAIN_SOURCE,
+    STORE_SOURCE,
+    APP_SOURCE,
+    INPUT_BAR_SOURCE,
+    AGENT_WORKSPACE_SOURCE,
+    DB_SOURCE,
+    SETTINGS_MODAL_SOURCE,
+    AGENT_SETTINGS_SOURCE,
+    AGENT_RESPONSE_STATE_SOURCE.replace(
+      '  const merged = [...previous]\n',
+      '  const merged = previous.slice()\n',
+    ),
+  )
 
   await assert.rejects(
     applyUpstreamPatch(root, { bridgeSource: 'export {}\n' }),
@@ -746,8 +817,8 @@ test('fails closed when the upstream Agent image task completion marker no longe
 
 test('fails closed when the upstream hybrid Agent batch completion marker no longer matches', async () => {
   const root = await createFixture(MAIN_SOURCE, STORE_SOURCE.replace(
+    "        if (batchResult.image && (requestSettings.agentApiConfigMode === 'hybrid' || !shouldStreamAssistantMessage)) {\n",
     '        if (batchResult.image && !shouldStreamAssistantMessage) {\n',
-    '        if (batchResult.image) {\n',
   ))
 
   await assert.rejects(

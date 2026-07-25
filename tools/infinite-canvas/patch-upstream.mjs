@@ -258,7 +258,7 @@ const webdavDomainKeys: AppSyncDomainKey[] = ["canvas", "assets", "image-workben
             "prompt storage import",
         ],
         [
-            'const PROMPT_SOURCE_STORE_KEY = "infinite-canvas:prompt_source_store";',
+            'const PROMPT_SOURCE_STORE_KEY = "infinite-canvas:prompt_source_store_v2";',
             'const PROMPT_SOURCE_STORE_KEY = namespacedStorageKey("infinite-canvas:prompt_source_store");',
             "prompt storage key",
         ],
