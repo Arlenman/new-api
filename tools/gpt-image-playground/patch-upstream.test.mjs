@@ -40,6 +40,14 @@ function dbTransaction<T>(
   )
 }
 
+export function putTask(task: TaskRecord): Promise<IDBValidKey> {
+  return dbTransaction(STORE_TASKS, 'readwrite', (s) => s.put(task))
+}
+
+export function deleteTask(id: string): Promise<undefined> {
+  return dbTransaction(STORE_TASKS, 'readwrite', (s) => s.delete(id))
+}
+
 export function putAgentConversation(conversation: AgentConversation): Promise<IDBValidKey> {
   return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.put(conversation))
 }
@@ -515,6 +523,7 @@ test('injects the New API bridge through the validated upstream entry markers', 
   assert.match(syncSource, /content_sha256: localItem\.contentSha256/)
   assert.match(dbSource, /const DB_NAME = getNewApiImagePlaygroundDatabaseName\(\)/)
   assert.match(dbSource, /await ensureLegacyImagePlaygroundIndexedDBMigration/)
+  assert.match(dbSource, /recordNewApiImagePlaygroundDeletion\('task', id\)/)
   assert.match(dbSource, /export function deleteAgentConversation/)
   assert.match(dbSource, /export function getAllStoredImageThumbnailIds/)
   assert.match(dbSource, /notifyNewApiImagePlaygroundStorageChanged\(\)/)

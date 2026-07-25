@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const IMPORT_MARKER = "import App from './App'\n"
 const INSTALL_MARKER = 'installMobileViewportGuards()\n'
 const DB_IMPORT_MARKER = "import type { AgentConversation, TaskRecord, StoredImage, StoredImageThumbnail } from '../types'\n"
-const DB_IMPORT_REPLACEMENT = `${DB_IMPORT_MARKER}import {\n  ensureLegacyImagePlaygroundIndexedDBMigration,\n  getNewApiImagePlaygroundDatabaseName,\n  notifyNewApiImagePlaygroundStorageChanged,\n} from './newApiStorage'\n`
+const DB_IMPORT_REPLACEMENT = `${DB_IMPORT_MARKER}import {\n  ensureLegacyImagePlaygroundIndexedDBMigration,\n  getNewApiImagePlaygroundDatabaseName,\n  notifyNewApiImagePlaygroundStorageChanged,\n  recordNewApiImagePlaygroundDeletion,\n} from './newApiStorage'\n`
 const DB_NAME_MARKER = "const DB_NAME = 'gpt-image-playground'\n"
 const DB_NAME_REPLACEMENT = 'const DB_NAME = getNewApiImagePlaygroundDatabaseName()\n'
 const DB_OPEN_MARKER = `function openDB(): Promise<IDBDatabase> {
@@ -63,6 +63,16 @@ const DB_TRANSACTION_REPLACEMENT = `function dbTransaction<T>(
         tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'))
       }),
   )
+}
+`
+const DB_TASK_DELETE_MARKER = `export function deleteTask(id: string): Promise<undefined> {
+  return dbTransaction(STORE_TASKS, 'readwrite', (s) => s.delete(id))
+}
+`
+const DB_TASK_DELETE_REPLACEMENT = `export async function deleteTask(id: string): Promise<undefined> {
+  await dbTransaction(STORE_TASKS, 'readwrite', (s) => s.delete(id))
+  recordNewApiImagePlaygroundDeletion('task', id)
+  return undefined
 }
 `
 const DB_AGENT_DELETE_MARKER = `export function putAgentConversation(conversation: AgentConversation): Promise<IDBValidKey> {
@@ -1028,8 +1038,14 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
     DB_TRANSACTION_REPLACEMENT,
     'database transaction',
   )
-  const dbWithAgentDelete = replaceExactlyOnce(
+  const dbWithTaskDelete = replaceExactlyOnce(
     dbWithTransaction,
+    DB_TASK_DELETE_MARKER,
+    DB_TASK_DELETE_REPLACEMENT,
+    'task delete',
+  )
+  const dbWithAgentDelete = replaceExactlyOnce(
+    dbWithTaskDelete,
     DB_AGENT_DELETE_MARKER,
     DB_AGENT_DELETE_REPLACEMENT,
     'Agent conversation delete',

@@ -1,10 +1,16 @@
 const LEGACY_DATABASE_NAME = 'gpt-image-playground'
 const STORAGE_NAMESPACE = 'new-api-user'
 const MIGRATION_VERSION = 1
+const PENDING_DELETION_VERSION = 1
 const LEGACY_MIGRATION_OWNER_KEY = `new-api:image-playground:legacy-migration-owner:v${MIGRATION_VERSION}`
 const LEGACY_MIGRATION_MARKER_PATTERN = /^new-api:image-playground:(?:local-storage|indexed-db)-migration:v\d+:(\d+)(?::|$)/
 
 export const NEW_API_IMAGE_PLAYGROUND_STORAGE_CHANGED_EVENT = 'new-api:image-playground:storage-changed'
+
+export interface NewApiImagePlaygroundPendingDeletion {
+  kind: 'task' | 'agent-conversation'
+  key: string
+}
 
 let syncNotificationSuppression = 0
 const indexedDBMigrationPromises = new Map<string, Promise<void>>()
@@ -94,6 +100,70 @@ export function getNewApiImagePlaygroundStorageKey(baseKey = LEGACY_DATABASE_NAM
 export function getNewApiImagePlaygroundMetadataKey(): string | null {
   const userId = getNewApiImagePlaygroundUserId()
   return userId ? `new-api:image-playground:sync:v1:${userId}` : null
+}
+
+function getNewApiImagePlaygroundPendingDeletionsKey(): string | null {
+  const userId = getNewApiImagePlaygroundUserId()
+  return userId ? `new-api:image-playground:pending-deletions:v${PENDING_DELETION_VERSION}:${userId}` : null
+}
+
+function pendingDeletionEntryKey(deletion: NewApiImagePlaygroundPendingDeletion): string {
+  return `${deletion.kind}\u0000${deletion.key}`
+}
+
+export function getNewApiImagePlaygroundPendingDeletions(): NewApiImagePlaygroundPendingDeletion[] {
+  const storage = getLocalStorage()
+  const storageKey = getNewApiImagePlaygroundPendingDeletionsKey()
+  if (!storage || !storageKey) return []
+
+  try {
+    const parsed = JSON.parse(storage.getItem(storageKey) ?? '') as unknown
+    if (!Array.isArray(parsed)) return []
+    const deletions = new Map<string, NewApiImagePlaygroundPendingDeletion>()
+    for (const value of parsed) {
+      if (!value || typeof value !== 'object') continue
+      const { kind, key } = value as Partial<NewApiImagePlaygroundPendingDeletion>
+      if ((kind !== 'task' && kind !== 'agent-conversation') || typeof key !== 'string' || !key) continue
+      const deletion = { kind, key }
+      deletions.set(pendingDeletionEntryKey(deletion), deletion)
+    }
+    return [...deletions.values()]
+  } catch {
+    return []
+  }
+}
+
+export function recordNewApiImagePlaygroundDeletion(
+  kind: NewApiImagePlaygroundPendingDeletion['kind'],
+  key: string,
+) {
+  if (syncNotificationSuppression > 0 || !key) return
+  const storage = getLocalStorage()
+  const storageKey = getNewApiImagePlaygroundPendingDeletionsKey()
+  if (!storage || !storageKey) return
+
+  const deletion = { kind, key }
+  const deletions = new Map(
+    getNewApiImagePlaygroundPendingDeletions().map((value) => [pendingDeletionEntryKey(value), value]),
+  )
+  deletions.set(pendingDeletionEntryKey(deletion), deletion)
+  storage.setItem(storageKey, JSON.stringify([...deletions.values()]))
+  notifyNewApiImagePlaygroundStorageChanged()
+}
+
+export function clearNewApiImagePlaygroundPendingDeletion(
+  kind: NewApiImagePlaygroundPendingDeletion['kind'],
+  key: string,
+) {
+  const storage = getLocalStorage()
+  const storageKey = getNewApiImagePlaygroundPendingDeletionsKey()
+  if (!storage || !storageKey) return
+
+  const targetKey = pendingDeletionEntryKey({ kind, key })
+  const remaining = getNewApiImagePlaygroundPendingDeletions()
+    .filter((value) => pendingDeletionEntryKey(value) !== targetKey)
+  if (remaining.length === 0) storage.removeItem(storageKey)
+  else storage.setItem(storageKey, JSON.stringify(remaining))
 }
 
 export function getNewApiImagePlaygroundAssetCacheName(): string | null {

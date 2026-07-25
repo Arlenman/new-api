@@ -119,3 +119,24 @@ test("missing or invalid server identity fails closed instead of trusting localS
   assert.equal(storage.getNewApiImagePlaygroundAssetCacheName(), null);
   assert.equal(localStorage.getItem("gpt-image-playground:new-api-user:202"), null);
 });
+
+test("task deletion intent is durable and remote deletion application is suppressed", async (t) => {
+  restoreGlobals(t);
+  const localStorage = createStorage();
+  const storage = await loadStorageModule({ injectedUserId: 101, localStorage });
+
+  storage.recordNewApiImagePlaygroundDeletion("task", "task-1");
+  assert.deepEqual(storage.getNewApiImagePlaygroundPendingDeletions(), [
+    { kind: "task", key: "task-1" },
+  ]);
+
+  await storage.runWithoutNewApiImagePlaygroundSyncNotifications(async () => {
+    storage.recordNewApiImagePlaygroundDeletion("task", "remote-task");
+  });
+  assert.deepEqual(storage.getNewApiImagePlaygroundPendingDeletions(), [
+    { kind: "task", key: "task-1" },
+  ]);
+
+  storage.clearNewApiImagePlaygroundPendingDeletion("task", "task-1");
+  assert.deepEqual(storage.getNewApiImagePlaygroundPendingDeletions(), []);
+});

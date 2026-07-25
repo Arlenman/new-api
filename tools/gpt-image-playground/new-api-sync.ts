@@ -16,12 +16,15 @@ import {
   putTask,
 } from './db'
 import {
+  clearNewApiImagePlaygroundPendingDeletion,
   getNewApiImagePlaygroundAssetCacheName,
   getNewApiImagePlaygroundMetadataKey,
+  getNewApiImagePlaygroundPendingDeletions,
   getNewApiImagePlaygroundStorageKey,
   getNewApiImagePlaygroundUserId,
   NEW_API_IMAGE_PLAYGROUND_STORAGE_CHANGED_EVENT,
   runWithoutNewApiImagePlaygroundSyncNotifications,
+  type NewApiImagePlaygroundPendingDeletion,
 } from './newApiStorage'
 
 const TOOL = 'image-playground'
@@ -30,6 +33,7 @@ const SYNC_DEBOUNCE_MS = 750
 const SYNC_INTERVAL_MS = 30_000
 const MAX_SYNC_PAGES = 10_000
 const BOOTSTRAP_PAGE_SIZE = 100
+const MAX_PENDING_DELETION_SYNC_ROUNDS = 3
 
 interface ApiEnvelope<T> {
   success: boolean
@@ -149,6 +153,8 @@ type RemoteAppliedHandler = (result: ImagePlaygroundSyncResult) => void | Promis
 
 let initializationPromise: Promise<ImagePlaygroundSyncResult> | null = null
 let syncPromise: Promise<ImagePlaygroundSyncResult> | null = null
+let syncRerunRequested = false
+let syncNotifyRequested = false
 let syncTimer: ReturnType<typeof setTimeout> | null = null
 let installed = false
 let remoteAppliedHandler: RemoteAppliedHandler | null = null
@@ -284,6 +290,13 @@ async function hashPayload(value: unknown): Promise<string> {
 
 function entryKey(kind: string, key: string) {
   return `${kind}\u0000${key}`
+}
+
+function readPendingDeletionMap(): Map<string, NewApiImagePlaygroundPendingDeletion> {
+  return new Map(
+    getNewApiImagePlaygroundPendingDeletions()
+      .map((deletion) => [entryKey(deletion.kind, deletion.key), deletion]),
+  )
 }
 
 function readMetadata(): SyncMetadata {
@@ -582,10 +595,38 @@ async function uploadAsset(asset: NonNullable<LocalItem['asset']>): Promise<Remo
   })
 }
 
-async function buildMutations(localItems: Map<string, LocalItem>, metadata: SyncMetadata): Promise<Mutation[]> {
+async function buildDeletionMutation(
+  deletion: NewApiImagePlaygroundPendingDeletion,
+  baseRevision: number,
+): Promise<Mutation> {
+  return {
+    client_mutation_id: `ip_${await sha256Hex(stableStringify({
+      kind: deletion.kind,
+      key: deletion.key,
+      baseRevision,
+      hash: '',
+      deleted: true,
+    }))}`,
+    kind: deletion.kind,
+    key: deletion.key,
+    schema_version: SCHEMA_VERSION,
+    base_revision: baseRevision,
+    status: 'deleted',
+    payload: {},
+    asset_ids: [],
+    created_at: 0,
+    deleted: true,
+  }
+}
+
+async function buildMutations(
+  localItems: Map<string, LocalItem>,
+  metadata: SyncMetadata,
+  pendingDeletions: Map<string, NewApiImagePlaygroundPendingDeletion>,
+): Promise<Mutation[]> {
   const mutations: Mutation[] = []
   for (const [key, item] of localItems) {
-    if (item.syncable === false) continue
+    if (item.syncable === false || pendingDeletions.has(key)) continue
     const previous = metadata.entries[key]
     if (previous && !previous.deleted && !previous.pending_asset_id && previous.hash === item.hash) continue
 
@@ -634,8 +675,12 @@ async function buildMutations(localItems: Map<string, LocalItem>, metadata: Sync
     })
   }
 
+  for (const [key, deletion] of pendingDeletions) {
+    mutations.push(await buildDeletionMutation(deletion, metadata.entries[key]?.revision ?? 0))
+  }
+
   for (const [key, previous] of Object.entries(metadata.entries)) {
-    if (previous.deleted || localItems.has(key)) continue
+    if (previous.deleted || localItems.has(key) || pendingDeletions.has(key)) continue
     const separatorIndex = key.indexOf('\u0000')
     if (separatorIndex < 0) continue
     if (isAssetBackedKind(key.slice(0, separatorIndex)) && (previous.asset_id || previous.pending_asset_id)) continue
@@ -852,22 +897,8 @@ async function remoteItemHash(item: RemoteItem): Promise<string> {
   return hashPayload(item.payload)
 }
 
-async function applyRemoteItemAndUpdateMetadata(
-  item: RemoteItem,
-  metadata: SyncMetadata,
-  applied: ImagePlaygroundSyncResult,
-  force: boolean,
-): Promise<void> {
-  const key = entryKey(item.kind, item.key)
-  const known = metadata.entries[key]
-  if (!force && known && known.revision >= item.revision) return
-
-  if (!(item.kind === 'task' && isBrowserOwnedRunningTask(item.payload))) {
-    const itemResult = await applyRemoteItem(item, metadata, known?.asset_id)
-    applied.stateChanged ||= itemResult.stateChanged
-    applied.dataChanged ||= itemResult.dataChanged
-  }
-  metadata.entries[key] = {
+async function updateMetadataFromRemoteItem(item: RemoteItem, metadata: SyncMetadata): Promise<void> {
+  metadata.entries[entryKey(item.kind, item.key)] = {
     revision: item.revision,
     hash: await remoteItemHash(item),
     deleted: item.deleted,
@@ -878,6 +909,35 @@ async function applyRemoteItemAndUpdateMetadata(
   }
 }
 
+async function applyRemoteItemAndUpdateMetadata(
+  item: RemoteItem,
+  metadata: SyncMetadata,
+  applied: ImagePlaygroundSyncResult,
+  force: boolean,
+  pendingDeletions: Map<string, NewApiImagePlaygroundPendingDeletion>,
+): Promise<void> {
+  const key = entryKey(item.kind, item.key)
+  const known = metadata.entries[key]
+  const pendingDeletion = pendingDeletions.get(key)
+  if (pendingDeletion && item.deleted) {
+    clearNewApiImagePlaygroundPendingDeletion(pendingDeletion.kind, pendingDeletion.key)
+    pendingDeletions.delete(key)
+  }
+  if (!force && known && known.revision >= item.revision) return
+
+  if (pendingDeletion && !item.deleted) {
+    await updateMetadataFromRemoteItem(item, metadata)
+    return
+  }
+
+  if (!(item.kind === 'task' && isBrowserOwnedRunningTask(item.payload))) {
+    const itemResult = await applyRemoteItem(item, metadata, known?.asset_id)
+    applied.stateChanged ||= itemResult.stateChanged
+    applied.dataChanged ||= itemResult.dataChanged
+  }
+  await updateMetadataFromRemoteItem(item, metadata)
+}
+
 async function performSync(): Promise<ImagePlaygroundSyncResult> {
   const userId = getNewApiImagePlaygroundUserId()
   if (!userId) return { stateChanged: false, dataChanged: false }
@@ -885,10 +945,12 @@ async function performSync(): Promise<ImagePlaygroundSyncResult> {
   const metadata = readMetadata()
   await restoreMissingImageAssets(metadata)
   const localItems = await collectLocalItems(metadata)
-  const mutations = await buildMutations(localItems, metadata)
+  const pendingDeletions = readPendingDeletionMap()
+  let mutations = await buildMutations(localItems, metadata, pendingDeletions)
   const applied = { stateChanged: false, dataChanged: false }
 
-  if (mutations.length > 0) {
+  for (let round = 0; mutations.length > 0 && round < MAX_PENDING_DELETION_SYNC_ROUNDS; round += 1) {
+    const retryMutations: Mutation[] = []
     for (let offset = 0; offset < mutations.length; offset += 500) {
       const mutationBatch = mutations.slice(offset, offset + 500)
       const response = await apiRequest<SyncResponse>(`/api/user-tools/${TOOL}/sync`, {
@@ -896,6 +958,10 @@ async function performSync(): Promise<ImagePlaygroundSyncResult> {
         body: JSON.stringify({ mutations: mutationBatch }),
       })
       for (const mutationResult of response.results) {
+        const localKey = entryKey(mutationResult.kind, mutationResult.key)
+        const pendingDeletion = readPendingDeletionMap().get(localKey)
+        if (pendingDeletion) pendingDeletions.set(localKey, pendingDeletion)
+
         if (mutationResult.result === 'error') {
           console.error(
             `New API image playground mutation failed (${mutationResult.kind}/${mutationResult.key}):`,
@@ -903,9 +969,16 @@ async function performSync(): Promise<ImagePlaygroundSyncResult> {
           )
           continue
         }
-        const localKey = entryKey(mutationResult.kind, mutationResult.key)
         const localItem = localItems.get(localKey)
-        if (mutationResult.result === 'applied' && mutationResult.item && localItem) {
+        if (pendingDeletion && mutationResult.item) {
+          await updateMetadataFromRemoteItem(mutationResult.item, metadata)
+          if (mutationResult.item.deleted) {
+            clearNewApiImagePlaygroundPendingDeletion(pendingDeletion.kind, pendingDeletion.key)
+            pendingDeletions.delete(localKey)
+          } else {
+            retryMutations.push(await buildDeletionMutation(pendingDeletion, mutationResult.item.revision))
+          }
+        } else if (mutationResult.result === 'applied' && mutationResult.item && localItem) {
           metadata.entries[localKey] = {
             revision: mutationResult.item.revision,
             hash: localItem.hash,
@@ -917,18 +990,21 @@ async function performSync(): Promise<ImagePlaygroundSyncResult> {
           }
         } else if (mutationResult.result === 'conflict' && mutationResult.item) {
           await runWithoutNewApiImagePlaygroundSyncNotifications(async () => {
-            await applyRemoteItemAndUpdateMetadata(mutationResult.item!, metadata, applied, true)
+            await applyRemoteItemAndUpdateMetadata(mutationResult.item!, metadata, applied, true, pendingDeletions)
           })
         }
       }
       writeMetadata(metadata)
     }
+    mutations = retryMutations
   }
 
   await runWithoutNewApiImagePlaygroundSyncNotifications(async () => {
     metadata.cursor = await streamRemoteItems(metadata.cursor, async (items) => {
+      const latestPendingDeletions = readPendingDeletionMap()
+      for (const [key, deletion] of latestPendingDeletions) pendingDeletions.set(key, deletion)
       for (const item of items) {
-        await applyRemoteItemAndUpdateMetadata(item, metadata, applied, false)
+        await applyRemoteItemAndUpdateMetadata(item, metadata, applied, false, pendingDeletions)
       }
       writeMetadata(metadata)
     })
@@ -939,16 +1015,34 @@ async function performSync(): Promise<ImagePlaygroundSyncResult> {
 }
 
 async function runSync(notify = true): Promise<ImagePlaygroundSyncResult> {
-  if (syncPromise) return syncPromise
-  syncPromise = performSync()
-    .then(async (result) => {
-      if (notify && (result.stateChanged || result.dataChanged)) {
-        await remoteAppliedHandler?.(result)
+  if (syncPromise) {
+    syncRerunRequested = true
+    syncNotifyRequested ||= notify
+    return syncPromise
+  }
+
+  syncNotifyRequested = notify
+  syncPromise = (async () => {
+    const combinedResult = { stateChanged: false, dataChanged: false }
+    while (true) {
+      syncRerunRequested = false
+      const result = await performSync()
+      combinedResult.stateChanged ||= result.stateChanged
+      combinedResult.dataChanged ||= result.dataChanged
+      if (syncRerunRequested) continue
+
+      const shouldNotify = syncNotifyRequested
+      syncNotifyRequested = false
+      if (shouldNotify && (combinedResult.stateChanged || combinedResult.dataChanged)) {
+        await remoteAppliedHandler?.(combinedResult)
       }
-      return result
-    })
+      if (!syncRerunRequested) return combinedResult
+    }
+  })()
     .finally(() => {
       syncPromise = null
+      syncRerunRequested = false
+      syncNotifyRequested = false
     })
   return syncPromise
 }
