@@ -156,8 +156,116 @@ const AGENT_RESPONSE_STATE_SOURCE = `function mergeResponseOutputItems(previous:
 }
 `
 
+const TYPES_SOURCE = `export interface ApiProfile {
+  streamImages?: boolean
+  streamPartialImages?: number
+  providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'model' | 'apiMode' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages'>>>>
+}
+`
+
+const IMAGE_API_SHARED_SOURCE = `export interface CallApiOptions {
+  inputImageDataUrls: string[]
+  maskDataUrl?: string
+  onFalRequestEnqueued?: (request: { requestId: string; endpoint: string }) => void
+}
+
+export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, signal?: AbortSignal): Promise<string> {
+  if (isDataUrl(url)) return url
+
+  let response: Response
+  try {
+    response = await fetch(url, {
+      cache: 'no-store',
+      signal,
+    })
+  } catch (err) {
+    throw err
+  }
+
+  if (!response.ok) throw new Error('Image download failed: ' + response.status)
+  return fallbackMime
+}
+`
+
+const API_PROFILES_SOURCE = `export function normalizeApiProfile(record: Record<string, unknown>, defaults: ApiProfile) {
+  const streamImages = record.streamImages === true
+  return {
+    responseFormatB64Json: record.responseFormatB64Json === true ? true : undefined,
+    streamImages,
+    streamPartialImages: normalizeStreamPartialImages(record.streamPartialImages, defaults.streamPartialImages),
+  }
+}
+`
+
+const OPENAI_COMPATIBLE_IMAGE_API_SOURCE = `const PROMPT_REWRITE_GUARD_PREFIX = 'Use the following text as the complete prompt. Do not rewrite it:'
+
+function getStreamPartialImages(profile: ApiProfile): number {
+  return profile.streamPartialImages ?? DEFAULT_STREAM_PARTIAL_IMAGES
+}
+
+async function parseImagesApiResponse(payload: ImageApiResponse, mime: string, signal?: AbortSignal): Promise<CallApiResult> {
+  const images: string[] = []
+  for (const item of payload.data ?? []) {
+    if (isHttpUrl(item.url) || isDataUrl(item.url)) {
+        images.push(await fetchImageUrlAsDataUrl(item.url, mime, signal))
+    }
+  }
+  return { images }
+}
+
+function eventToImageResponseItem(event: Record<string, unknown>): ImageResponseItem {
+  return event
+}
+
+export async function callImagesApi(opts: CallApiOptions, profile: ApiProfile, n: number) {
+  if ((profile.codexCli || (profile.streamImages && n > 1)) && n > 1) {
+    return callImagesApiConcurrent(opts, profile, n)
+  }
+
+  const body: Record<string, unknown> = {}
+    let response: Response
+
+    if (isEdit) {
+      if (profile.streamImages) {
+        formData.append('stream', 'true')
+        formData.append('partial_images', String(getStreamPartialImages(profile)))
+      }
+      response = await fetch(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
+        method: 'POST',
+        headers: requestHeaders,
+        cache: 'no-store',
+        body: formData,
+        signal: controller.signal,
+      })
+  } else {
+      if (profile.streamImages) {
+        body.stream = true
+        body.partial_images = getStreamPartialImages(profile)
+      }
+
+      response = await fetch(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
+        method: 'POST',
+        headers: {
+          ...requestHeaders,
+          'Content-Type': 'application/json',
+        },
+        cache: 'no-store',
+        body: JSON.stringify(body),
+      })
+  }
+
+    if (profile.streamImages && isEventStreamResponse(response)) {
+      return parseImagesApiStreamResponse(response, mime, opts.onPartialImage)
+    }
+  return parseImagesApiResponse(await response.json() as ImageApiResponse, mime, controller.signal)
+}
+`
+
 const STORE_SOURCE = `import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
+
+const customRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 function normalizeSettings(settings: unknown) {
   return settings
@@ -278,6 +386,83 @@ export async function retryTask(task: TaskRecord) {
   await putTask(newTask)
 
   executeTask(taskId)
+}
+
+function getCustomRecoveryProfile(settings: AppSettings, task: TaskRecord) {
+  return task.apiProvider ? getTaskApiProfile(settings, task) : null
+}
+
+async function callHybridImageApiSingle(opts: {
+  taskId: string
+  referenceImageDataUrls: string[]
+  onPartialImage?: (event: unknown) => void
+}) {
+  return callImageApi({
+        inputImageDataUrls: opts.referenceImageDataUrls,
+        onPartialImage: opts.onPartialImage
+  })
+}
+
+async function executeTask(taskId: string) {
+  if (
+    taskProvider !== 'fal' &&
+    !isAsyncCustomProviderTask(requestSettings, taskProvider, task.inputImageIds.length > 0) &&
+    !usesConcurrentOpenAIImageRequests(activeProfile, task.params)
+  ) {
+    scheduleOpenAIWatchdog(taskId, activeProfile.timeout, activeProfile)
+  }
+
+  return callImageApi({
+      inputImageDataUrls: inputDataUrls,
+      maskDataUrl,
+      onFalRequestEnqueued: (request) => {
+        updateTaskInStore(taskId, { falRequestId: request.requestId })
+      },
+  })
+}
+
+function clearCustomRecoveryTimer(taskId: string) {
+  const timer = customRecoveryTimers.get(taskId)
+  if (timer) clearTimeout(timer)
+  customRecoveryTimers.delete(taskId)
+}
+
+function scheduleCustomRecovery(taskId: string, delayMs = CUSTOM_RECOVERY_POLL_MS) {
+  if (customRecoveryTimers.has(taskId)) return
+  if (!useStore.getState().tasks.some((task) => task.id === taskId)) return
+  const timer = setTimeout(() => {
+    customRecoveryTimers.delete(taskId)
+    recoverCustomTask(taskId)
+  }, delayMs)
+  customRecoveryTimers.set(taskId, timer)
+}
+
+async function recoverCustomTask(taskId: string) {
+  const { settings, tasks } = useStore.getState()
+  const task = tasks.find((item) => item.id === taskId)
+  if (!task || !task.customTaskId || task.status === 'done') return
+
+  const profile = getCustomRecoveryProfile(settings, task)
+  const customProvider = task.apiProvider ? getCustomProviderDefinition(settings, task.apiProvider) : null
+  if (!profile || !customProvider?.poll) {
+    scheduleCustomRecovery(taskId)
+    return
+  }
+
+  try {
+    const result = await getCustomQueuedImageResult(profile, customProvider, task.customTaskId, task.params)
+    clearCustomRecoveryTimer(taskId)
+    await completeRecoveredCustomTask(task, result)
+  } catch (err) {
+    clearCustomRecoveryTimer(taskId)
+    if (!useStore.getState().tasks.some((item) => item.id === taskId)) return
+    updateTaskInStore(taskId, {
+      ...createTaskErrorPatch(task, err instanceof Error ? err.message : String(err), Date.now()),
+      ...getRawErrorPayload(err),
+      customRecoverable: false,
+    })
+    if (isAgentTask(task)) void continueRecoveredAgentRound(taskId)
+  }
 }
 
 export async function initStore() {
@@ -507,14 +692,24 @@ async function createFixture(
   agentSettingsSource = AGENT_SETTINGS_SOURCE,
   agentResponseStateSource = AGENT_RESPONSE_STATE_SOURCE,
   contentEditableMentionsSource = CONTENT_EDITABLE_MENTIONS_SOURCE,
+  typesSource = TYPES_SOURCE,
+  imageApiSharedSource = IMAGE_API_SHARED_SOURCE,
+  apiProfilesSource = API_PROFILES_SOURCE,
+  openaiCompatibleImageApiSource = OPENAI_COMPATIBLE_IMAGE_API_SOURCE,
 ) {
   const root = await mkdtemp(path.join(tmpdir(), 'gpt-image-playground-patch-'))
   await mkdir(path.join(root, 'src', 'components', 'settings'), { recursive: true })
   await mkdir(path.join(root, 'src', 'lib'), { recursive: true })
+  await mkdir(path.join(root, 'public'), { recursive: true })
   await writeFile(path.join(root, 'src', 'main.tsx'), mainSource)
+  await writeFile(path.join(root, 'public', 'sw.js'), 'self.addEventListener(\'fetch\', () => {})\n')
   await writeFile(path.join(root, 'src', 'lib', 'db.ts'), dbSource)
   await writeFile(path.join(root, 'src', 'lib', 'agentResponseState.ts'), agentResponseStateSource)
   await writeFile(path.join(root, 'src', 'lib', 'contentEditableMentions.ts'), contentEditableMentionsSource)
+  await writeFile(path.join(root, 'src', 'types.ts'), typesSource)
+  await writeFile(path.join(root, 'src', 'lib', 'imageApiShared.ts'), imageApiSharedSource)
+  await writeFile(path.join(root, 'src', 'lib', 'apiProfiles.ts'), apiProfilesSource)
+  await writeFile(path.join(root, 'src', 'lib', 'openaiCompatibleImageApi.ts'), openaiCompatibleImageApiSource)
   await writeFile(path.join(root, 'src', 'store.ts'), storeSource)
   await writeFile(path.join(root, 'src', 'App.tsx'), appSource)
   await writeFile(path.join(root, 'src', 'components', 'InputBar.tsx'), inputBarSource)
@@ -524,16 +719,53 @@ async function createFixture(
   return root
 }
 
+test('authorizes only exact same-origin managed image file downloads in a clean upstream patch', async () => {
+  const root = await createFixture()
+
+  await applyUpstreamPatch(root, { bridgeSource: 'export {}\n' })
+
+  const imageApiSharedSource = await readFile(path.join(root, 'src', 'lib', 'imageApiShared.ts'), 'utf8')
+  const openaiCompatibleImageApiSource = await readFile(path.join(root, 'src', 'lib', 'openaiCompatibleImageApi.ts'), 'utf8')
+
+  assert.match(imageApiSharedSource, /headers\?: HeadersInit/)
+  assert.match(imageApiSharedSource, /response = await fetch\(url, \{\n      headers,/)
+
+  const managedHeaderResolver = openaiCompatibleImageApiSource.match(
+    /function getManagedImageRequestHeaders\([\s\S]*?\n}\n/,
+  )?.[0]
+  assert.ok(managedHeaderResolver)
+  assert.match(managedHeaderResolver, /imageUrl\.origin !== baseUrl\.origin/)
+  assert.match(managedHeaderResolver, /\^\\\/pg\\\/image-files\\\/\[\^\/\]\+\\\/content\$/)
+  assert.match(managedHeaderResolver, /return createRequestHeaders\(profile\)/)
+
+  const managedCompletion = openaiCompatibleImageApiSource.match(
+    /if \(status === 'completed'\) \{[\s\S]*?\n      }/,
+  )?.[0]
+  assert.ok(managedCompletion)
+  assert.match(managedCompletion, /\(url\) => getManagedImageRequestHeaders\(profile, url\)/)
+
+  const ordinaryResponse = openaiCompatibleImageApiSource.match(
+    /return parseImagesApiResponse\(await response\.json\(\) as ImageApiResponse, mime, controller\.signal\)/,
+  )?.[0]
+  assert.ok(ordinaryResponse)
+  assert.doesNotMatch(ordinaryResponse, /getManagedImageRequestHeaders|createRequestHeaders/)
+})
+
 test('injects the New API bridge through the validated upstream entry markers', async () => {
   const root = await createFixture()
 
   await applyUpstreamPatch(root, { bridgeSource: 'export const bridgeFixture = true\n' })
 
   const mainSource = await readFile(path.join(root, 'src', 'main.tsx'), 'utf8')
+  const serviceWorkerSource = await readFile(path.join(root, 'public', 'sw.js'), 'utf8')
   const bridgeSource = await readFile(path.join(root, 'src', 'lib', 'newApiBridge.ts'), 'utf8')
   const storageSource = await readFile(path.join(root, 'src', 'lib', 'newApiStorage.ts'), 'utf8')
   const syncSource = await readFile(path.join(root, 'src', 'lib', 'newApiSync.ts'), 'utf8')
   const dbSource = await readFile(path.join(root, 'src', 'lib', 'db.ts'), 'utf8')
+  const typesSource = await readFile(path.join(root, 'src', 'types.ts'), 'utf8')
+  const imageApiSharedSource = await readFile(path.join(root, 'src', 'lib', 'imageApiShared.ts'), 'utf8')
+  const apiProfilesSource = await readFile(path.join(root, 'src', 'lib', 'apiProfiles.ts'), 'utf8')
+  const openaiCompatibleImageApiSource = await readFile(path.join(root, 'src', 'lib', 'openaiCompatibleImageApi.ts'), 'utf8')
   const storeSource = await readFile(path.join(root, 'src', 'store.ts'), 'utf8')
   const agentResponseStateSource = await readFile(path.join(root, 'src', 'lib', 'agentResponseState.ts'), 'utf8')
   const contentEditableMentionsSource = await readFile(path.join(root, 'src', 'lib', 'contentEditableMentions.ts'), 'utf8')
@@ -547,6 +779,10 @@ test('injects the New API bridge through the validated upstream entry markers', 
   assert.match(mainSource, /navigator\.serviceWorker\.getRegistration\(scope\)/)
   assert.match(mainSource, /key\.startsWith\('gpt-image-playground-'\)/)
   assert.doesNotMatch(mainSource, /serviceWorker\.register/)
+  assert.match(serviceWorkerSource, /self\.registration\.unregister\(\)/)
+  assert.match(serviceWorkerSource, /const CACHE_PREFIX = 'gpt-image-playground-'/)
+  assert.match(serviceWorkerSource, /key\.startsWith\(CACHE_PREFIX\)/)
+  assert.doesNotMatch(serviceWorkerSource, /respondWith|cache\.put/)
   assert.equal(bridgeSource, 'export const bridgeFixture = true\n')
   assert.match(storageSource, /getNewApiImagePlaygroundDatabaseName/)
   assert.doesNotMatch(storageSource, /new_api_user/)
@@ -571,6 +807,47 @@ test('injects the New API bridge through the validated upstream entry markers', 
   assert.match(dbSource, /export function deleteAgentConversation/)
   assert.match(dbSource, /export function getAllStoredImageThumbnailIds/)
   assert.match(dbSource, /notifyNewApiImagePlaygroundStorageChanged\(\)/)
+  assert.match(typesSource, /managedAsyncImages\?: boolean/)
+  assert.match(imageApiSharedSource, /clientTaskId\?: string/)
+  assert.match(apiProfilesSource, /managedAsyncImages: record\.managedAsyncImages === true/)
+  assert.match(openaiCompatibleImageApiSource, /const MANAGED_TASK_POLL_MS = 1000/)
+  assert.match(openaiCompatibleImageApiSource, /const MANAGED_TASK_REQUEST_TIMEOUT_MS = 10_000/)
+  assert.match(openaiCompatibleImageApiSource, /const deadlineController = new AbortController\(\)/)
+  assert.match(openaiCompatibleImageApiSource, /let requestTimedOut = false/)
+  assert.match(openaiCompatibleImageApiSource, /await sleep\(MANAGED_TASK_POLL_MS, deadlineController\.signal\)/)
+  assert.match(openaiCompatibleImageApiSource, /X-Playground-Async': 'true'/)
+  assert.match(openaiCompatibleImageApiSource, /X-Playground-Client-Task-Id': opts\.clientTaskId!/)
+  assert.equal(
+    (openaiCompatibleImageApiSource.match(/if \(profile\.streamImages && !managedAsync\) \{/g) ?? []).length,
+    2,
+  )
+  assert.doesNotMatch(openaiCompatibleImageApiSource, /opts\.inputImageDataUrls\.length === 0/)
+  const editRequestStart = openaiCompatibleImageApiSource.indexOf('    if (isEdit) {')
+  const editRequestEnd = openaiCompatibleImageApiSource.indexOf('  } else {', editRequestStart)
+  assert.notEqual(editRequestStart, -1)
+  assert.notEqual(editRequestEnd, -1)
+  const editRequestSource = openaiCompatibleImageApiSource.slice(editRequestStart, editRequestEnd)
+  assert.match(editRequestSource, /if \(profile\.streamImages && !managedAsync\) \{/)
+  assert.match(editRequestSource, /X-Playground-Async': 'true'/)
+  assert.match(editRequestSource, /X-Playground-Client-Task-Id': opts\.clientTaskId!/)
+  assert.doesNotMatch(editRequestSource, /Content-Type/)
+  assert.match(openaiCompatibleImageApiSource, /validateManagedTaskStatusUrl/)
+  assert.match(openaiCompatibleImageApiSource, /statusUrl\.origin !== baseUrl\.origin/)
+  assert.match(openaiCompatibleImageApiSource, /getManagedPlaygroundImageResult/)
+  assert.match(storeSource, /getManagedPlaygroundImageResult/)
+  assert.match(storeSource, /clientTaskId: opts\.taskId/)
+  assert.match(storeSource, /clientTaskId: taskId/)
+  const watchdogCallIndex = storeSource.indexOf('scheduleOpenAIWatchdog(taskId, activeProfile.timeout, activeProfile)')
+  assert.notEqual(watchdogCallIndex, -1)
+  const watchdogGuard = storeSource.slice(storeSource.lastIndexOf('  if (', watchdogCallIndex), watchdogCallIndex)
+  assert.match(watchdogGuard, /activeProfile\.managedAsyncImages !== true/)
+  assert.match(storeSource, /const managedProfile = getManagedRecoveryProfile\(settings, task\)/)
+  assert.match(storeSource, /const customRecoveryInFlight = new Set<string>\(\)/)
+  assert.match(storeSource, /customRecoveryTimers\.has\(taskId\) \|\| customRecoveryInFlight\.has\(taskId\)/)
+  assert.match(storeSource, /if \(customRecoveryInFlight\.has\(taskId\)\) return/)
+  assert.match(storeSource, /customRecoveryInFlight\.delete\(taskId\)/)
+  assert.match(storeSource, /shouldRetry && isCustomTaskRecoverable\(latest\)/)
+  assert.match(storeSource, /isNetworkRecoverableError\(err\)/)
   assert.match(storeSource, /getNewApiImagePlaygroundStorageKey/)
   assert.match(storeSource, /initializeNewApiImagePlaygroundSync/)
   assert.match(storeSource, /name: getNewApiImagePlaygroundStorageKey\(\)/)
@@ -740,7 +1017,7 @@ test('fails closed when the validated upstream entry markers no longer match', a
 
   await assert.rejects(
     applyUpstreamPatch(root, { bridgeSource: 'export {}\n' }),
-    /upstream entry marker .* did not match exactly once/,
+    /upstream bridge install call marker .* did not match exactly once/,
   )
 })
 
@@ -827,6 +1104,41 @@ test('fails closed when the upstream hybrid Agent batch completion marker no lon
   )
 })
 
+test('keeps the bridge bootstrap idempotent when a later marker is already patched', async () => {
+  const root = await createFixture()
+  const mainPath = path.join(root, 'src', 'main.tsx')
+  const bridgePath = path.join(root, 'src', 'lib', 'newApiBridge.ts')
+  const typesPath = path.join(root, 'src', 'types.ts')
+  await writeFile(mainPath, MAIN_SOURCE.replace(
+    "import App from './App'\n",
+    "import App from './App'\nimport { installNewApiBridge } from './lib/newApiBridge'\n",
+  ))
+  await writeFile(typesPath, TYPES_SOURCE.replace(
+    '  streamImages?: boolean\n',
+    '  streamImages?: boolean\n  managedAsyncImages?: boolean\n',
+  ))
+
+  await assert.rejects(
+    applyUpstreamPatch(root, { bridgeSource: 'export const bridgeFixture = 1\n' }),
+    /upstream managed async profile type marker .* did not match exactly once/,
+  )
+
+  let mainSource = await readFile(mainPath, 'utf8')
+  assert.equal((mainSource.match(/import \{ installNewApiBridge \} from '\.\/lib\/newApiBridge'/g) ?? []).length, 1)
+  assert.equal((mainSource.match(/installNewApiBridge\(\)/g) ?? []).length, 1)
+  assert.equal(await readFile(bridgePath, 'utf8'), 'export const bridgeFixture = 1\n')
+
+  await assert.rejects(
+    applyUpstreamPatch(root, { bridgeSource: 'export const bridgeFixture = 2\n' }),
+    /upstream managed async profile type marker .* did not match exactly once/,
+  )
+
+  mainSource = await readFile(mainPath, 'utf8')
+  assert.equal((mainSource.match(/import \{ installNewApiBridge \} from '\.\/lib\/newApiBridge'/g) ?? []).length, 1)
+  assert.equal((mainSource.match(/installNewApiBridge\(\)/g) ?? []).length, 1)
+  assert.equal(await readFile(bridgePath, 'utf8'), 'export const bridgeFixture = 2\n')
+})
+
 test('fails closed when the upstream task retry marker no longer matches', async () => {
   const root = await createFixture(MAIN_SOURCE, STORE_SOURCE.replace(
     '/** 重试失败的任务：创建新任务并执行 */',
@@ -836,6 +1148,33 @@ test('fails closed when the upstream task retry marker no longer matches', async
   await assert.rejects(
     applyUpstreamPatch(root, { bridgeSource: 'export {}\n' }),
     /upstream task retry marker .* did not match exactly once/,
+  )
+})
+
+test('fails closed when the managed async polling marker no longer matches', async () => {
+  const root = await createFixture(
+    MAIN_SOURCE,
+    STORE_SOURCE,
+    APP_SOURCE,
+    INPUT_BAR_SOURCE,
+    AGENT_WORKSPACE_SOURCE,
+    DB_SOURCE,
+    SETTINGS_MODAL_SOURCE,
+    AGENT_SETTINGS_SOURCE,
+    AGENT_RESPONSE_STATE_SOURCE,
+    CONTENT_EDITABLE_MENTIONS_SOURCE,
+    TYPES_SOURCE,
+    IMAGE_API_SHARED_SOURCE,
+    API_PROFILES_SOURCE,
+    OPENAI_COMPATIBLE_IMAGE_API_SOURCE.replace(
+      'function eventToImageResponseItem(event: Record<string, unknown>): ImageResponseItem {',
+      'function parseImageResponseEvent(event: Record<string, unknown>): ImageResponseItem {',
+    ),
+  )
+
+  await assert.rejects(
+    applyUpstreamPatch(root, { bridgeSource: 'export {}\n' }),
+    /upstream managed async OpenAI polling marker .* did not match exactly once/,
   )
 })
 
@@ -888,6 +1227,7 @@ test('managed New API profiles enable hybrid Agent mode and honor host streaming
   assert.match(bridgeSource, /agentTextProfileId: MANAGED_AGENT_PROFILE_ID/)
   assert.match(bridgeSource, /agentImageProfileId: MANAGED_IMAGE_PROFILE_ID/)
   assert.match(bridgeSource, /streamImages: configuration\.streamImages/)
+  assert.match(bridgeSource, /managedAsyncImages: true/)
   assert.doesNotMatch(bridgeSource, /streamImages: true/)
   assert.match(bridgeSource, /useStore\.persist\.onFinishHydration/)
   assert.match(bridgeSource, /managedProfilesMatch\(useStore\.getState\(\)\.settings, activeConfigureMessage\)/)

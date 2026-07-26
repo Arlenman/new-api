@@ -62,15 +62,22 @@ func SetRelayRouter(router *gin.Engine) {
 	playgroundRouter := router.Group("/pg")
 	playgroundRouter.Use(middleware.RouteTag("relay"))
 	playgroundRouter.Use(middleware.SystemPerformanceCheck())
-	playgroundRouter.Use(middleware.PlaygroundAuth(), middleware.Distribute())
+	playgroundRouter.Use(middleware.PlaygroundAuth())
 	{
-		playgroundRouter.POST("/chat/completions", controller.Playground)
-		playgroundRouter.POST("/responses", controller.PlaygroundResponses)
-		playgroundRouter.POST("/images/generations", controller.PlaygroundImage)
-		playgroundRouter.POST("/images/edits", controller.PlaygroundImage)
-		playgroundRouter.POST("/v1/responses", controller.PlaygroundResponses)
-		playgroundRouter.POST("/v1/images/generations", controller.PlaygroundImage)
-		playgroundRouter.POST("/v1/images/edits", controller.PlaygroundImage)
+		playgroundRouter.GET("/image-tasks/:task_id", controller.GetPlaygroundImageTask)
+		playgroundRouter.GET("/image-files/:id/content", controller.GetManagedPlaygroundImageFileContent)
+
+		playgroundRelayRouter := playgroundRouter.Group("")
+		playgroundRelayRouter.Use(middleware.Distribute())
+		{
+			playgroundRelayRouter.POST("/chat/completions", controller.Playground)
+			playgroundRelayRouter.POST("/responses", controller.PlaygroundResponses)
+			playgroundRelayRouter.POST("/images/generations", controller.PlaygroundImage)
+			playgroundRelayRouter.POST("/images/edits", controller.PlaygroundImage)
+			playgroundRelayRouter.POST("/v1/responses", controller.PlaygroundResponses)
+			playgroundRelayRouter.POST("/v1/images/generations", controller.PlaygroundImage)
+			playgroundRelayRouter.POST("/v1/images/edits", controller.PlaygroundImage)
+		}
 	}
 	relayV1Router := router.Group("/v1")
 	relayV1Router.Use(middleware.RouteTag("relay"))

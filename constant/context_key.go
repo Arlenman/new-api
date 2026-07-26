@@ -46,6 +46,9 @@ const (
 
 	ContextKeyPlaygroundRelayCandidateChannelCount ContextKey = "playground_relay_candidate_channel_count"
 	ContextKeyPlaygroundRelayExcludedChannelIds    ContextKey = "playground_relay_excluded_channel_ids"
+	ContextKeyPlaygroundImageTaskID                ContextKey = "playground_image_task_id"
+	ContextKeyChannelErrorLogRecorded              ContextKey = "channel_error_log_recorded"
+	ContextKeyImageFailureMetadata                 ContextKey = "image_failure_metadata"
 
 	/* user related keys */
 	ContextKeyUserId      ContextKey = "id"

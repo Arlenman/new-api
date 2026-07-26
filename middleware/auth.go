@@ -495,6 +495,19 @@ func TokenAuth() func(c *gin.Context) {
 }
 
 func userToolRuntimeRequestAllowed(tool, method, path string) bool {
+	if tool == model.UserToolImagePlayground && method == http.MethodGet {
+		const imageTaskPrefix = "/pg/image-tasks/"
+		if strings.HasPrefix(path, imageTaskPrefix) {
+			taskID := strings.TrimPrefix(path, imageTaskPrefix)
+			return taskID != "" && !strings.Contains(taskID, "/")
+		}
+		const imageFilePrefix = "/pg/image-files/"
+		const imageFileSuffix = "/content"
+		if strings.HasPrefix(path, imageFilePrefix) && strings.HasSuffix(path, imageFileSuffix) {
+			fileID := strings.TrimSuffix(strings.TrimPrefix(path, imageFilePrefix), imageFileSuffix)
+			return fileID != "" && !strings.Contains(fileID, "/")
+		}
+	}
 	if method == http.MethodPost {
 		switch tool {
 		case model.UserToolImagePlayground:

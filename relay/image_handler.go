@@ -21,7 +21,40 @@ import (
 )
 
 func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
+	failureMetadata := relaycommon.ImageFailureMetadata{Stage: "relay"}
+	common.SetContextKey(c, constant.ContextKeyImageFailureMetadata, failureMetadata)
+	defer func() {
+		if newAPIError == nil {
+			return
+		}
+		metadata, ok := common.GetContextKeyType[relaycommon.ImageFailureMetadata](c, constant.ContextKeyImageFailureMetadata)
+		if !ok {
+			metadata = failureMetadata
+		}
+		if metadata.Stage != "relay" {
+			return
+		}
+		if metadata.ErrorSummary == "" {
+			metadata.ErrorSummary = relaycommon.SanitizeImageErrorSummary(newAPIError.Error())
+			common.SetContextKey(c, constant.ContextKeyImageFailureMetadata, metadata)
+		}
+		logger.LogError(c, fmt.Sprintf(
+			"image relay failure request_id=%s channel_id=%d model=%s stage=%s status=%d content_type=%q image_count=%d has_url=%t has_b64_json=%t error_summary=%q",
+			c.GetString(common.RequestIdKey),
+			c.GetInt("channel_id"),
+			c.GetString("original_model"),
+			metadata.Stage,
+			metadata.StatusCode,
+			metadata.ContentType,
+			metadata.ImageCount,
+			metadata.HasURL,
+			metadata.HasB64JSON,
+			metadata.ErrorSummary,
+		))
+	}()
+
 	info.InitChannelMeta(c)
+	service.PreparePlaygroundImageBilling(c, info)
 
 	imageReq, ok := info.Request.(*dto.ImageRequest)
 	if !ok {
@@ -97,7 +130,10 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 	var httpResp *http.Response
 	if resp != nil {
 		httpResp = resp.(*http.Response)
-		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
+		failureMetadata.StatusCode = httpResp.StatusCode
+		failureMetadata.ContentType = httpResp.Header.Get("Content-Type")
+		common.SetContextKey(c, constant.ContextKeyImageFailureMetadata, failureMetadata)
+		info.IsStream = info.IsStream || strings.HasPrefix(failureMetadata.ContentType, "text/event-stream")
 		if httpResp.StatusCode != http.StatusOK {
 			if httpResp.StatusCode == http.StatusCreated && info.ApiType == constant.APITypeReplicate {
 				// replicate channel returns 201 Created when using Prefer: wait, treat it as success.
@@ -123,11 +159,12 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		imageN = *request.N
 	}
 
-	if usage.(*dto.Usage).TotalTokens == 0 {
-		usage.(*dto.Usage).TotalTokens = 1
+	imageUsage := usage.(*dto.Usage)
+	if imageUsage.TotalTokens == 0 {
+		imageUsage.TotalTokens = 1
 	}
-	if usage.(*dto.Usage).PromptTokens == 0 {
-		usage.(*dto.Usage).PromptTokens = 1
+	if imageUsage.PromptTokens == 0 {
+		imageUsage.PromptTokens = 1
 	}
 
 	quality := request.Quality
@@ -147,6 +184,10 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		logContent = append(logContent, fmt.Sprintf("生成数量 %d", imageN))
 	}
 
-	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), logContent)
+	if info.IsPlayground {
+		service.DeferPlaygroundImageBilling(c, info, imageUsage, logContent)
+	} else {
+		service.PostTextConsumeQuota(c, info, imageUsage, logContent)
+	}
 	return nil
 }

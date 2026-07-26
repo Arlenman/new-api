@@ -21,6 +21,10 @@ func PlaygroundResponses(c *gin.Context) {
 }
 
 func PlaygroundImage(c *gin.Context) {
+	if shouldRunManagedPlaygroundImageAsync(c) {
+		startManagedPlaygroundImageTask(c)
+		return
+	}
 	if shouldRunPlaygroundImageAsync(c) {
 		startAsyncPlaygroundImage(c)
 		return

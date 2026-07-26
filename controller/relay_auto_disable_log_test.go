@@ -6,6 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -61,4 +64,37 @@ func TestBuildChannelErrorLogOtherRecordsAutoDisableTrigger(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildChannelErrorLogOtherIncludesImageFailureMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/v1/images/generations", nil)
+	ctx.Set("channel_id", 168)
+	common.SetContextKey(ctx, constant.ContextKeyPlaygroundImageTaskID, "uitask-log-1")
+	common.SetContextKey(ctx, constant.ContextKeyImageFailureMetadata, relaycommon.ImageFailureMetadata{
+		Stage:       "validate_image_data",
+		StatusCode:  http.StatusOK,
+		ContentType: "application/json",
+		ImageCount:  0,
+		HasURL:      false,
+		HasB64JSON:  false,
+	})
+
+	err := types.NewErrorWithStatusCode(
+		errors.New("upstream image response did not include image data"),
+		types.ErrorCodeBadResponse,
+		http.StatusBadGateway,
+	)
+	other := buildChannelErrorLogOther(ctx, err, false)
+
+	assert.Equal(t, http.StatusBadGateway, other["status_code"])
+	assert.Equal(t, "validate_image_data", other["stage"])
+	assert.Equal(t, http.StatusOK, other["upstream_status_code"])
+	assert.Equal(t, "application/json", other["content_type"])
+	assert.Equal(t, int64(0), other["image_count"])
+	assert.Equal(t, false, other["has_url"])
+	assert.Equal(t, false, other["has_b64_json"])
+	assert.Equal(t, "uitask-log-1", other["task_id"])
 }

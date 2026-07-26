@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -9,11 +10,13 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -131,6 +134,16 @@ func TestOpenaiImageStreamHandlerRejectsStreamsWithoutCompletedImage(t *testing.
 			name: "done event only",
 			body: "data: [DONE]\n\n",
 		},
+		{
+			name: "partial image without completed image",
+			body: strings.Join([]string{
+				`event: image_generation.partial_image`,
+				`data: {"type":"image_generation.partial_image","b64_json":"partial"}`,
+				``,
+				`data: [DONE]`,
+				``,
+			}, "\n"),
+		},
 	}
 
 	for _, tt := range tests {
@@ -145,6 +158,84 @@ func TestOpenaiImageStreamHandlerRejectsStreamsWithoutCompletedImage(t *testing.
 			require.Equal(t, "empty image stream response", err.Error())
 			require.True(t, types.IsSkipRetryError(err))
 			require.Nil(t, usage)
+		})
+	}
+}
+
+func TestOpenaiImageStreamHandlerRejectsAbnormalTerminationWithoutCompletedImage(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 1
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+
+	c, _, resp, info := newImageTestContext(t, "", "text/event-stream", true)
+	resp.Body = &blockingBody{
+		chunk:  []byte("data: {\"type\":\"image_generation.partial_image\",\"b64_json\":\"partial\"}\n\n"),
+		closed: make(chan struct{}),
+	}
+
+	usage, err := OpenaiImageStreamHandler(c, info, resp)
+
+	require.NotNil(t, err)
+	assert.Equal(t, types.ErrorCodeBadResponse, err.GetErrorCode())
+	assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+	assert.Equal(t, "image stream ended before a completed image was received", err.Error())
+	assert.Nil(t, usage)
+	require.NotNil(t, info.StreamStatus)
+	assert.Equal(t, relaycommon.StreamEndReasonTimeout, info.StreamStatus.EndReason)
+}
+
+func TestOpenaiImageStreamHandlerRejectsCompletedEventsWithoutImageData(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "completed event only has revised prompt and usage",
+			body: strings.Join([]string{
+				`event: image_generation.completed`,
+				`data: {"type":"image_generation.completed","revised_prompt":"draw a cat","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}`,
+				``,
+				`data: [DONE]`,
+				``,
+			}, "\n"),
+		},
+		{
+			name: "completed event data only has revised prompt",
+			body: strings.Join([]string{
+				`event: image_generation.completed`,
+				`data: {"type":"image_generation.completed","data":[{"revised_prompt":"draw a cat"}]}`,
+				``,
+				`data: [DONE]`,
+				``,
+			}, "\n"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, recorder, resp, info := newImageTestContext(t, tt.body, "text/event-stream", true)
+
+			usage, err := OpenaiImageStreamHandler(c, info, resp)
+
+			require.NotNil(t, err)
+			assert.Equal(t, types.ErrorCodeBadResponse, err.GetErrorCode())
+			assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+			assert.Contains(t, strings.ToLower(err.Error()), "image")
+			assert.True(t, types.IsSkipRetryError(err))
+			assert.Nil(t, usage)
+			assert.NotContains(t, recorder.Body.String(), "data: [DONE]")
 		})
 	}
 }
@@ -429,12 +520,6 @@ func TestOpenaiImageHandlerUsesPositiveActualCountForFixedPrice(t *testing.T) {
 			wantCount: 2,
 		},
 		{
-			name:      "empty data keeps requested count",
-			body:      `{"data":[]}`,
-			usePrice:  true,
-			wantCount: 3,
-		},
-		{
 			name:      "ratio billing ignores data length",
 			body:      `{"data":[{"b64_json":"first"},{"b64_json":"second"}]}`,
 			usePrice:  false,
@@ -453,6 +538,89 @@ func TestOpenaiImageHandlerUsesPositiveActualCountForFixedPrice(t *testing.T) {
 			require.Nil(t, err)
 			require.Equal(t, tt.wantCount, info.PriceData.OtherRatios()["n"])
 			require.Equal(t, tt.body, recorder.Body.String())
+		})
+	}
+}
+
+func TestOpenaiImageHandlerRejectsResponsesWithoutValidImageData(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "empty data with usage",
+			body: `{"data":[],"usage":{"input_tokens":444,"output_tokens":1756,"total_tokens":2200}}`,
+		},
+		{
+			name: "usage without data",
+			body: `{"usage":{"input_tokens":444,"output_tokens":1756,"total_tokens":2200}}`,
+		},
+		{
+			name: "data item only has revised prompt",
+			body: `{"data":[{"revised_prompt":"draw a cat"}],"usage":{"input_tokens":444,"output_tokens":1756,"total_tokens":2200}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, recorder, resp, info := newImageTestContext(t, tt.body, "application/json", false)
+			info.PriceData.UsePrice = true
+			info.PriceData.AddOtherRatio("n", 3)
+
+			usage, err := OpenaiImageHandler(c, info, resp)
+
+			require.NotNil(t, err)
+			assert.Equal(t, types.ErrorCodeBadResponse, err.GetErrorCode())
+			assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+			assert.Contains(t, strings.ToLower(err.Error()), "image")
+			assert.Nil(t, usage, "usage-only responses must not reach billing as successful usage")
+			assert.Empty(t, recorder.Body.String(), "invalid image responses must not be forwarded as success")
+		})
+	}
+}
+
+func TestOpenaiImageJSONAsStreamRejectsResponsesWithoutValidImageData(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "empty data with usage",
+			body: `{"data":[],"usage":{"input_tokens":444,"output_tokens":1756,"total_tokens":2200}}`,
+		},
+		{
+			name: "usage without data",
+			body: `{"usage":{"input_tokens":444,"output_tokens":1756,"total_tokens":2200}}`,
+		},
+		{
+			name: "data item only has revised prompt",
+			body: `{"data":[{"revised_prompt":"draw a cat"}],"usage":{"input_tokens":444,"output_tokens":1756,"total_tokens":2200}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, recorder, resp, info := newImageTestContext(t, tt.body, "application/json", true)
+			info.PriceData.UsePrice = true
+			info.PriceData.AddOtherRatio("n", 3)
+
+			usage, err := OpenaiImageStreamHandler(c, info, resp)
+
+			require.NotNil(t, err)
+			assert.Equal(t, types.ErrorCodeBadResponse, err.GetErrorCode())
+			assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+			assert.Contains(t, strings.ToLower(err.Error()), "image")
+			assert.Nil(t, usage, "usage-only responses must not reach billing as successful usage")
+			assert.NotContains(t, recorder.Body.String(), "image_generation.completed")
+			assert.NotContains(t, recorder.Body.String(), "data: [DONE]")
 		})
 	}
 }
@@ -504,6 +672,53 @@ func TestOpenaiImageHandlersReturnJSONError(t *testing.T) {
 		require.Empty(t, recorder.Body.String())
 		require.NotContains(t, recorder.Header().Get("Content-Type"), "text/event-stream")
 	})
+}
+
+func TestExtractOpenAIImageStreamErrorMessageDoesNotExposeRawImageData(t *testing.T) {
+	payload := []byte(`{"type":"upstream_error","error":{"url":"https://private.example/image?token=secret","b64_json":"c2Vuc2l0aXZlLWltYWdlLWRhdGE="}}`)
+
+	message := extractOpenAIImageStreamErrorMessage(payload)
+
+	assert.Equal(t, "upstream image stream returned error event", message)
+	assert.NotContains(t, message, "private.example")
+	assert.NotContains(t, message, "c2Vuc2l0aXZl")
+}
+
+func TestOpenaiImageStreamHandlerLogsSafeUpstreamErrorSummary(t *testing.T) {
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+
+	var logBuffer bytes.Buffer
+	common.LogWriterMu.Lock()
+	originalErrorWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &logBuffer
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultErrorWriter = originalErrorWriter
+		common.LogWriterMu.Unlock()
+	})
+
+	longPayload := strings.Repeat("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo", 40)
+	body := "data: {\"type\":\"upstream_error\",\"error\":{\"message\":\"stream ID 77 INTERNAL_ERROR while fetching https://private.example/image?token=secret api_key=sk-sensitive Bearer sk-live b64_json=" + longPayload + "\"}}\n\n"
+	c, _, resp, info := newImageTestContext(t, body, "text/event-stream", true)
+	c.Set(common.RequestIdKey, "request-safe-image-error")
+	c.Set("channel_id", 145)
+	c.Set("original_model", "gpt-image-2")
+
+	usage, err := OpenaiImageStreamHandler(c, info, resp)
+	require.Nil(t, usage)
+	require.NotNil(t, err)
+
+	logOutput := logBuffer.String()
+	assert.Contains(t, logOutput, "request-safe-image-error")
+	assert.Contains(t, logOutput, "stage=parse_stream")
+	assert.Contains(t, logOutput, "INTERNAL_ERROR")
+	assert.NotContains(t, logOutput, "private.example")
+	assert.NotContains(t, logOutput, "sk-sensitive")
+	assert.NotContains(t, logOutput, "sk-live")
+	assert.NotContains(t, logOutput, longPayload[:32])
 }
 
 // TestOpenaiImageStreamHandlerRecordsUpstreamErrorEvent verifies that an error

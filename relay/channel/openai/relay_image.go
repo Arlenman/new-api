@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -30,6 +31,92 @@ func updateOpenAIImageCount(info *relaycommon.RelayInfo, count int64) {
 	info.PriceData.AddOtherRatio("n", float64(count))
 }
 
+type openAIImageDataMetadata struct {
+	ImageCount int64
+	HasURL     bool
+	HasB64JSON bool
+	Indexes    []int
+}
+
+func inspectOpenAIImageData(responseBody []byte) openAIImageDataMetadata {
+	metadata := openAIImageDataMetadata{}
+	data := gjson.GetBytes(responseBody, "data")
+	if !data.IsArray() {
+		return metadata
+	}
+	for index, item := range data.Array() {
+		hasURL := item.Get("url").Type == gjson.String && strings.TrimSpace(item.Get("url").Str) != ""
+		hasB64JSON := item.Get("b64_json").Type == gjson.String && strings.TrimSpace(item.Get("b64_json").Str) != ""
+		metadata.HasURL = metadata.HasURL || hasURL
+		metadata.HasB64JSON = metadata.HasB64JSON || hasB64JSON
+		if !hasURL && !hasB64JSON {
+			continue
+		}
+		metadata.ImageCount++
+		metadata.Indexes = append(metadata.Indexes, index)
+	}
+	return metadata
+}
+
+func countValidOpenAIImageData(items []dto.ImageData) (int64, bool, bool) {
+	var count int64
+	var hasURL bool
+	var hasB64JSON bool
+	for _, item := range items {
+		itemHasURL := strings.TrimSpace(item.Url) != ""
+		itemHasB64JSON := strings.TrimSpace(item.B64Json) != ""
+		hasURL = hasURL || itemHasURL
+		hasB64JSON = hasB64JSON || itemHasB64JSON
+		if itemHasURL || itemHasB64JSON {
+			count++
+		}
+	}
+	return count, hasURL, hasB64JSON
+}
+
+func invalidOpenAIImageDataError(message string) *types.NewAPIError {
+	return types.NewOpenAIError(
+		errors.New(relaycommon.SanitizeImageErrorSummary(message)),
+		types.ErrorCodeBadResponse,
+		http.StatusBadGateway,
+		types.ErrOptionWithSkipRetry(),
+	)
+}
+
+func logOpenAIImageFailure(c *gin.Context, stage string, statusCode int, contentType string, imageCount int64, hasURL bool, hasB64JSON bool, errorSummary string) {
+	requestID := ""
+	channelID := 0
+	modelName := ""
+	errorSummary = relaycommon.SanitizeImageErrorSummary(errorSummary)
+	if c != nil {
+		requestID = c.GetString(common.RequestIdKey)
+		channelID = c.GetInt("channel_id")
+		modelName = c.GetString("original_model")
+		common.SetContextKey(c, constant.ContextKeyImageFailureMetadata, relaycommon.ImageFailureMetadata{
+			Stage:        stage,
+			StatusCode:   statusCode,
+			ContentType:  contentType,
+			ImageCount:   imageCount,
+			HasURL:       hasURL,
+			HasB64JSON:   hasB64JSON,
+			ErrorSummary: errorSummary,
+		})
+	}
+	logger.LogError(c, fmt.Sprintf(
+		"image response failure request_id=%s channel_id=%d model=%s stage=%s status=%d content_type=%q image_count=%d has_url=%t has_b64_json=%t error_summary=%q",
+		requestID,
+		channelID,
+		modelName,
+		stage,
+		statusCode,
+		contentType,
+		imageCount,
+		hasURL,
+		hasB64JSON,
+		errorSummary,
+	))
+}
+
 // OpenaiImageHandler handles non-streaming OpenAI image responses
 // (generations/edits), returning the parsed usage for billing.
 func OpenaiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
@@ -43,6 +130,7 @@ func OpenaiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 	var usageResp dto.SimpleResponse
 	err = common.Unmarshal(responseBody, &usageResp)
 	if err != nil {
+		logOpenAIImageFailure(c, "decode_response", resp.StatusCode, resp.Header.Get("Content-Type"), 0, false, false, "failed to decode upstream image response")
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 
@@ -50,7 +138,13 @@ func OpenaiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
-	updateOpenAIImageCount(info, gjson.GetBytes(responseBody, "data.#").Int())
+	imageMetadata := inspectOpenAIImageData(responseBody)
+	if imageMetadata.ImageCount == 0 {
+		message := "upstream image response did not include a valid url or b64_json"
+		logOpenAIImageFailure(c, "validate_image_data", resp.StatusCode, resp.Header.Get("Content-Type"), 0, imageMetadata.HasURL, imageMetadata.HasB64JSON, message)
+		return nil, invalidOpenAIImageDataError(message)
+	}
+	updateOpenAIImageCount(info, imageMetadata.ImageCount)
 
 	// 写入新的 response body
 	service.IOCopyBytesGracefully(c, resp, responseBody)
@@ -114,6 +208,9 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 	var lastStreamData []byte
 	var streamError string
 	var completedImages int64
+	var sawCompletedEvent bool
+	var hasCompletedURL bool
+	var hasCompletedB64JSON bool
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		raw := common.StringToByteSlice(data)
@@ -125,23 +222,35 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 			sr.Error(fmt.Errorf("%s", streamError))
 		}
 		var chunk struct {
-			Type  string          `json:"type"`
-			Usage dto.Usage       `json:"usage"`
-			Data  []dto.ImageData `json:"data"`
+			Type    string          `json:"type"`
+			Usage   dto.Usage       `json:"usage"`
+			Data    []dto.ImageData `json:"data"`
+			URL     string          `json:"url"`
+			B64JSON string          `json:"b64_json"`
 		}
 		if err := common.Unmarshal(raw, &chunk); err == nil {
 			normalizeOpenAIUsage(&chunk.Usage)
 			if service.ValidUsage(&chunk.Usage) {
 				usage = &chunk.Usage
 			}
-			if chunk.Type == "image_generation.completed" || chunk.Type == "image_edit.completed" {
-				completedCount := len(chunk.Data)
+			completedEvent := chunk.Type == "image_generation.completed" || chunk.Type == "image_edit.completed"
+			implicitCompletedData := strings.TrimSpace(chunk.Type) == "" && len(chunk.Data) > 0
+			if completedEvent || implicitCompletedData {
+				sawCompletedEvent = true
+				dataCount, dataHasURL, dataHasB64JSON := countValidOpenAIImageData(chunk.Data)
+				completedCount := dataCount
 				if completedCount == 0 {
-					completedCount = 1
+					topLevelHasURL := strings.TrimSpace(chunk.URL) != ""
+					topLevelHasB64JSON := strings.TrimSpace(chunk.B64JSON) != ""
+					if topLevelHasURL || topLevelHasB64JSON {
+						completedCount = 1
+					}
+					dataHasURL = dataHasURL || topLevelHasURL
+					dataHasB64JSON = dataHasB64JSON || topLevelHasB64JSON
 				}
-				completedImages += int64(completedCount)
-			} else if len(chunk.Data) > 0 {
-				completedImages += int64(len(chunk.Data))
+				completedImages += completedCount
+				hasCompletedURL = hasCompletedURL || dataHasURL
+				hasCompletedB64JSON = hasCompletedB64JSON || dataHasB64JSON
 			}
 		}
 		if err := writeOpenaiImageStreamChunk(c, raw); err != nil {
@@ -149,18 +258,28 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 		}
 	})
 
-	upstreamFinished := info.StreamStatus != nil && (info.StreamStatus.EndReason == relaycommon.StreamEndReasonDone ||
-		info.StreamStatus.EndReason == relaycommon.StreamEndReasonEOF)
-	if upstreamFinished && completedImages == 0 {
-		if streamError == "" {
-			streamError = "empty image stream response"
+	endReason := relaycommon.StreamEndReasonNone
+	if info.StreamStatus != nil {
+		endReason = info.StreamStatus.EndReason
+	}
+	upstreamFinished := endReason == relaycommon.StreamEndReasonDone || endReason == relaycommon.StreamEndReasonEOF
+	clientAborted := endReason == relaycommon.StreamEndReasonClientGone || endReason == relaycommon.StreamEndReasonHandlerStop
+	if !clientAborted && streamError != "" {
+		logOpenAIImageFailure(c, "parse_stream", resp.StatusCode, resp.Header.Get("Content-Type"), completedImages, hasCompletedURL, hasCompletedB64JSON, streamError)
+		return nil, invalidOpenAIImageDataError(streamError)
+	}
+	if !clientAborted && completedImages == 0 {
+		stage := "parse_stream"
+		message := "image stream ended before a completed image was received"
+		if upstreamFinished {
+			message = "empty image stream response"
 		}
-		return nil, types.NewOpenAIError(
-			errors.New(streamError),
-			types.ErrorCodeBadResponse,
-			http.StatusBadGateway,
-			types.ErrOptionWithSkipRetry(),
-		)
+		if sawCompletedEvent {
+			stage = "validate_image_data"
+			message = "completed image stream event did not include a valid url or b64_json"
+		}
+		logOpenAIImageFailure(c, stage, resp.StatusCode, resp.Header.Get("Content-Type"), 0, hasCompletedURL, hasCompletedB64JSON, message)
+		return nil, invalidOpenAIImageDataError(message)
 	}
 
 	// StreamScannerHandler consumes the upstream [DONE]; re-emit it so the
@@ -170,8 +289,8 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 	}
 
 	applyUsagePostProcessing(info, usage, lastStreamData)
-	// Only trust completedImages when upstream finished the stream (done/eof).
-	// On client-side aborts (client_gone, or handler_stop from a failed client
+	// Trust completedImages for every non-client termination. On client-side
+	// aborts (client_gone, or handler_stop from a failed client
 	// write) the counter undercounts what upstream actually generated and
 	// charged, so keep the requested n — otherwise a client could pay for one
 	// image by disconnecting right after the first completed event. The abort
@@ -182,7 +301,7 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 		if n, ok := info.PriceData.OtherRatios()["n"]; ok {
 			requestedN = n
 		}
-		if upstreamFinished || float64(completedImages) > requestedN {
+		if !clientAborted || float64(completedImages) > requestedN {
 			updateOpenAIImageCount(info, completedImages)
 		}
 	}
@@ -235,7 +354,7 @@ func extractOpenAIImageStreamErrorMessage(data []byte) string {
 		return "upstream image stream returned error event"
 	}
 	if msg := strings.TrimSpace(payload.Message); msg != "" {
-		return msg
+		return relaycommon.SanitizeImageErrorSummary(msg)
 	}
 	if len(payload.Error) > 0 {
 		var nested struct {
@@ -243,12 +362,10 @@ func extractOpenAIImageStreamErrorMessage(data []byte) string {
 		}
 		if err := common.Unmarshal(payload.Error, &nested); err == nil {
 			if msg := strings.TrimSpace(nested.Message); msg != "" {
-				return msg
+				return relaycommon.SanitizeImageErrorSummary(msg)
 			}
 		}
-		if msg := strings.TrimSpace(common.JsonRawMessageToString(payload.Error)); msg != "" {
-			return msg
-		}
+
 	}
 	return "upstream image stream returned error event"
 }
@@ -266,15 +383,23 @@ func openaiImageJSONAsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 	// re-marshaled for each SSE event.
 	var usageResp dto.SimpleResponse
 	if err := common.Unmarshal(responseBody, &usageResp); err != nil {
+		logOpenAIImageFailure(c, "decode_response", resp.StatusCode, resp.Header.Get("Content-Type"), 0, false, false, "failed to decode upstream image response")
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 	if oaiError := usageResp.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
+
+	imageMetadata := inspectOpenAIImageData(responseBody)
+	if imageMetadata.ImageCount == 0 {
+		message := "upstream image response did not include a valid url or b64_json"
+		logOpenAIImageFailure(c, "validate_image_data", resp.StatusCode, resp.Header.Get("Content-Type"), 0, imageMetadata.HasURL, imageMetadata.HasB64JSON, message)
+		return nil, invalidOpenAIImageDataError(message)
+	}
 	normalizeOpenAIUsage(&usageResp.Usage)
 	applyUsagePostProcessing(info, &usageResp.Usage, responseBody)
 
-	imageCount := gjson.GetBytes(responseBody, "data.#").Int()
+	imageCount := imageMetadata.ImageCount
 	updateOpenAIImageCount(info, imageCount)
 
 	helper.SetEventStreamHeaders(c)
@@ -297,8 +422,8 @@ func openaiImageJSONAsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 		}
 	}
 
-	for i := int64(0); i < imageCount; i++ {
-		image := gjson.GetBytes(responseBody, "data."+strconv.FormatInt(i, 10))
+	for _, imageIndex := range imageMetadata.Indexes {
+		image := gjson.GetBytes(responseBody, "data."+strconv.Itoa(imageIndex))
 		payload := []byte(`{"type":"image_generation.completed"}`)
 		payload, err = sjson.SetBytes(payload, "created_at", created)
 		if err != nil {

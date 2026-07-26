@@ -498,6 +498,71 @@ describe('image generation task manager', () => {
     assert.equal(finalMessage?.imageGeneration?.error, undefined)
   })
 
+  test('marks image responses without image data as retryable', async (t) => {
+    const responses = [
+      {
+        name: 'empty data',
+        response: { data: [] },
+      },
+      {
+        name: 'revised prompt without image fields',
+        response: { data: [{ revised_prompt: 'draw a cat' }] },
+      },
+    ]
+
+    for (const { name, response } of responses) {
+      await t.test(name, async () => {
+        const session: PlaygroundSession = {
+          id: 'session-1',
+          title: 'Image session',
+          createdAt: 1000,
+          updatedAt: 1000,
+          messages: [
+            {
+              key: 'assistant-1',
+              from: MESSAGE_ROLES.ASSISTANT,
+              mode: 'image',
+              status: MESSAGE_STATUS.LOADING,
+              versions: [{ id: 'assistant-version', content: '' }],
+            },
+          ],
+        }
+        const savedSessions: PlaygroundSession[][] = []
+        const manager = createImageGenerationTaskManager({
+          id: () => 'task-1',
+          now: () => 2000,
+          getSessions: () => [session],
+          saveSessions: (nextSessions) => {
+            savedSessions.push(nextSessions)
+          },
+          requestImage: async () => response,
+        })
+
+        await manager.start({
+          sessionId: 'session-1',
+          assistantMessageKey: 'assistant-1',
+          prompt: 'cute cat',
+          model: 'gpt-image-1',
+          group: 'default',
+          sessionMessages: session.messages,
+        }).done
+
+        const finalMessage = savedSessions.at(-1)?.[0].messages[0]
+        assert.equal(finalMessage?.status, MESSAGE_STATUS.COMPLETE)
+        assert.equal(finalMessage?.imageGeneration?.status, 'retryable')
+        assert.match(
+          finalMessage?.versions[0].content ?? '',
+          /Image generation did not finish\. You can retry\./
+        )
+        assert.doesNotMatch(
+          finalMessage?.versions[0].content ?? '',
+          /!\[Generated image \d+\]/
+        )
+        assert.equal(finalMessage?.imageGeneration?.error, undefined)
+      })
+    }
+  })
+
   test('recovers completed image from persisted session after network error', async () => {
     const session: PlaygroundSession = {
       id: 'session-1',

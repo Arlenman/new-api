@@ -345,12 +345,24 @@ func usageSemanticFromUsage(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) 
 }
 
 func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []string) {
+	_ = postTextConsumeQuota(ctx, relayInfo, usage, extraContent, false)
+}
+
+// PostTextConsumeQuotaChecked settles billing before recording usage counters and
+// the consume log. Playground image requests use it only after the final image
+// payload has been validated and persisted, so settlement failures remain
+// retryable and cannot leave a successful consume log behind.
+func PostTextConsumeQuotaChecked(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []string) error {
+	return postTextConsumeQuota(ctx, relayInfo, usage, extraContent, true)
+}
+
+func postTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []string, settleFirst bool) error {
 	originUsage := usage
 	billingUsage := effectiveBillingUsage(usage)
 	if usage == nil {
 		extraContent = append(extraContent, "上游无计费信息")
 	}
-	if originUsage != nil {
+	if originUsage != nil && !settleFirst {
 		ObserveChannelAffinityUsageCacheByRelayFormat(ctx, billingUsage, relayInfo.GetFinalRequestRelayFormat())
 	}
 
@@ -388,6 +400,16 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		extraContent = append(extraContent, fmt.Sprintf("Image Generation Call 花费 %s", decimal.NewFromFloat(summary.ImageGenerationCallPrice).Mul(decimal.NewFromFloat(summary.GroupRatio)).Mul(decimal.NewFromFloat(common.QuotaPerUnit)).String()))
 	}
 
+	if settleFirst {
+		if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
+			logger.LogError(ctx, "error settling billing: "+err.Error())
+			return err
+		}
+		if originUsage != nil {
+			ObserveChannelAffinityUsageCacheByRelayFormat(ctx, billingUsage, relayInfo.GetFinalRequestRelayFormat())
+		}
+	}
+
 	if summary.TotalTokens == 0 {
 		extraContent = append(extraContent, "上游没有返回计费信息，无法扣费（可能是上游超时）")
 		logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, summary.ModelName, relayInfo.FinalPreConsumedQuota))
@@ -396,8 +418,10 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, summary.Quota)
 	}
 
-	if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
-		logger.LogError(ctx, "error settling billing: "+err.Error())
+	if !settleFirst {
+		if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
+			logger.LogError(ctx, "error settling billing: "+err.Error())
+		}
 	}
 
 	logModel := summary.ModelName
@@ -505,4 +529,5 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	gopool.Go(func() {
 		perfmetrics.RecordRelaySample(relayInfo, true, int64(summary.CompletionTokens))
 	})
+	return nil
 }

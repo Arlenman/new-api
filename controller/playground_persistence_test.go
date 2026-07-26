@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,9 +14,13 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,10 +30,16 @@ type playgroundAPIResponse struct {
 	Data    json.RawMessage `json:"data"`
 }
 
+type playgroundRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn playgroundRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
 func setupPlaygroundControllerTest(t *testing.T) string {
 	t.Helper()
 	db := setupModelListControllerTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.PlaygroundSession{}, &model.PlaygroundMessage{}, &model.PlaygroundFile{}))
+	require.NoError(t, db.AutoMigrate(&model.PlaygroundSession{}, &model.PlaygroundMessage{}, &model.PlaygroundFile{}, &model.Log{}))
 	require.NoError(t, model.DB.Create(&model.User{Id: 1, Username: "alice", Password: "password123", AffCode: "alice-playground"}).Error)
 	require.NoError(t, model.DB.Create(&model.User{Id: 2, Username: "bob", Password: "password123", AffCode: "bob-playground"}).Error)
 
@@ -75,6 +87,49 @@ func TestRewritePlaygroundImageResponseConvertsBase64ToFileURL(t *testing.T) {
 	content, err := os.ReadFile(files[0].AbsolutePath())
 	require.NoError(t, err)
 	require.Equal(t, []byte("image-bytes"), content)
+}
+
+func TestRewritePlaygroundImageResponseRejectsMissingImageData(t *testing.T) {
+	setupPlaygroundControllerTest(t)
+
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "empty data",
+			raw:  `{"data":[]}`,
+		},
+		{
+			name: "usage without data",
+			raw:  `{"usage":{"input_tokens":444,"output_tokens":1756,"total_tokens":2200}}`,
+		},
+		{
+			name: "data item only has revised prompt",
+			raw:  `{"data":[{"revised_prompt":"draw a cat"}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Set("id", 1)
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/images/generations", nil)
+			ctx.Request.Header.Set(playgroundSessionHeader, "session-missing-image")
+			ctx.Request.Header.Set(playgroundMessageKeyHeader, "assistant-missing-image")
+
+			rewritten, err := rewritePlaygroundImageResponse(ctx, []byte(tt.raw))
+
+			require.Error(t, err)
+			assert.Contains(t, strings.ToLower(err.Error()), "image")
+			assert.Empty(t, rewritten)
+		})
+	}
+
+	var files []model.PlaygroundFile
+	require.NoError(t, model.DB.Find(&files).Error)
+	assert.Empty(t, files)
 }
 
 func TestPlaygroundImageStreamResponseConvertsBase64ToFileURL(t *testing.T) {
@@ -135,6 +190,37 @@ func TestPlaygroundImageStreamResponseRejectsPartialOnlyStream(t *testing.T) {
 
 	require.ErrorContains(t, err, "did not complete")
 	require.Empty(t, response.Data)
+}
+
+func TestPlaygroundImageStreamResponseRejectsIncompleteEventWithImageData(t *testing.T) {
+	rawStream := strings.Join([]string{
+		`event: image_generation.incomplete`,
+		`data: {"type":"image_generation.incomplete","b64_json":"` + base64.StdEncoding.EncodeToString([]byte("unfinished-image")) + `"}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	response, err := playgroundImageResponseFromStream([]byte(rawStream))
+
+	require.ErrorContains(t, err, "did not complete")
+	require.Empty(t, response.Data)
+}
+
+func TestPlaygroundImageStreamResponseRejectsCompletedEventWithoutImageData(t *testing.T) {
+	rawStream := strings.Join([]string{
+		`event: image_generation.completed`,
+		`data: {"type":"image_generation.completed","revised_prompt":"draw a cat","usage":{"input_tokens":444,"output_tokens":1756,"total_tokens":2200}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	response, err := playgroundImageResponseFromStream([]byte(rawStream))
+
+	require.Error(t, err)
+	assert.Contains(t, strings.ToLower(err.Error()), "image")
+	assert.Empty(t, response.Data)
 }
 
 func TestPlaygroundImageStreamResponsePrefersStreamErrorOverPartialImage(t *testing.T) {
@@ -255,6 +341,24 @@ func TestWriteCapturedPlaygroundImageResponseUpdatesContentLengthAfterRewrite(t 
 	require.Contains(t, recorder.Body.String(), "/api/playground/files/")
 }
 
+func TestPlaygroundImageResponseFromStreamReturnsSafeUpstreamErrorSummary(t *testing.T) {
+	longPayload := strings.Repeat("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo", 40)
+	body := []byte("data: {\"type\":\"upstream_error\",\"error\":{\"message\":\"stream ID 77 INTERNAL_ERROR while fetching https://private.example/image?token=secret api_key=sk-sensitive Bearer sk-live b64_json=" + longPayload + "\"}}\n\n")
+
+	_, err := playgroundImageResponseFromStream(body)
+	require.Error(t, err)
+
+	stage, statusCode, message := playgroundImageProcessingErrorDetails(err)
+	assert.Equal(t, "parse_stream", stage)
+	assert.Equal(t, http.StatusBadGateway, statusCode)
+	assert.Contains(t, message, "INTERNAL_ERROR")
+	assert.NotContains(t, message, "private.example")
+	assert.NotContains(t, message, "secret")
+	assert.NotContains(t, message, "sk-live")
+	assert.NotContains(t, message, longPayload[:32])
+	assert.LessOrEqual(t, len(message), 640)
+}
+
 func TestWriteCapturedPlaygroundImageResponseConvertsStreamToJSON(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
@@ -313,8 +417,22 @@ func TestWriteCapturedPlaygroundImageResponseUsesJSONContentTypeForStreamError(t
 }
 
 func TestWriteCapturedPlaygroundImageResponseRejectsEmptySuccessfulStream(t *testing.T) {
+	var logBuffer bytes.Buffer
+	common.LogWriterMu.Lock()
+	originalErrorWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &logBuffer
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultErrorWriter = originalErrorWriter
+		common.LogWriterMu.Unlock()
+	})
+
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Set(common.RequestIdKey, "request-empty-stream")
+	ctx.Set("channel_id", 168)
+	ctx.Set("original_model", "gpt-image-2")
 	originalWriter := ctx.Writer
 
 	captureWriter := newPlaygroundImageCaptureWriter(ctx.Writer)
@@ -331,6 +449,186 @@ func TestWriteCapturedPlaygroundImageResponseRejectsEmptySuccessfulStream(t *tes
 	require.Contains(t, recorder.Header().Get("Content-Type"), gin.MIMEJSON)
 	require.Empty(t, recorder.Header().Get("Transfer-Encoding"))
 	require.Contains(t, recorder.Body.String(), "empty image stream response")
+
+	logOutput := logBuffer.String()
+	assert.Contains(t, logOutput, "request-empty-stream")
+	assert.Contains(t, logOutput, "channel_id=168")
+	assert.Contains(t, logOutput, "model=gpt-image-2")
+	assert.Contains(t, logOutput, "stage=parse_stream")
+}
+
+func TestWriteCapturedPlaygroundImageResponseRejectsMalformedJSONWithDecodeLog(t *testing.T) {
+	var logBuffer bytes.Buffer
+	common.LogWriterMu.Lock()
+	originalErrorWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &logBuffer
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultErrorWriter = originalErrorWriter
+		common.LogWriterMu.Unlock()
+	})
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Set(common.RequestIdKey, "request-decode-response")
+	ctx.Set("channel_id", 168)
+	ctx.Set("original_model", "gpt-image-2")
+	ctx.Set("id", 1)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/images/generations", nil)
+	ctx.Request.Header.Set(playgroundSessionHeader, "session-decode-response")
+	ctx.Request.Header.Set(playgroundMessageKeyHeader, "assistant-decode-response")
+	originalWriter := ctx.Writer
+
+	captureWriter := newPlaygroundImageCaptureWriter(ctx.Writer)
+	ctx.Writer = captureWriter
+	ctx.Writer.Header().Set("Content-Type", gin.MIMEJSON)
+	ctx.Writer.WriteHeader(http.StatusOK)
+	_, err := ctx.Writer.Write([]byte(`{"data":[`))
+	require.NoError(t, err)
+
+	ctx.Writer = originalWriter
+	writeCapturedPlaygroundImageResponse(ctx, captureWriter)
+
+	assert.Equal(t, http.StatusBadGateway, recorder.Code)
+	assert.Contains(t, recorder.Header().Get("Content-Type"), gin.MIMEJSON)
+	assert.NotContains(t, recorder.Body.String(), `{"data":[`)
+	assert.Contains(t, strings.ToLower(recorder.Body.String()), "decode")
+
+	logOutput := logBuffer.String()
+	assert.Contains(t, logOutput, "request-decode-response")
+	assert.Contains(t, logOutput, "channel_id=168")
+	assert.Contains(t, logOutput, "model=gpt-image-2")
+	assert.Contains(t, logOutput, "stage=decode_response")
+}
+
+func TestWriteCapturedPlaygroundImageResponseReportsURLPersistence404(t *testing.T) {
+	setupPlaygroundControllerTest(t)
+
+	fetchSetting := system_setting.GetFetchSetting()
+	originalFetchSetting := *fetchSetting
+	originalWorkerURL := system_setting.WorkerUrl
+	t.Cleanup(func() {
+		*fetchSetting = originalFetchSetting
+		system_setting.WorkerUrl = originalWorkerURL
+	})
+	fetchSetting.EnableSSRFProtection = false
+	system_setting.WorkerUrl = ""
+
+	httpClient := service.GetHttpClient()
+	if httpClient == nil {
+		service.InitHttpClient()
+		httpClient = service.GetHttpClient()
+	}
+	require.NotNil(t, httpClient)
+	originalTransport := httpClient.Transport
+	t.Cleanup(func() {
+		httpClient.Transport = originalTransport
+	})
+	const imageURL = "https://images.example.invalid/missing.png"
+	httpClient.Transport = playgroundRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		assert.Equal(t, imageURL, request.URL.String())
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Header:     http.Header{"Content-Type": []string{"text/plain"}},
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    request,
+		}, nil
+	})
+
+	response := dto.ImageResponse{
+		Data: []dto.ImageData{{Url: imageURL}},
+	}
+	raw, err := common.Marshal(response)
+	require.NoError(t, err)
+
+	t.Run("rewrite returns HTTP 404 without creating a file", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Set("id", 1)
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/images/generations", nil)
+		ctx.Request.Header.Set(playgroundSessionHeader, "session-url-404")
+		ctx.Request.Header.Set(playgroundMessageKeyHeader, "assistant-url-404")
+
+		rewritten, rewriteErr := rewritePlaygroundImageResponse(ctx, raw)
+
+		require.ErrorContains(t, rewriteErr, "HTTP 404")
+		assert.Empty(t, rewritten)
+
+		var files []model.PlaygroundFile
+		require.NoError(t, model.DB.Find(&files).Error)
+		assert.Empty(t, files)
+	})
+
+	t.Run("captured response returns structured error and stage log", func(t *testing.T) {
+		originalErrorLogEnabled := constant.ErrorLogEnabled
+		constant.ErrorLogEnabled = true
+		t.Cleanup(func() { constant.ErrorLogEnabled = originalErrorLogEnabled })
+
+		var logBuffer bytes.Buffer
+		common.LogWriterMu.Lock()
+		originalErrorWriter := gin.DefaultErrorWriter
+		gin.DefaultErrorWriter = &logBuffer
+		common.LogWriterMu.Unlock()
+		t.Cleanup(func() {
+			common.LogWriterMu.Lock()
+			gin.DefaultErrorWriter = originalErrorWriter
+			common.LogWriterMu.Unlock()
+		})
+
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Set(common.RequestIdKey, "request-persist-404")
+		ctx.Set("channel_id", 168)
+		ctx.Set("original_model", "gpt-image-2")
+		ctx.Set("id", 1)
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/images/generations", nil)
+		ctx.Request.Header.Set(playgroundSessionHeader, "session-url-404")
+		ctx.Request.Header.Set(playgroundMessageKeyHeader, "assistant-url-404")
+		originalWriter := ctx.Writer
+
+		captureWriter := newPlaygroundImageCaptureWriter(ctx.Writer)
+		ctx.Writer = captureWriter
+		ctx.Writer.Header().Set("Content-Type", gin.MIMEJSON)
+		ctx.Writer.WriteHeader(http.StatusOK)
+		_, writeErr := ctx.Writer.Write(raw)
+		require.NoError(t, writeErr)
+
+		ctx.Writer = originalWriter
+		writeCapturedPlaygroundImageResponse(ctx, captureWriter)
+
+		assert.Equal(t, http.StatusInternalServerError, recorder.Code)
+		assert.Contains(t, recorder.Header().Get("Content-Type"), gin.MIMEJSON)
+		assert.Contains(t, recorder.Body.String(), "failed to persist playground image")
+		assert.Contains(t, recorder.Body.String(), "HTTP 404")
+		assert.NotContains(t, recorder.Body.String(), imageURL)
+
+		logOutput := logBuffer.String()
+		assert.Contains(t, logOutput, "request-persist-404")
+		assert.Contains(t, logOutput, "channel_id=168")
+		assert.Contains(t, logOutput, "model=gpt-image-2")
+		assert.Contains(t, logOutput, "stage=persist_image")
+		assert.Contains(t, logOutput, "download_status_code=404")
+		assert.NotContains(t, logOutput, imageURL)
+
+		var errorLog model.Log
+		require.NoError(t, model.LOG_DB.Where("request_id = ? AND type = ?", "request-persist-404", model.LogTypeError).First(&errorLog).Error)
+		assert.Equal(t, 168, errorLog.ChannelId)
+		assert.Equal(t, "gpt-image-2", errorLog.ModelName)
+		assert.Contains(t, errorLog.Content, "persist_image")
+		assert.NotContains(t, errorLog.Content, imageURL)
+
+		var other map[string]any
+		require.NoError(t, common.UnmarshalJsonStr(errorLog.Other, &other))
+		assert.Equal(t, "persist_image", other["stage"])
+		assert.EqualValues(t, http.StatusOK, other["status_code"])
+		assert.Equal(t, gin.MIMEJSON, other["content_type"])
+		assert.EqualValues(t, 1, other["image_count"])
+		assert.Equal(t, true, other["has_url"])
+		assert.Equal(t, false, other["has_b64_json"])
+		assert.EqualValues(t, http.StatusNotFound, other["download_status_code"])
+		assert.NotContains(t, errorLog.Other, imageURL)
+	})
 }
 
 func TestPlaygroundImageCaptureWriterDoesNotFlushOriginalResponse(t *testing.T) {
@@ -343,20 +641,32 @@ func TestPlaygroundImageCaptureWriterDoesNotFlushOriginalResponse(t *testing.T) 
 	require.False(t, recorder.Flushed)
 }
 
-func TestShouldRunPlaygroundImageAsyncForSessionMessageHeaders(t *testing.T) {
+func TestShouldRunPlaygroundImageAsyncWithExplicitHeaderAndSessionMessage(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/images/generations", nil)
-	ctx.Request.Header.Set("X-Playground-Session-Id", "session-image")
-	ctx.Request.Header.Set("X-Playground-Message-Key", "assistant-image")
+	ctx.Request.Header.Set(playgroundAsyncHeader, "true")
+	ctx.Request.Header.Set(playgroundSessionHeader, "session-image")
+	ctx.Request.Header.Set(playgroundMessageKeyHeader, "assistant-image")
 
 	require.True(t, shouldRunPlaygroundImageAsync(ctx))
+}
+
+func TestShouldNotRunPlaygroundImageAsyncWithoutExplicitHeader(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/images/generations", nil)
+	ctx.Request.Header.Set(playgroundSessionHeader, "session-image")
+	ctx.Request.Header.Set(playgroundMessageKeyHeader, "assistant-image")
+
+	require.False(t, shouldRunPlaygroundImageAsync(ctx))
 }
 
 func TestShouldNotRunPlaygroundImageAsyncWithoutSessionMessageHeaders(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/pg/images/generations", nil)
+	ctx.Request.Header.Set(playgroundAsyncHeader, "true")
 
 	require.False(t, shouldRunPlaygroundImageAsync(ctx))
 }
