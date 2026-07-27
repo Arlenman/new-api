@@ -161,12 +161,15 @@ const DB_CLEAR_IMAGE_COMPLETE_REPLACEMENT = `        tx.objectStore(STORE_IMAGES
 const STORE_IMPORT_MARKER = `import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 `
-const STORE_IMPORT_REPLACEMENT = `${STORE_IMPORT_MARKER}import { getNewApiImagePlaygroundStorageKey } from './lib/newApiStorage'
+const STORE_IMPORT_REPLACEMENT = `import { create } from 'zustand'
+import { createJSONStorage, persist } from 'zustand/middleware'
+import { createNewApiImagePlaygroundPersistStorage, getNewApiImagePlaygroundStorageKey } from './lib/newApiStorage'
 import { initializeNewApiImagePlaygroundSync, type ImagePlaygroundSyncResult } from './lib/newApiSync'
 `
 const STORE_PERSIST_NAME_MARKER = `      name: 'gpt-image-playground',
 `
 const STORE_PERSIST_NAME_REPLACEMENT = `      name: getNewApiImagePlaygroundStorageKey(),
+      storage: createJSONStorage(createNewApiImagePlaygroundPersistStorage),
 `
 const STORE_INIT_MARKER = `export async function initStore() {
   const legacyAgentConversations = normalizeAgentConversations(useStore.getState().agentConversations)

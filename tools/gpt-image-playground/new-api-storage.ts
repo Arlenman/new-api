@@ -97,6 +97,26 @@ export function getNewApiImagePlaygroundStorageKey(baseKey = LEGACY_DATABASE_NAM
   return namespacedKey
 }
 
+export function createNewApiImagePlaygroundPersistStorage() {
+  return {
+    getItem(name: string) {
+      return getLocalStorage()?.getItem(name) ?? null
+    },
+    setItem(name: string, value: string) {
+      const storage = getLocalStorage()
+      if (!storage || storage.getItem(name) === value) return
+      storage.setItem(name, value)
+      notifyNewApiImagePlaygroundStorageChanged()
+    },
+    removeItem(name: string) {
+      const storage = getLocalStorage()
+      if (!storage || storage.getItem(name) == null) return
+      storage.removeItem(name)
+      notifyNewApiImagePlaygroundStorageChanged()
+    },
+  }
+}
+
 export function getNewApiImagePlaygroundMetadataKey(): string | null {
   const userId = getNewApiImagePlaygroundUserId()
   return userId ? `new-api:image-playground:sync:v1:${userId}` : null
