@@ -43,6 +43,7 @@ func TestUpstreamChannelRoutesRejectNonRootSessions(t *testing.T) {
 		path   string
 	}{
 		{method: http.MethodGet, path: "/api/upstream-channels/"},
+		{method: http.MethodGet, path: "/api/upstream-channels/statistics?start_timestamp=100&end_timestamp=200"},
 		{method: http.MethodPost, path: "/api/upstream-channels/"},
 		{method: http.MethodPost, path: "/api/upstream-channels/refresh"},
 		{method: http.MethodGet, path: "/api/upstream-channels/priority-schedule"},

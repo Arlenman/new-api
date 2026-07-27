@@ -149,6 +149,42 @@ export interface UpstreamChannel {
   snapshot?: UpstreamSnapshot;
 }
 
+export interface UpstreamChannelStatisticsItem {
+  channel_id: number;
+  channel_name: string;
+  base_url: string;
+  provider: UpstreamProvider;
+  quota: number;
+  token_used: number;
+  count: number;
+  last_used_at: number;
+}
+
+export interface UpstreamChannelStatisticsSummary {
+  quota: number;
+  token_used: number;
+  count: number;
+}
+
+export interface UpstreamChannelStatisticsTrendItem {
+  channel_id: number;
+  channel_name: string;
+  base_url: string;
+  provider: UpstreamProvider;
+  created_at: number;
+  quota: number;
+  token_used: number;
+  count: number;
+}
+
+export interface UpstreamChannelStatisticsResponse {
+  success: boolean;
+  message?: string;
+  data?: UpstreamChannelStatisticsItem[];
+  summary?: UpstreamChannelStatisticsSummary;
+  trend?: UpstreamChannelStatisticsTrendItem[];
+}
+
 export interface UpstreamChannelConfig {
   name: string;
   proxy: string;

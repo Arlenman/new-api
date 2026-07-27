@@ -30,7 +30,7 @@ func setupUpstreamChannelControllerTest(t *testing.T) (*gin.Engine, *model.Upstr
 	originalCryptoSecret := common.CryptoSecret
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "upstream-controller.db")), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}))
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}, &model.Log{}))
 	model.DB = db
 	model.LOG_DB = db
 	common.CryptoSecret = "upstream-controller-test-secret"
@@ -51,6 +51,7 @@ func setupUpstreamChannelControllerTest(t *testing.T) (*gin.Engine, *model.Upstr
 
 	engine := gin.New()
 	engine.GET("/api/upstream-channels/", GetUpstreamChannels)
+	engine.GET("/api/upstream-channels/statistics", GetUpstreamChannelStatistics)
 	engine.POST("/api/upstream-channels/", CreateUpstreamChannel)
 	engine.PUT("/api/upstream-channels/:id", UpdateUpstreamChannelConfig)
 	engine.POST("/api/upstream-channels/:id/pin", PinUpstreamChannel)
@@ -65,6 +66,79 @@ func setupUpstreamChannelControllerTest(t *testing.T) (*gin.Engine, *model.Upstr
 	engine.POST("/api/upstream-channels/:id/keys/models", FetchUpstreamChannelKeyModels)
 	engine.POST("/api/upstream-channels/:id/keys/:key_id/test", TestUpstreamChannelKey)
 	return engine, row
+}
+
+func TestGetUpstreamChannelStatisticsRejectsInvalidTimeRange(t *testing.T) {
+	engine, _ := setupUpstreamChannelControllerTest(t)
+	tests := []struct {
+		name    string
+		query   string
+		message string
+	}{
+		{name: "missing start", query: "end_timestamp=200", message: "invalid start_timestamp"},
+		{name: "invalid start", query: "start_timestamp=bad&end_timestamp=200", message: "invalid start_timestamp"},
+		{name: "zero end", query: "start_timestamp=100&end_timestamp=0", message: "invalid end_timestamp"},
+		{name: "reversed range", query: "start_timestamp=200&end_timestamp=100", message: "invalid time range"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/api/upstream-channels/statistics?"+tt.query, nil)
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, request)
+
+			require.Equal(t, http.StatusOK, recorder.Code)
+			var response struct {
+				Success bool   `json:"success"`
+				Message string `json:"message"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+			assert.False(t, response.Success)
+			assert.Equal(t, tt.message, response.Message)
+		})
+	}
+}
+
+func TestGetUpstreamChannelStatisticsReturnsTopLevelAnalytics(t *testing.T) {
+	engine, managed := setupUpstreamChannelControllerTest(t)
+	baseURL := "https://upstream.example/v1"
+	source := &model.Channel{Name: "source", Key: "key", BaseURL: &baseURL}
+	require.NoError(t, model.DB.Create(source).Error)
+	require.NoError(t, model.LOG_DB.Create(&[]model.Log{
+		{ChannelId: source.Id, Type: model.LogTypeConsume, CreatedAt: 100, Quota: 10, PromptTokens: 2, CompletionTokens: 3},
+		{ChannelId: source.Id, Type: model.LogTypeConsume, CreatedAt: 200, Quota: 20, PromptTokens: 4, CompletionTokens: 6},
+	}).Error)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/upstream-channels/statistics?start_timestamp=100&end_timestamp=200", nil)
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool `json:"success"`
+		Data    []struct {
+			ChannelID  int   `json:"channel_id"`
+			Quota      int64 `json:"quota"`
+			TokenUsed  int64 `json:"token_used"`
+			Count      int64 `json:"count"`
+			LastUsedAt int64 `json:"last_used_at"`
+		} `json:"data"`
+		Summary service.UpstreamChannelStatisticsSummary     `json:"summary"`
+		Trend   []service.UpstreamChannelStatisticsTrendItem `json:"trend"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	require.Len(t, response.Data, 1)
+	assert.Equal(t, managed.Id, response.Data[0].ChannelID)
+	assert.Equal(t, int64(30), response.Data[0].Quota)
+	assert.Equal(t, int64(15), response.Data[0].TokenUsed)
+	assert.Equal(t, int64(2), response.Data[0].Count)
+	assert.Equal(t, int64(200), response.Data[0].LastUsedAt)
+	assert.Equal(t, service.UpstreamChannelStatisticsSummary{Quota: 30, TokenUsed: 15, Count: 2}, response.Summary)
+	require.Len(t, response.Trend, 1)
+	assert.Equal(t, int64(0), response.Trend[0].CreatedAt)
+	assert.Equal(t, int64(30), response.Trend[0].Quota)
+	assert.Equal(t, int64(15), response.Trend[0].TokenUsed)
+	assert.Equal(t, int64(2), response.Trend[0].Count)
 }
 
 func TestUpdateUpstreamChannelKeyGroupRejectsUnsupportedProvider(t *testing.T) {

@@ -5852,6 +5852,12 @@
     "channel connectivity test completed": "channel connectivity test completed",
     "ordinary channel priority synchronized after upstream test passed": "ordinary channel priority synchronized after upstream test passed",
     "no ordinary channel matched the selected upstream keys and base URL": "no ordinary channel matched the selected upstream keys and base URL",
-    "groups, models, ratios, and keys refreshed": "groups, models, ratios, and keys refreshed"
+    "groups, models, ratios, and keys refreshed": "groups, models, ratios, and keys refreshed",
+    "All channels are hidden. Click a channel below to show it.": "すべてのチャネルが非表示です。下のチャネルをクリックすると表示されます。",
+    "Channel Ranking": "チャネルランキング",
+    "Channel Usage Trend": "チャネル使用量の推移",
+    "Data List": "データ一覧",
+    "Failed to load channel statistics": "チャネル統計の読み込みに失敗しました",
+    "Statistics": "統計"
   }
 }

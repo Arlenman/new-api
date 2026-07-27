@@ -18,8 +18,10 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  BarChart3,
   Bell,
   CalendarClock,
+  List,
   LoaderCircle,
   Plus,
   RefreshCw,
@@ -74,6 +76,7 @@ import {
 import { AlertRuleDialog } from './components/alert-rule-dialog'
 import { UpstreamChannelCard } from './components/upstream-channel-card'
 import { UpstreamChannelConfigDialog } from './components/upstream-channel-config-dialog'
+import { UpstreamChannelStatistics } from './components/upstream-channel-statistics'
 import { UpstreamPriorityScheduleDialog } from './components/upstream-priority-schedule-dialog'
 import {
   filterAndSortUpstreamChannels,
@@ -123,6 +126,7 @@ export function UpstreamChannels() {
   const [autoRefreshUpdatingChannelId, setAutoRefreshUpdatingChannelId] =
     useState<number | null>(null)
   const [pinningChannelId, setPinningChannelId] = useState<number | null>(null)
+  const [panelMode, setPanelMode] = useState<'list' | 'statistics'>('list')
   const [statusFilter, setStatusFilter] =
     useState<UpstreamChannelStatusFilter>('all')
   const [channelSort, setChannelSort] = useState<UpstreamChannelSort>('default')
@@ -786,7 +790,27 @@ export function UpstreamChannels() {
           </span>
         </SectionPageLayout.Title>
         <SectionPageLayout.Actions>
-          {channels.length > 0 && (
+          <div className='bg-muted inline-flex rounded-md p-1'>
+            <Button
+              type='button'
+              size='sm'
+              variant={panelMode === 'list' ? 'secondary' : 'ghost'}
+              onClick={() => setPanelMode('list')}
+            >
+              <List />
+              {t('List')}
+            </Button>
+            <Button
+              type='button'
+              size='sm'
+              variant={panelMode === 'statistics' ? 'secondary' : 'ghost'}
+              onClick={() => setPanelMode('statistics')}
+            >
+              <BarChart3 />
+              {t('Statistics')}
+            </Button>
+          </div>
+          {panelMode === 'list' && channels.length > 0 && (
             <>
               <NativeSelect
                 size='sm'
@@ -831,15 +855,24 @@ export function UpstreamChannels() {
               </NativeSelect>
             </>
           )}
-          <Button variant='outline' onClick={() => setAlertRulesOpen(true)}>
+          <Button
+            variant='outline'
+            hidden={panelMode !== 'list'}
+            onClick={() => setAlertRulesOpen(true)}
+          >
             <Bell />
             {t('Alert rules')}
           </Button>
-          <Button variant='outline' onClick={openAddConfiguration}>
+          <Button
+            variant='outline'
+            hidden={panelMode !== 'list'}
+            onClick={openAddConfiguration}
+          >
             <Plus />
             {t('Add configuration')}
           </Button>
           <Button
+            hidden={panelMode !== 'list'}
             onClick={() => refreshAllMutation.mutate()}
             disabled={refreshAllMutation.isPending || channels.length === 0}
           >
@@ -852,7 +885,8 @@ export function UpstreamChannels() {
           </Button>
         </SectionPageLayout.Actions>
         <SectionPageLayout.Content>
-          <div className='space-y-2'>
+          {panelMode === 'statistics' && <UpstreamChannelStatistics />}
+          <div className={panelMode === 'list' ? 'space-y-2' : 'hidden'}>
             {!channelsQuery.isLoading && !channelsQuery.isError && (
               <div className='flex flex-wrap items-center gap-x-5 gap-y-2 border-b px-1 pb-2 text-sm'>
                 <OverviewMetric

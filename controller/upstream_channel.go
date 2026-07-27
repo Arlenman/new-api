@@ -277,6 +277,25 @@ func GetUpstreamChannels(c *gin.Context) {
 	common.ApiSuccess(c, views)
 }
 
+func GetUpstreamChannelStatistics(c *gin.Context) {
+	startTimestamp, endTimestamp, ok := parseFlowQuotaTimeRange(c)
+	if !ok {
+		return
+	}
+	result, err := service.GetUpstreamChannelStatistics(startTimestamp, endTimestamp)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    result.Data,
+		"summary": result.Summary,
+		"trend":   result.Trend,
+	})
+}
+
 func DeleteUpstreamChannel(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil || id <= 0 {

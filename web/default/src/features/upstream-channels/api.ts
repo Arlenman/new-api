@@ -38,6 +38,7 @@ import type {
   RefreshAllResult,
   UpstreamChannel,
   UpstreamChannelConfig,
+  UpstreamChannelStatisticsResponse,
   UpstreamPrioritySchedule,
   ClearUpstreamPriorityTasksResult,
   UpstreamPriorityTaskPage,
@@ -52,6 +53,16 @@ export async function getManagedUpstreamChannels(): Promise<
 > {
   const res = await api.get<ApiResponse<UpstreamChannel[]>>(
     '/api/upstream-channels/'
+  )
+  return res.data
+}
+
+export async function getManagedUpstreamChannelStatistics(
+  params: URLSearchParams
+): Promise<UpstreamChannelStatisticsResponse> {
+  const res = await api.get<UpstreamChannelStatisticsResponse>(
+    '/api/upstream-channels/statistics',
+    { params }
   )
   return res.data
 }

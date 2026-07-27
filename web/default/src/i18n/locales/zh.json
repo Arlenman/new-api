@@ -5852,6 +5852,12 @@
     "channel connectivity test completed": "渠道连通性测试已完成",
     "ordinary channel priority synchronized after upstream test passed": "上游渠道测试通过后，已同步普通渠道优先级",
     "no ordinary channel matched the selected upstream keys and base URL": "没有普通渠道同时匹配所选上游 Key 和 Base URL",
-    "groups, models, ratios, and keys refreshed": "已刷新分组、模型、倍率和 Key"
+    "groups, models, ratios, and keys refreshed": "已刷新分组、模型、倍率和 Key",
+    "All channels are hidden. Click a channel below to show it.": "所有渠道均已隐藏。点击下方渠道即可显示。",
+    "Channel Ranking": "渠道排行",
+    "Channel Usage Trend": "渠道使用趋势",
+    "Data List": "数据列表",
+    "Failed to load channel statistics": "加载渠道统计数据失败",
+    "Statistics": "统计"
   }
 }

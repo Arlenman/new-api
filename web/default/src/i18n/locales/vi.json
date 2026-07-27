@@ -5852,6 +5852,12 @@
     "channel connectivity test completed": "channel connectivity test completed",
     "ordinary channel priority synchronized after upstream test passed": "ordinary channel priority synchronized after upstream test passed",
     "no ordinary channel matched the selected upstream keys and base URL": "no ordinary channel matched the selected upstream keys and base URL",
-    "groups, models, ratios, and keys refreshed": "groups, models, ratios, and keys refreshed"
+    "groups, models, ratios, and keys refreshed": "groups, models, ratios, and keys refreshed",
+    "All channels are hidden. Click a channel below to show it.": "Tất cả kênh đang bị ẩn. Nhấp vào một kênh bên dưới để hiển thị.",
+    "Channel Ranking": "Xếp hạng kênh",
+    "Channel Usage Trend": "Xu hướng sử dụng kênh",
+    "Data List": "Danh sách dữ liệu",
+    "Failed to load channel statistics": "Không thể tải thống kê kênh",
+    "Statistics": "Thống kê"
   }
 }

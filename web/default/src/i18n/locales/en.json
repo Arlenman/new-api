@@ -5852,6 +5852,12 @@
     "channel connectivity test completed": "channel connectivity test completed",
     "ordinary channel priority synchronized after upstream test passed": "ordinary channel priority synchronized after upstream test passed",
     "no ordinary channel matched the selected upstream keys and base URL": "no ordinary channel matched the selected upstream keys and base URL",
-    "groups, models, ratios, and keys refreshed": "groups, models, ratios, and keys refreshed"
+    "groups, models, ratios, and keys refreshed": "groups, models, ratios, and keys refreshed",
+    "All channels are hidden. Click a channel below to show it.": "All channels are hidden. Click a channel below to show it.",
+    "Channel Ranking": "Channel Ranking",
+    "Channel Usage Trend": "Channel Usage Trend",
+    "Data List": "Data List",
+    "Failed to load channel statistics": "Failed to load channel statistics",
+    "Statistics": "Statistics"
   }
 }
