@@ -77,6 +77,17 @@ export interface TokenTagQuotaSummary {
   count: number
 }
 
+export interface TokenTagQuotaTrendItem {
+  tag_id: number
+  tag_name: string
+  user_id?: number
+  username?: string
+  created_at: number
+  token_used?: number
+  count?: number
+  quota?: number
+}
+
 export interface TokenTagOptionItem {
   id: number
   user_id: number

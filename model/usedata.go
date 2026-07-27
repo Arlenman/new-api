@@ -66,6 +66,23 @@ type TokenTagQuotaSummary struct {
 	Count     int `json:"count" gorm:"column:count"`
 }
 
+type TokenTagQuotaTrendData struct {
+	TagID     int    `json:"tag_id" gorm:"column:tag_id"`
+	TagName   string `json:"tag_name" gorm:"column:tag_name"`
+	UserID    int    `json:"user_id,omitempty" gorm:"column:user_id"`
+	Username  string `json:"username,omitempty" gorm:"column:username"`
+	CreatedAt int64  `json:"created_at" gorm:"column:created_at"`
+	TokenUsed int    `json:"token_used" gorm:"column:token_used"`
+	Count     int    `json:"count" gorm:"column:count"`
+	Quota     int    `json:"quota" gorm:"column:quota"`
+}
+
+type TokenTagQuotaAnalyticsResult struct {
+	Data    []*TokenTagQuotaData
+	Summary TokenTagQuotaSummary
+	Trend   []*TokenTagQuotaTrendData
+}
+
 func UpdateQuotaData() {
 	for {
 		if common.DataExportEnabled {
@@ -261,6 +278,14 @@ type tokenTagLogAggregate struct {
 	Count      int    `gorm:"column:count"`
 	Quota      int    `gorm:"column:quota"`
 	LastUsedAt int64  `gorm:"column:last_used_at"`
+}
+
+type tokenTagTrendLogAggregate struct {
+	TokenID   int   `gorm:"column:token_id"`
+	CreatedAt int64 `gorm:"column:created_at"`
+	TokenUsed int   `gorm:"column:token_used"`
+	Count     int   `gorm:"column:count"`
+	Quota     int   `gorm:"column:quota"`
 }
 
 type tokenTagAnalyticsTag struct {
@@ -513,4 +538,90 @@ func GetTokenTagQuotaAnalytics(startTime int64, endTime int64, username string, 
 		}
 	}
 	return rows, summary, nil
+}
+
+func GetTokenTagQuotaAnalyticsWithTrend(startTime int64, endTime int64, username string, userID int, role int, filters TokenTagQuotaFilters) (TokenTagQuotaAnalyticsResult, error) {
+	rows, summary, err := GetTokenTagQuotaAnalytics(startTime, endTime, username, userID, role, filters)
+	result := TokenTagQuotaAnalyticsResult{
+		Data:    rows,
+		Summary: summary,
+		Trend:   make([]*TokenTagQuotaTrendData, 0),
+	}
+	if err != nil || len(rows) == 0 {
+		return result, err
+	}
+
+	type trendTagMetadata struct {
+		TagID    int
+		TagName  string
+		UserID   int
+		Username string
+	}
+	tagsByToken := make(map[int][]trendTagMetadata)
+	seenTagsByToken := make(map[int]map[string]struct{})
+	tokenIDs := make([]int, 0)
+	for _, row := range rows {
+		if _, exists := seenTagsByToken[row.TokenID]; !exists {
+			seenTagsByToken[row.TokenID] = make(map[string]struct{})
+			tokenIDs = append(tokenIDs, row.TokenID)
+		}
+		tagKey := fmt.Sprintf("%d\x00%s", row.TagID, row.TagName)
+		if _, exists := seenTagsByToken[row.TokenID][tagKey]; exists {
+			continue
+		}
+		seenTagsByToken[row.TokenID][tagKey] = struct{}{}
+		tagsByToken[row.TokenID] = append(tagsByToken[row.TokenID], trendTagMetadata{
+			TagID:    row.TagID,
+			TagName:  row.TagName,
+			UserID:   row.UserID,
+			Username: row.Username,
+		})
+	}
+
+	logDB := LOG_DB
+	if logDB == nil {
+		logDB = DB
+	}
+	trendQuery := logDB.Table("logs").
+		Where("logs.type = ?", LogTypeConsume).
+		Where("logs.created_at >= ? and logs.created_at <= ?", startTime, endTime).
+		Where("logs.token_id IN ?", tokenIDs)
+	if role < common.RoleAdminUser {
+		trendQuery = trendQuery.Where("logs.user_id = ?", userID)
+	} else {
+		trendQuery, err = applyHiddenUserFilter(trendQuery, "logs.user_id", true)
+		if err != nil {
+			return result, err
+		}
+		if username != "" {
+			trendQuery = trendQuery.Where("logs.username = ?", username)
+		}
+	}
+
+	const hourBucketExpression = "logs.created_at - (logs.created_at % 3600)"
+	var aggregates []tokenTagTrendLogAggregate
+	err = trendQuery.
+		Select("logs.token_id, " + hourBucketExpression + " as created_at, count(logs.id) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used").
+		Group("logs.token_id, " + hourBucketExpression).
+		Order(hourBucketExpression + " ASC, logs.token_id ASC").
+		Scan(&aggregates).Error
+	if err != nil {
+		return result, err
+	}
+
+	for _, aggregate := range aggregates {
+		for _, tag := range tagsByToken[aggregate.TokenID] {
+			result.Trend = append(result.Trend, &TokenTagQuotaTrendData{
+				TagID:     tag.TagID,
+				TagName:   tag.TagName,
+				UserID:    tag.UserID,
+				Username:  tag.Username,
+				CreatedAt: aggregate.CreatedAt,
+				TokenUsed: aggregate.TokenUsed,
+				Count:     aggregate.Count,
+				Quota:     aggregate.Quota,
+			})
+		}
+	}
+	return result, nil
 }

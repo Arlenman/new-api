@@ -18,10 +18,11 @@ type flowQuotaResponse struct {
 }
 
 type tokenTagQuotaResponse struct {
-	Success bool                       `json:"success"`
-	Message string                     `json:"message"`
-	Data    []model.TokenTagQuotaData  `json:"data"`
-	Summary model.TokenTagQuotaSummary `json:"summary"`
+	Success bool                           `json:"success"`
+	Message string                         `json:"message"`
+	Data    []model.TokenTagQuotaData      `json:"data"`
+	Summary model.TokenTagQuotaSummary     `json:"summary"`
+	Trend   []model.TokenTagQuotaTrendData `json:"trend"`
 }
 
 type tokenTagOptionsResponse struct {
@@ -213,6 +214,10 @@ func TestGetAllTokenTagQuotaDatesFiltersByUsernameAndTag(t *testing.T) {
 	require.Equal(t, "alice", payload.Data[0].Username)
 	require.Equal(t, "Client A", payload.Data[0].TagName)
 	require.EqualValues(t, 1199, payload.Data[0].LastUsedAt)
+	require.Len(t, payload.Trend, 1)
+	require.Equal(t, "Client A", payload.Trend[0].TagName)
+	require.EqualValues(t, 0, payload.Trend[0].CreatedAt)
+	require.Equal(t, 100, payload.Trend[0].Quota)
 }
 
 func TestGetUserTokenTagQuotaDatesFiltersByTag(t *testing.T) {
@@ -235,6 +240,10 @@ func TestGetUserTokenTagQuotaDatesFiltersByTag(t *testing.T) {
 	require.Equal(t, "Client A", payload.Data[0].TagName)
 	require.Empty(t, payload.Data[0].Username)
 	require.EqualValues(t, 1199, payload.Data[0].LastUsedAt)
+	require.Len(t, payload.Trend, 1)
+	require.Equal(t, "Client A", payload.Trend[0].TagName)
+	require.Zero(t, payload.Trend[0].UserID)
+	require.Empty(t, payload.Trend[0].Username)
 }
 
 func TestGetTokenTagOptionsScopesByRoleAndUsername(t *testing.T) {

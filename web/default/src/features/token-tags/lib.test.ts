@@ -23,15 +23,19 @@ import {
   NO_TAG_FILTER_VALUE,
   TOKEN_TAGS_CONTENT_CLASS,
   TOKEN_TAGS_FIXED_CONTENT,
+  buildDistributionChartData,
   buildKeyRankingChartData,
   buildTagRankingChartData,
+  buildTagTrendChartData,
   buildTokenKeyRows,
   buildTokenTagOptionNames,
   buildTokenTagSearchParams,
+  filterTagTrendChartData,
   formatTokenTagLastUsedAt,
   getTodayRange,
   groupTokenTagRows,
   sortTokenTagRows,
+  toggleTagTrendSeriesVisibility,
 } from './lib.ts'
 
 describe('token tag analytics helpers', () => {
@@ -369,6 +373,278 @@ describe('token tag analytics filters and charts', () => {
     assert.match(
       keys.categories.find((item) => item.tokenId === 23)?.label || '',
       /#23/
+    )
+  })
+
+  test('builds category distribution percentages from the selected metric total', () => {
+    const ranking = buildTagRankingChartData(modelRows, 'quota', {
+      isAdmin: true,
+      noTagLabel: 'No tags',
+      unknownModelLabel: 'Unknown model',
+    })
+    const distribution = buildDistributionChartData(ranking)
+
+    assert.equal(distribution.total, 400)
+    assert.deepEqual(
+      distribution.data.map((item) => [item.tagName, item.value, item.share]),
+      [
+        ['Internal', 200, 0.5],
+        ['Client A', 100, 0.25],
+        ['Shared', 100, 0.25],
+      ]
+    )
+  })
+
+  test('builds daily tag trend series and fills missing dates with zero', () => {
+    const toTimestamp = (day: number, hour = 0) =>
+      Math.floor(new Date(2026, 6, day, hour).getTime() / 1000)
+    const trend = buildTagTrendChartData(
+      [
+        {
+          tag_id: 1,
+          tag_name: 'Client A',
+          user_id: 1,
+          username: 'alice',
+          created_at: toTimestamp(20, 2),
+          quota: 10,
+        },
+        {
+          tag_id: 1,
+          tag_name: 'Client A',
+          user_id: 1,
+          username: 'alice',
+          created_at: toTimestamp(20, 18),
+          quota: 15,
+        },
+        {
+          tag_id: 2,
+          tag_name: 'Internal',
+          user_id: 1,
+          username: 'alice',
+          created_at: toTimestamp(21, 9),
+          quota: 20,
+        },
+      ],
+      'quota',
+      'day',
+      {
+        isAdmin: true,
+        noTagLabel: 'No tags',
+        unknownModelLabel: 'Unknown model',
+      },
+      {
+        startTimestamp: toTimestamp(20),
+        endTimestamp: toTimestamp(22, 23),
+      }
+    )
+
+    assert.deepEqual(trend.periods, ['2026-07-20', '2026-07-21', '2026-07-22'])
+    assert.deepEqual(
+      trend.series.map((series) => series.label),
+      ['alice / Client A', 'alice / Internal']
+    )
+    assert.deepEqual(
+      trend.data
+        .filter((item) => item.seriesLabel === 'alice / Client A')
+        .map((item) => item.value),
+      [25, 0, 0]
+    )
+    assert.deepEqual(
+      trend.data
+        .filter((item) => item.seriesLabel === 'alice / Internal')
+        .map((item) => item.value),
+      [0, 20, 0]
+    )
+  })
+
+  test('uses Monday as the start of weekly trend buckets', () => {
+    const toTimestamp = (month: number, day: number) =>
+      Math.floor(new Date(2026, month, day, 12).getTime() / 1000)
+    const trend = buildTagTrendChartData(
+      [
+        {
+          tag_id: 1,
+          tag_name: 'Client A',
+          created_at: toTimestamp(6, 5),
+          count: 1,
+        },
+        {
+          tag_id: 1,
+          tag_name: 'Client A',
+          created_at: toTimestamp(6, 6),
+          count: 2,
+        },
+      ],
+      'count',
+      'week',
+      {
+        isAdmin: false,
+        noTagLabel: 'No tags',
+        unknownModelLabel: 'Unknown model',
+      },
+      {
+        startTimestamp: toTimestamp(6, 5),
+        endTimestamp: toTimestamp(6, 12),
+      }
+    )
+
+    assert.deepEqual(trend.periods, ['2026-06-29', '2026-07-06'])
+    assert.deepEqual(
+      trend.data.map((item) => item.value),
+      [1, 2]
+    )
+  })
+
+  test('aggregates monthly trend values into calendar months', () => {
+    const toTimestamp = (month: number, day: number) =>
+      Math.floor(new Date(2026, month, day, 12).getTime() / 1000)
+    const trend = buildTagTrendChartData(
+      [
+        {
+          tag_id: 1,
+          tag_name: 'Client A',
+          created_at: toTimestamp(6, 31),
+          token_used: 10,
+        },
+        {
+          tag_id: 1,
+          tag_name: 'Client A',
+          created_at: toTimestamp(7, 1),
+          token_used: 20,
+        },
+      ],
+      'token_used',
+      'month',
+      {
+        isAdmin: false,
+        noTagLabel: 'No tags',
+        unknownModelLabel: 'Unknown model',
+      },
+      {
+        startTimestamp: toTimestamp(6, 1),
+        endTimestamp: toTimestamp(7, 31),
+      }
+    )
+
+    assert.deepEqual(trend.periods, ['2026-07', '2026-08'])
+    assert.deepEqual(
+      trend.data.map((item) => item.value),
+      [10, 20]
+    )
+  })
+
+  test('toggles same-name trend series independently by stable key', () => {
+    const toTimestamp = (day: number) =>
+      Math.floor(new Date(2026, 6, day, 12).getTime() / 1000)
+    const rows = [
+      {
+        tag_id: 1,
+        tag_name: 'Shared',
+        user_id: 1,
+        username: 'alice',
+        created_at: toTimestamp(20),
+        quota: 10,
+        count: 1,
+      },
+      {
+        tag_id: 2,
+        tag_name: 'Shared',
+        user_id: 1,
+        username: 'alice',
+        created_at: toTimestamp(20),
+        quota: 20,
+        count: 2,
+      },
+    ]
+    const options = {
+      isAdmin: false,
+      noTagLabel: 'No tags',
+      unknownModelLabel: 'Unknown model',
+    }
+    const range = {
+      startTimestamp: toTimestamp(20),
+      endTimestamp: toTimestamp(21),
+    }
+    const dailyQuota = buildTagTrendChartData(
+      rows,
+      'quota',
+      'day',
+      options,
+      range
+    )
+    const monthlyRequests = buildTagTrendChartData(
+      rows,
+      'count',
+      'month',
+      options,
+      range
+    )
+    const [firstSeries, secondSeries] = dailyQuota.series
+
+    assert.equal(firstSeries.label, secondSeries.label)
+    assert.notEqual(firstSeries.key, secondSeries.key)
+    assert.deepEqual(
+      monthlyRequests.series.map((series) => series.key),
+      dailyQuota.series.map((series) => series.key)
+    )
+
+    let hiddenSeriesKeys = toggleTagTrendSeriesVisibility(
+      new Set<string>(),
+      firstSeries.key
+    )
+    assert.deepEqual(
+      [
+        ...new Set(
+          filterTagTrendChartData(dailyQuota, hiddenSeriesKeys).data.map(
+            (item) => item.seriesKey
+          )
+        ),
+      ],
+      [secondSeries.key]
+    )
+    assert.deepEqual(
+      [
+        ...new Set(
+          filterTagTrendChartData(monthlyRequests, hiddenSeriesKeys).data.map(
+            (item) => item.seriesKey
+          )
+        ),
+      ],
+      [secondSeries.key]
+    )
+
+    hiddenSeriesKeys = toggleTagTrendSeriesVisibility(
+      hiddenSeriesKeys,
+      secondSeries.key
+    )
+    assert.equal(
+      filterTagTrendChartData(dailyQuota, hiddenSeriesKeys).data.length,
+      0
+    )
+
+    hiddenSeriesKeys = toggleTagTrendSeriesVisibility(
+      hiddenSeriesKeys,
+      firstSeries.key
+    )
+    assert.deepEqual(
+      [
+        ...new Set(
+          filterTagTrendChartData(dailyQuota, hiddenSeriesKeys).data.map(
+            (item) => item.seriesKey
+          )
+        ),
+      ],
+      [firstSeries.key]
+    )
+
+    hiddenSeriesKeys = toggleTagTrendSeriesVisibility(
+      hiddenSeriesKeys,
+      secondSeries.key
+    )
+    assert.equal(hiddenSeriesKeys.size, 0)
+    assert.equal(
+      filterTagTrendChartData(dailyQuota, hiddenSeriesKeys),
+      dailyQuota
     )
   })
 })
