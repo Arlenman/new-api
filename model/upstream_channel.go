@@ -44,8 +44,10 @@ type UpstreamChannel struct {
 	Priority            int64   `json:"priority" gorm:"index"`
 	SelectedGroup       string  `json:"selected_group" gorm:"type:varchar(255)"`
 	Username            string  `json:"username" gorm:"type:varchar(255)"`
+	Proxy               string  `json:"-" gorm:"type:text"`
 	Note                string  `json:"note" gorm:"type:text"`
 	DefaultTestModel    string  `json:"default_test_model" gorm:"type:varchar(255)"`
+	DefaultTestEndpoint string  `json:"default_test_endpoint" gorm:"type:varchar(64)"`
 	PasswordCiphertext  string  `json:"-" gorm:"type:text"`
 	Balance             float64 `json:"balance"`
 	BalanceUpdatedTime  int64   `json:"balance_updated_time" gorm:"bigint"`
@@ -297,8 +299,10 @@ func DeleteUpstreamChannel(id int) error {
 			"priority":              0,
 			"selected_group":        "",
 			"username":              "",
+			"proxy":                 "",
 			"note":                  "",
 			"default_test_model":    "",
+			"default_test_endpoint": "",
 			"password_ciphertext":   "",
 			"balance":               0,
 			"balance_updated_time":  0,
@@ -321,7 +325,7 @@ func DeleteUpstreamChannel(id int) error {
 	return nil
 }
 
-func UpdateUpstreamChannelConfig(id int, name string, provider string, authType string, username string, passwordCiphertext *string, balanceThreshold float64, multiplier float64, autoRefreshInterval int, priority int64) error {
+func UpdateUpstreamChannelConfig(id int, name string, provider string, authType string, username string, passwordCiphertext *string, proxy *string, balanceThreshold float64, multiplier float64, autoRefreshInterval int, priority int64) error {
 	return DB.Transaction(func(tx *gorm.DB) error {
 		var row UpstreamChannel
 		if err := tx.Where("suppressed_at IS NULL").First(&row, "id = ?", id).Error; err != nil {
@@ -338,7 +342,10 @@ func UpdateUpstreamChannelConfig(id int, name string, provider string, authType 
 			"multiplier":            multiplier,
 			"auto_refresh_interval": autoRefreshInterval,
 		}
-		loginIdentityChanged := row.Provider != provider || row.EffectiveAuthType() != NormalizeUpstreamAuthType(authType) || row.Username != username || passwordCiphertext != nil
+		loginIdentityChanged := row.Provider != provider || row.EffectiveAuthType() != NormalizeUpstreamAuthType(authType) || row.Username != username || passwordCiphertext != nil || (proxy != nil && row.Proxy != *proxy)
+		if proxy != nil {
+			updates["proxy"] = *proxy
+		}
 		if passwordCiphertext != nil {
 			updates["password_ciphertext"] = *passwordCiphertext
 		}
@@ -350,6 +357,7 @@ func UpdateUpstreamChannelConfig(id int, name string, provider string, authType 
 			updates["last_error"] = ""
 			updates["snapshot_json"] = ""
 			updates["default_test_model"] = ""
+			updates["default_test_endpoint"] = ""
 			updates["status"] = UpstreamChannelStatusUnconfigured
 		}
 		return tx.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Updates(updates).Error
@@ -446,6 +454,10 @@ func UpdateUpstreamChannelSelectedGroup(id int, selectedGroup string) error {
 
 func UpdateUpstreamChannelDefaultTestModel(id int, defaultTestModel string) error {
 	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Update("default_test_model", defaultTestModel).Error
+}
+
+func UpdateUpstreamChannelDefaultTestEndpoint(id int, defaultTestEndpoint string) error {
+	return DB.Model(&UpstreamChannel{}).Where("id = ?", id).Where("suppressed_at IS NULL").Update("default_test_endpoint", defaultTestEndpoint).Error
 }
 
 func UpdateUpstreamChannelPriorities(priorities map[int]int64) error {
@@ -608,6 +620,9 @@ func UpsertImportedUpstreamChannels(channels []Channel) (UpsertImportedUpstreamC
 			}
 
 			channel.Id = existing.Id
+			existingSetting := existing.GetSetting()
+			existingSetting.Proxy = channel.GetSetting().Proxy
+			channel.SetSetting(existingSetting)
 			updates := map[string]any{
 				"type":       channel.Type,
 				"key":        channel.Key,
@@ -622,6 +637,7 @@ func UpsertImportedUpstreamChannels(channels []Channel) (UpsertImportedUpstreamC
 				"test_model": channel.TestModel,
 				"auto_ban":   channel.AutoBan,
 				"remark":     channel.Remark,
+				"setting":    channel.Setting,
 			}
 			if err = tx.Model(&Channel{}).Where("id = ?", existing.Id).Updates(updates).Error; err != nil {
 				return err

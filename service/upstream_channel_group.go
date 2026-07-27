@@ -108,7 +108,10 @@ func UpdateUpstreamChannelKeyGroup(ctx context.Context, upstreamChannelID int, k
 		return row, previous, err
 	}
 
-	requestCtx, cancel, client := refreshUpstreamClient(ctx)
+	requestCtx, cancel, client, err := refreshUpstreamClient(ctx, row)
+	if err != nil {
+		return row, previous, err
+	}
 	defer cancel()
 
 	switch provider {

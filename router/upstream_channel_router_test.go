@@ -56,6 +56,7 @@ func TestUpstreamChannelRoutesRejectNonRootSessions(t *testing.T) {
 		{method: http.MethodPatch, path: "/api/upstream-channels/1/note"},
 		{method: http.MethodPatch, path: "/api/upstream-channels/1/selected-group"},
 		{method: http.MethodPatch, path: "/api/upstream-channels/1/default-test-model"},
+		{method: http.MethodPatch, path: "/api/upstream-channels/1/default-test-endpoint"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/refresh"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/refresh-balance"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/refresh-keys"},
@@ -64,6 +65,7 @@ func TestUpstreamChannelRoutesRejectNonRootSessions(t *testing.T) {
 		{method: http.MethodPatch, path: "/api/upstream-channels/1/keys/1/group"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/keys/import"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/keys/models"},
+		{method: http.MethodPost, path: "/api/upstream-channels/1/keys/1/test"},
 		{method: http.MethodPost, path: "/api/upstream-channels/1/keys/1"},
 	}
 	for _, tt := range tests {

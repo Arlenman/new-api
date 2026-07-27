@@ -13,6 +13,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 )
 
@@ -62,11 +63,7 @@ type UpstreamKeyImportResult struct {
 }
 
 func ImportUpstreamChannelKeys(ctx context.Context, upstreamChannelID int, options UpstreamKeyImportOptions) (UpstreamKeyImportResult, error) {
-	client := GetHttpClient()
-	if client == nil {
-		client = http.DefaultClient
-	}
-	return importUpstreamChannelKeys(ctx, client, upstreamChannelID, options)
+	return importUpstreamChannelKeys(ctx, nil, upstreamChannelID, options)
 }
 
 func importUpstreamChannelKeys(ctx context.Context, client *http.Client, upstreamChannelID int, options UpstreamKeyImportOptions) (UpstreamKeyImportResult, error) {
@@ -84,6 +81,12 @@ func importUpstreamChannelKeys(ctx context.Context, client *http.Client, upstrea
 	row, err := model.GetUpstreamChannelByID(upstreamChannelID)
 	if err != nil {
 		return UpstreamKeyImportResult{}, err
+	}
+	if client == nil {
+		client, err = upstreamChannelHTTPClient(row)
+		if err != nil {
+			return UpstreamKeyImportResult{}, err
+		}
 	}
 	importOptions, err := normalizeUpstreamKeyImportOptions(options, row.BaseURL, row.Name, row.Priority)
 	if err != nil {
@@ -182,7 +185,7 @@ func importUpstreamChannelKeys(ctx context.Context, client *http.Client, upstrea
 			testModel = &value
 		}
 		remark := importOptions.Remark
-		channels = append(channels, model.Channel{
+		channel := model.Channel{
 			Type:        constant.ChannelTypeOpenAI,
 			Key:         fullKey,
 			Status:      status,
@@ -197,7 +200,9 @@ func importUpstreamChannelKeys(ctx context.Context, client *http.Client, upstrea
 			TestModel:   testModel,
 			AutoBan:     &autoBan,
 			Remark:      &remark,
-		})
+		}
+		channel.SetSetting(dto.ChannelSettings{Proxy: row.Proxy})
+		channels = append(channels, channel)
 	}
 
 	upsertResult, err := model.UpsertImportedUpstreamChannels(channels)
@@ -383,11 +388,7 @@ func normalizeUpstreamKeyIDs(keyIDs []int64) ([]int64, error) {
 }
 
 func FetchUpstreamChannelKeyModels(ctx context.Context, upstreamChannelID int, keyIDs []int64) ([]string, error) {
-	client := GetHttpClient()
-	if client == nil {
-		client = http.DefaultClient
-	}
-	return fetchUpstreamChannelKeyModels(ctx, client, upstreamChannelID, keyIDs)
+	return fetchUpstreamChannelKeyModels(ctx, nil, upstreamChannelID, keyIDs)
 }
 
 func fetchUpstreamChannelKeyModels(ctx context.Context, client *http.Client, upstreamChannelID int, keyIDs []int64) ([]string, error) {
@@ -403,6 +404,12 @@ func fetchUpstreamChannelKeyModels(ctx context.Context, client *http.Client, ups
 	row, err := model.GetUpstreamChannelByID(upstreamChannelID)
 	if err != nil {
 		return nil, err
+	}
+	if client == nil {
+		client, err = upstreamChannelHTTPClient(row)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if UpstreamCredentialRequiresUsername(row.Provider, row.EffectiveAuthType()) && strings.TrimSpace(row.Username) == "" {
 		return nil, errors.New("upstream username is not configured")

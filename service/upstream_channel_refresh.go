@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -129,9 +130,9 @@ func RefreshUpstreamChannel(ctx context.Context, id int) (*model.UpstreamChannel
 
 	refreshCtx, cancel := context.WithTimeout(ctx, upstreamChannelRefreshTimeout)
 	defer cancel()
-	client := GetHttpClient()
-	if client == nil {
-		client = http.DefaultClient
+	client, err := upstreamChannelHTTPClient(row)
+	if err != nil {
+		return row, UpstreamSnapshot{}, errorsWithRefreshState(row.Id, err.Error())
 	}
 	snapshot, err := FetchUpstreamSnapshot(refreshCtx, client, row.BaseURL, row.Provider, UpstreamCredential{AuthType: row.EffectiveAuthType(), Username: row.Username, Password: password})
 	attemptedAt := time.Now().Unix()
@@ -229,13 +230,25 @@ func refreshUpstreamCredential(row *model.UpstreamChannel) (UpstreamCredential, 
 	return UpstreamCredential{AuthType: row.EffectiveAuthType(), Username: row.Username, Password: password}, nil
 }
 
-func refreshUpstreamClient(ctx context.Context) (context.Context, context.CancelFunc, *http.Client) {
-	refreshCtx, cancel := context.WithTimeout(ctx, upstreamChannelRefreshTimeout)
-	client := GetHttpClient()
+func upstreamChannelHTTPClient(row *model.UpstreamChannel) (*http.Client, error) {
+	client, err := GetHttpClientWithProxy(strings.TrimSpace(row.Proxy))
+	if err != nil {
+		return nil, errors.New("invalid upstream proxy address")
+	}
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return refreshCtx, cancel, client
+	return client, nil
+}
+
+func refreshUpstreamClient(ctx context.Context, row *model.UpstreamChannel) (context.Context, context.CancelFunc, *http.Client, error) {
+	refreshCtx, cancel := context.WithTimeout(ctx, upstreamChannelRefreshTimeout)
+	client, err := upstreamChannelHTTPClient(row)
+	if err != nil {
+		cancel()
+		return nil, nil, nil, err
+	}
+	return refreshCtx, cancel, client, nil
 }
 
 func savePartialUpstreamSnapshot(row *model.UpstreamChannel, snapshot UpstreamSnapshot, attemptedAt int64, unavailableDefaultTestModel string) (*model.UpstreamChannel, error) {
@@ -262,7 +275,10 @@ func RefreshUpstreamChannelBalance(ctx context.Context, id int) (*model.Upstream
 	if err != nil {
 		return row, UpstreamSnapshot{}, err
 	}
-	refreshCtx, cancel, client := refreshUpstreamClient(ctx)
+	refreshCtx, cancel, client, err := refreshUpstreamClient(ctx, row)
+	if err != nil {
+		return row, UpstreamSnapshot{}, errorsWithRefreshState(row.Id, err.Error())
+	}
 	defer cancel()
 	fetched, err := FetchUpstreamBalance(refreshCtx, client, row.BaseURL, row.Provider, credential)
 	attemptedAt := time.Now().Unix()
@@ -319,7 +335,10 @@ func RefreshUpstreamChannelKeys(ctx context.Context, id int) (*model.UpstreamCha
 	if err != nil {
 		return row, UpstreamSnapshot{}, err
 	}
-	refreshCtx, cancel, client := refreshUpstreamClient(ctx)
+	refreshCtx, cancel, client, err := refreshUpstreamClient(ctx, row)
+	if err != nil {
+		return row, UpstreamSnapshot{}, errorsWithRefreshState(row.Id, err.Error())
+	}
 	defer cancel()
 	fetched, err := FetchUpstreamKeys(refreshCtx, client, row.BaseURL, row.Provider, credential)
 	attemptedAt := time.Now().Unix()
@@ -363,7 +382,10 @@ func RefreshUpstreamChannelGroups(ctx context.Context, id int) (*model.UpstreamC
 	if err != nil {
 		return row, UpstreamSnapshot{}, err
 	}
-	refreshCtx, cancel, client := refreshUpstreamClient(ctx)
+	refreshCtx, cancel, client, err := refreshUpstreamClient(ctx, row)
+	if err != nil {
+		return row, UpstreamSnapshot{}, errorsWithRefreshState(row.Id, err.Error())
+	}
 	defer cancel()
 	fetched, err := FetchUpstreamGroups(refreshCtx, client, row.BaseURL, row.Provider, credential)
 	attemptedAt := time.Now().Unix()
@@ -475,28 +497,70 @@ func RefreshAllUpstreamChannels(ctx context.Context) (int, []string) {
 }
 
 func RevealUpstreamChannelKey(ctx context.Context, id int, keyID int64) (string, error) {
+	_, key, err := fetchUpstreamChannelKey(ctx, nil, id, keyID, false)
+	return key, err
+}
+
+func GetUpstreamChannelKeyTestTarget(ctx context.Context, id int, keyID int64) (*model.UpstreamChannel, string, error) {
+	return fetchUpstreamChannelKey(ctx, nil, id, keyID, true)
+}
+
+func fetchUpstreamChannelKey(ctx context.Context, client *http.Client, id int, keyID int64, requireSnapshot bool) (*model.UpstreamChannel, string, error) {
 	lock := upstreamRefreshLock(id)
 	lock.Lock()
 	defer lock.Unlock()
 
 	row, err := model.GetUpstreamChannelByID(id)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
-	if UpstreamCredentialRequiresUsername(row.Provider, row.EffectiveAuthType()) && strings.TrimSpace(row.Username) == "" {
-		return "", fmt.Errorf("upstream username is not configured")
+	if client == nil {
+		client, err = upstreamChannelHTTPClient(row)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	provider := row.Provider
+	if requireSnapshot {
+		if strings.TrimSpace(row.SnapshotJSON) == "" {
+			return nil, "", errors.New("refresh the upstream channel before testing a key")
+		}
+		var snapshot UpstreamSnapshot
+		if err = common.UnmarshalJsonStr(row.SnapshotJSON, &snapshot); err != nil {
+			return nil, "", fmt.Errorf("decode upstream snapshot: %w", err)
+		}
+		keyExists := false
+		for _, key := range snapshot.Keys {
+			if key.ID == keyID {
+				keyExists = true
+				break
+			}
+		}
+		if !keyExists {
+			return nil, "", fmt.Errorf("upstream key %d is not present in the latest snapshot", keyID)
+		}
+		if strings.TrimSpace(snapshot.Provider) != "" {
+			provider = snapshot.Provider
+		}
+	}
+	if UpstreamCredentialRequiresUsername(provider, row.EffectiveAuthType()) && strings.TrimSpace(row.Username) == "" {
+		return nil, "", errors.New("upstream username is not configured")
 	}
 	password, err := row.DecryptPassword()
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
-	revealCtx, cancel := context.WithTimeout(ctx, upstreamChannelRefreshTimeout)
+	fetchCtx, cancel := context.WithTimeout(ctx, upstreamChannelRefreshTimeout)
 	defer cancel()
-	client := GetHttpClient()
-	if client == nil {
-		client = http.DefaultClient
+	key, err := FetchUpstreamFullKey(fetchCtx, client, row.BaseURL, provider, UpstreamCredential{AuthType: row.EffectiveAuthType(), Username: row.Username, Password: password}, keyID)
+	if err != nil {
+		return nil, "", err
 	}
-	return FetchUpstreamFullKey(revealCtx, client, row.BaseURL, row.Provider, UpstreamCredential{AuthType: row.EffectiveAuthType(), Username: row.Username, Password: password}, keyID)
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, "", fmt.Errorf("upstream key %d is empty", keyID)
+	}
+	return row, key, nil
 }
 
 func StartUpstreamChannelAutoRefreshTask() {

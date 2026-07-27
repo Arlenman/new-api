@@ -39,6 +39,39 @@ type UpstreamChannelLogMetrics struct {
 	AverageFirstTokenLatencyMs *float64
 }
 
+func NormalizeUpstreamProxyURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	if len(raw) > 2048 {
+		return "", errors.New("invalid upstream proxy address")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "", errors.New("invalid upstream proxy address")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	switch parsed.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return "", errors.New("invalid upstream proxy address")
+	}
+	return parsed.String(), nil
+}
+
+func MaskUpstreamProxyURL(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.User == nil {
+		return strings.TrimSpace(raw)
+	}
+	if _, hasPassword := parsed.User.Password(); !hasPassword {
+		return parsed.String()
+	}
+	maskedUser := url.User(parsed.User.Username()).String() + ":********@"
+	return strings.Replace(parsed.String(), parsed.User.String()+"@", maskedUser, 1)
+}
+
 func NormalizeUpstreamBaseURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -215,6 +248,14 @@ func UpdateUpstreamChannelDefaultTestModel(id int, defaultTestModel string) (*mo
 		}
 	}
 	if err = model.UpdateUpstreamChannelDefaultTestModel(id, defaultTestModel); err != nil {
+		return nil, err
+	}
+	return model.GetUpstreamChannelByID(id)
+}
+
+func UpdateUpstreamChannelDefaultTestEndpoint(id int, defaultTestEndpoint string) (*model.UpstreamChannel, error) {
+	defaultTestEndpoint = strings.TrimSpace(defaultTestEndpoint)
+	if err := model.UpdateUpstreamChannelDefaultTestEndpoint(id, defaultTestEndpoint); err != nil {
 		return nil, err
 	}
 	return model.GetUpstreamChannelByID(id)

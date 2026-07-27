@@ -65,6 +65,7 @@ import {
   refreshManagedUpstreamChannelGroups,
   refreshManagedUpstreamChannelKeys,
   updateManagedUpstreamChannel,
+  updateManagedUpstreamChannelDefaultTestEndpoint,
   updateManagedUpstreamChannelDefaultTestModel,
   updateManagedUpstreamChannelNote,
   updateAlertRule,
@@ -130,6 +131,10 @@ export function UpstreamChannels() {
   >(null)
   const [savingDefaultTestModelChannelId, setSavingDefaultTestModelChannelId] =
     useState<number | null>(null)
+  const [
+    savingDefaultTestEndpointChannelId,
+    setSavingDefaultTestEndpointChannelId,
+  ] = useState<number | null>(null)
   const [enabledChannelThreshold, setEnabledChannelThreshold] = useState('1')
   const [enabledChannelNoticeEnabled, setEnabledChannelNoticeEnabled] =
     useState(false)
@@ -321,6 +326,7 @@ export function UpstreamChannels() {
       if (!channel) return createManagedUpstreamChannel(config)
       const updateConfig: UpstreamChannelConfig = {
         name: config.name,
+        proxy: config.proxy,
         provider: config.provider,
         auth_type: config.auth_type,
         username: config.username,
@@ -556,11 +562,43 @@ export function UpstreamChannels() {
     }
   }
 
+  async function saveDefaultTestEndpoint(
+    channel: UpstreamChannel,
+    defaultTestEndpoint: UpstreamChannel['default_test_endpoint']
+  ): Promise<boolean> {
+    setSavingDefaultTestEndpointChannelId(channel.id)
+    try {
+      const response = await updateManagedUpstreamChannelDefaultTestEndpoint(
+        channel.id,
+        defaultTestEndpoint
+      )
+      if (!response.success) {
+        toast.error(
+          response.message || t('Failed to save default test endpoint')
+        )
+        return false
+      }
+      await queryClient.invalidateQueries({ queryKey })
+      toast.success(t('Default test endpoint saved'))
+      return true
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t('Failed to save default test endpoint')
+      )
+      return false
+    } finally {
+      setSavingDefaultTestEndpointChannelId(null)
+    }
+  }
+
   async function toggleAutoRefresh(channel: UpstreamChannel, enabled: boolean) {
     setAutoRefreshUpdatingChannelId(channel.id)
     try {
       const response = await updateManagedUpstreamChannel(channel.id, {
         name: channel.name,
+        proxy: channel.proxy,
         provider: channel.provider,
         auth_type: channel.auth_type || 'password',
         username: channel.username,
@@ -951,6 +989,9 @@ export function UpstreamChannels() {
                     savingDefaultTestModel={
                       savingDefaultTestModelChannelId === channel.id
                     }
+                    savingDefaultTestEndpoint={
+                      savingDefaultTestEndpointChannelId === channel.id
+                    }
                     deleting={
                       deleteMutation.isPending &&
                       channelToDelete?.id === channel.id
@@ -965,6 +1006,7 @@ export function UpstreamChannels() {
                     onToggleAutoRefresh={toggleAutoRefresh}
                     onSaveNote={saveChannelNote}
                     onSaveDefaultTestModel={saveDefaultTestModel}
+                    onSaveDefaultTestEndpoint={saveDefaultTestEndpoint}
                     onSelectGroup={selectChannelGroup}
                     onDataChanged={refreshChannelList}
                   />

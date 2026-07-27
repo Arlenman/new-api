@@ -250,6 +250,8 @@ func TestDeleteUpstreamChannelSuppressesDiscoveryAndManualCreateRestores(t *test
 		SelectedGroup:       "old-group",
 		Username:            "old-user",
 		Note:                "old note",
+		DefaultTestModel:    "gpt-4o-mini",
+		DefaultTestEndpoint: "openai-response",
 		PasswordCiphertext:  "old-secret",
 		Balance:             42,
 		BalanceUpdatedTime:  100,
@@ -281,6 +283,8 @@ func TestDeleteUpstreamChannelSuppressesDiscoveryAndManualCreateRestores(t *test
 	require.NotNil(t, suppressed.SuppressedAt)
 	assert.Empty(t, suppressed.Username)
 	assert.Empty(t, suppressed.PasswordCiphertext)
+	assert.Empty(t, suppressed.DefaultTestModel)
+	assert.Empty(t, suppressed.DefaultTestEndpoint)
 	assert.Empty(t, suppressed.SnapshotJSON)
 	assert.Zero(t, suppressed.Balance)
 
@@ -345,10 +349,11 @@ func TestUpdateUpstreamChannelConfigClearsSnapshotWhenLoginIdentityChanges(t *te
 		Status:              UpstreamChannelStatusReady,
 		SnapshotJSON:        `{"provider":"new-api","balance":15}`,
 		DefaultTestModel:    "gpt-4o-mini",
+		DefaultTestEndpoint: "openai-response",
 	}
 	require.NoError(t, db.Create(&row).Error)
 
-	err := UpdateUpstreamChannelConfig(row.Id, "Renamed upstream", "sub2api", UpstreamAuthTypePassword, "new-user", nil, 3, 1.25, 300, 7)
+	err := UpdateUpstreamChannelConfig(row.Id, "Renamed upstream", "sub2api", UpstreamAuthTypePassword, "new-user", nil, nil, 3, 1.25, 300, 7)
 	require.NoError(t, err)
 
 	updated, err := GetUpstreamChannelByID(row.Id)
@@ -356,6 +361,7 @@ func TestUpdateUpstreamChannelConfigClearsSnapshotWhenLoginIdentityChanges(t *te
 	assert.Equal(t, UpstreamChannelStatusUnconfigured, updated.Status)
 	assert.Empty(t, updated.SnapshotJSON)
 	assert.Empty(t, updated.DefaultTestModel)
+	assert.Empty(t, updated.DefaultTestEndpoint)
 	assert.Zero(t, updated.Balance)
 	assert.Zero(t, updated.BalanceUpdatedTime)
 	assert.Zero(t, updated.LastSyncTime)
@@ -383,11 +389,12 @@ func TestUpdateUpstreamChannelConfigClearsSnapshotWhenPasswordChanges(t *testing
 		Status:              UpstreamChannelStatusReady,
 		SnapshotJSON:        `{"provider":"new-api","balance":15}`,
 		DefaultTestModel:    "gpt-4o-mini",
+		DefaultTestEndpoint: "openai-response",
 	}
 	require.NoError(t, db.Create(&row).Error)
 	newPassword := "new-encrypted-value"
 
-	err := UpdateUpstreamChannelConfig(row.Id, row.Name, row.Provider, UpstreamAuthTypePassword, row.Username, &newPassword, 0, 1, 300, 0)
+	err := UpdateUpstreamChannelConfig(row.Id, row.Name, row.Provider, UpstreamAuthTypePassword, row.Username, &newPassword, nil, 0, 1, 300, 0)
 	require.NoError(t, err)
 
 	updated, err := GetUpstreamChannelByID(row.Id)
@@ -395,6 +402,7 @@ func TestUpdateUpstreamChannelConfigClearsSnapshotWhenPasswordChanges(t *testing
 	assert.Equal(t, UpstreamChannelStatusUnconfigured, updated.Status)
 	assert.Empty(t, updated.SnapshotJSON)
 	assert.Empty(t, updated.DefaultTestModel)
+	assert.Empty(t, updated.DefaultTestEndpoint)
 	assert.Zero(t, updated.Balance)
 	assert.Zero(t, updated.BalanceUpdatedTime)
 	assert.Zero(t, updated.LastSyncTime)
@@ -417,10 +425,11 @@ func TestUpdateUpstreamChannelConfigPreservesSnapshotForRefreshSettingsOnly(t *t
 		Status:              UpstreamChannelStatusReady,
 		SnapshotJSON:        `{"provider":"new-api","balance":15}`,
 		DefaultTestModel:    "gpt-4o-mini",
+		DefaultTestEndpoint: "openai-response",
 	}
 	require.NoError(t, db.Create(&row).Error)
 
-	err := UpdateUpstreamChannelConfig(row.Id, row.Name, row.Provider, UpstreamAuthTypePassword, row.Username, nil, 10, 1.5, 600, 12)
+	err := UpdateUpstreamChannelConfig(row.Id, row.Name, row.Provider, UpstreamAuthTypePassword, row.Username, nil, nil, 10, 1.5, 600, 12)
 	require.NoError(t, err)
 
 	updated, err := GetUpstreamChannelByID(row.Id)
@@ -428,6 +437,7 @@ func TestUpdateUpstreamChannelConfigPreservesSnapshotForRefreshSettingsOnly(t *t
 	assert.Equal(t, UpstreamChannelStatusReady, updated.Status)
 	assert.Equal(t, row.SnapshotJSON, updated.SnapshotJSON)
 	assert.Equal(t, "gpt-4o-mini", updated.DefaultTestModel)
+	assert.Equal(t, "openai-response", updated.DefaultTestEndpoint)
 	assert.Equal(t, float64(15), updated.Balance)
 	assert.Equal(t, int64(100), updated.BalanceUpdatedTime)
 	assert.Equal(t, int64(100), updated.LastSyncTime)

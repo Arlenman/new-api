@@ -20,6 +20,16 @@ export type UpstreamProvider = "auto" | "new-api" | "sub2api" | "other";
 export type UpstreamAuthType = "password" | "access_token";
 export type UpstreamChannelStatus = "unconfigured" | "ready" | "error";
 export type UpstreamErrorCode = "upstream_turnstile_requires_access_token";
+export type UpstreamTestEndpoint =
+  | ""
+  | "openai"
+  | "openai-response"
+  | "openai-response-compact"
+  | "anthropic"
+  | "gemini"
+  | "jina-rerank"
+  | "image-generation"
+  | "embeddings";
 export type UpstreamKeyInUseStatus =
   | "unlinked"
   | "enabled"
@@ -111,6 +121,8 @@ export interface UpstreamChannel {
   id: number;
   name: string;
   base_url: string;
+  proxy: string;
+  has_proxy: boolean;
   provider: UpstreamProvider;
   auth_type: UpstreamAuthType;
   username: string;
@@ -133,11 +145,13 @@ export interface UpstreamChannel {
   priority: number;
   selected_group: string;
   default_test_model: string;
+  default_test_endpoint: UpstreamTestEndpoint;
   snapshot?: UpstreamSnapshot;
 }
 
 export interface UpstreamChannelConfig {
   name: string;
+  proxy: string;
   provider: UpstreamProvider;
   auth_type: UpstreamAuthType;
   username: string;
@@ -157,6 +171,13 @@ export interface ApiResponse<T> {
   message?: string;
   error_code?: UpstreamErrorCode;
   data?: T;
+}
+
+export interface UpstreamKeyTestResponse {
+  success: boolean;
+  message?: string;
+  time?: number;
+  error_code?: string;
 }
 
 export interface RefreshAllResult {

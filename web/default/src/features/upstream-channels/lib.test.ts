@@ -22,6 +22,7 @@ import {
   hasUsableUpstreamCredentials,
   isUpstreamTurnstileAccessTokenRequired,
   isValidUpstreamMultiplier,
+  isValidUpstreamProxy,
   formatUpstreamAvailability,
   formatUpstreamFirstTokenLatency,
 } from './lib.ts'
@@ -39,10 +40,13 @@ function createChannel(
     id,
     name: `Channel ${id}`,
     base_url: `https://api${id}.example.com`,
+    proxy: '',
+    has_proxy: false,
     provider: 'new-api',
     auth_type: 'password',
     selected_group: '',
     default_test_model: '',
+    default_test_endpoint: '',
     username: 'root',
     note: '',
     has_password: true,
@@ -77,6 +81,31 @@ describe('upstream channel import defaults', () => {
 
   test('falls back to the trimmed base URL when parsing fails', () => {
     assert.equal(getUpstreamImportBaseName(' upstream-host '), 'upstream-host')
+  })
+})
+
+describe('upstream channel proxy validation', () => {
+  test('allows direct connections and supported proxy protocols', () => {
+    assert.equal(isValidUpstreamProxy(''), true)
+    assert.equal(isValidUpstreamProxy('   '), true)
+    assert.equal(isValidUpstreamProxy('http://127.0.0.1:7890'), true)
+    assert.equal(isValidUpstreamProxy('https://proxy.example.com'), true)
+    assert.equal(
+      isValidUpstreamProxy('socks5://user:password@127.0.0.1:7891'),
+      true
+    )
+    assert.equal(
+      isValidUpstreamProxy('socks5h://user:********@proxy.example.com:7891'),
+      true
+    )
+  })
+
+  test('rejects unsupported protocols and proxy addresses without a host', () => {
+    assert.equal(isValidUpstreamProxy('ftp://proxy.example.com'), false)
+    assert.equal(isValidUpstreamProxy('proxy.example.com:7890'), false)
+    assert.equal(isValidUpstreamProxy('socks5://'), false)
+    assert.equal(isValidUpstreamProxy('file:///tmp/proxy.sock'), false)
+    assert.equal(isValidUpstreamProxy(`http://${'a'.repeat(2048)}`), false)
   })
 })
 

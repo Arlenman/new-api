@@ -42,6 +42,8 @@ import type {
   ClearUpstreamPriorityTasksResult,
   UpstreamPriorityTaskPage,
   UpstreamPriorityTaskRecord,
+  UpstreamKeyTestResponse,
+  UpstreamTestEndpoint,
   UpdateUpstreamKeyGroupRequest,
 } from './types'
 
@@ -118,6 +120,18 @@ export async function updateManagedUpstreamChannelDefaultTestModel(
   const res = await api.patch<ApiResponse<UpstreamChannel>>(
     `/api/upstream-channels/${id}/default-test-model`,
     { default_test_model: defaultTestModel },
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function updateManagedUpstreamChannelDefaultTestEndpoint(
+  id: number,
+  defaultTestEndpoint: UpstreamTestEndpoint
+): Promise<ApiResponse<UpstreamChannel>> {
+  const res = await api.patch<ApiResponse<UpstreamChannel>>(
+    `/api/upstream-channels/${id}/default-test-endpoint`,
+    { default_test_endpoint: defaultTestEndpoint },
     { skipBusinessError: true }
   )
   return res.data
@@ -271,6 +285,18 @@ export async function revealManagedUpstreamKey(
 ): Promise<ApiResponse<{ key: string }>> {
   const res = await api.post<ApiResponse<{ key: string }>>(
     `/api/upstream-channels/${channelId}/keys/${keyId}`,
+    undefined,
+    { skipBusinessError: true }
+  )
+  return res.data
+}
+
+export async function testManagedUpstreamKey(
+  channelId: number,
+  keyId: number
+): Promise<UpstreamKeyTestResponse> {
+  const res = await api.post<UpstreamKeyTestResponse>(
+    `/api/upstream-channels/${channelId}/keys/${keyId}/test`,
     undefined,
     { skipBusinessError: true }
   )

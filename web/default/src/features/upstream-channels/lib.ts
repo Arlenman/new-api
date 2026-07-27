@@ -414,6 +414,22 @@ export function isValidUpstreamMultiplier(multiplier: number): boolean {
   return Math.abs(scaled - Math.round(scaled)) <= 1e-9
 }
 
+export function isValidUpstreamProxy(proxy: string): boolean {
+  const trimmed = proxy.trim()
+  if (trimmed === '') return true
+  if (trimmed.length > 2048) return false
+
+  try {
+    const parsed = new URL(trimmed)
+    return (
+      ['http:', 'https:', 'socks5:', 'socks5h:'].includes(parsed.protocol) &&
+      parsed.host !== ''
+    )
+  } catch {
+    return false
+  }
+}
+
 const newAPICardTone =
   'border-pink-200/80 border-l-pink-500 bg-background dark:border-pink-900/80 dark:border-l-pink-500'
 const sub2APICardTone =

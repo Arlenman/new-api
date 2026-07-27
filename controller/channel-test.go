@@ -441,15 +441,19 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		httpResp = resp.(*http.Response)
 		if httpResp.StatusCode != http.StatusOK {
 			err := service.RelayErrorHandler(c.Request.Context(), httpResp, true)
+			errorMessage := err.Error()
+			if key := common.GetContextKeyString(c, constant.ContextKeyChannelKey); key != "" {
+				errorMessage = strings.ReplaceAll(errorMessage, key, "[REDACTED]")
+			}
 			common.SysError(fmt.Sprintf(
-				"channel test bad response: channel_id=%d name=%s type=%d model=%s endpoint_type=%s status=%d err=%v",
+				"channel test bad response: channel_id=%d name=%s type=%d model=%s endpoint_type=%s status=%d err=%s",
 				channel.Id,
 				channel.Name,
 				channel.Type,
 				testModel,
 				endpointType,
 				httpResp.StatusCode,
-				err,
+				errorMessage,
 			))
 			return testResult{
 				context:     c,
