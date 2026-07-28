@@ -5,14 +5,14 @@ import test from "node:test";
 import vm from "node:vm";
 
 const require = createRequire(import.meta.url);
-const ts = require("../../web/default/node_modules/typescript/lib/typescript.js");
+const ts = require("../../web/node_modules/typescript/lib/typescript.js");
 const sourceUrl = new URL("./new-api-sync.ts", import.meta.url);
 const source = await readFile(sourceUrl, "utf8");
 
 function loadSyncExports({ modules = {}, globals = {} } = {}) {
   const output = ts.transpileModule(source, {
     compilerOptions: {
-      target: ts.ScriptTarget.ES2022,
+      target: ts.ScriptTarget.ES2021,
       module: ts.ModuleKind.CommonJS,
       esModuleInterop: true,
     },
@@ -1008,6 +1008,24 @@ test("checkpoints successful blob uploads so a later 429 retry does not re-uploa
   const firstUploadNames = [];
   const firstFetch = async (input, init = {}) => {
     const url = typeof input === "string" ? input : input.url;
+    if (url.includes("/bootstrap?")) {
+      return Response.json({
+        success: true,
+        data: {
+          items: [],
+          assets: [],
+          cursor: 20,
+          next_after_id: "",
+          has_more: false,
+        },
+      });
+    }
+    if (url.includes("/changes?cursor=20")) {
+      return Response.json({
+        success: true,
+        data: { items: [], assets: [], next_cursor: 20, has_more: false },
+      });
+    }
     if (url === "/api/user-tools/assets/uploads") {
       firstUploadNames.push(new Headers(init.headers).get("X-File-Name"));
       if (firstUploadNames.length === 2) return new Response("", { status: 429 });
@@ -1144,7 +1162,7 @@ async function runRepeatedCanvasProjectConflict({ includeAuthoritativeItem }) {
     [
       metadataKey,
       JSON.stringify({
-        cursor: 9,
+        cursor: 0,
         entries: {
           ["canvas-project\u0000project-1"]: {
             revision: 3,
@@ -1239,8 +1257,10 @@ async function runRepeatedCanvasProjectConflict({ includeAuthoritativeItem }) {
     "@/stores/use-theme-store": { useThemeStore: {} },
   };
   const syncBodies = [];
+  const requestedUrls = [];
   const fetch = async (input, init = {}) => {
     const url = typeof input === "string" ? input : input.url;
+    requestedUrls.push(url);
     if (url === "/api/user-tools/infinite-canvas/sync") {
       const body = JSON.parse(init.body);
       syncBodies.push(body);
@@ -1280,6 +1300,18 @@ async function runRepeatedCanvasProjectConflict({ includeAuthoritativeItem }) {
             };
           }),
           cursor: 9,
+        },
+      });
+    }
+    if (url.includes("/bootstrap?")) {
+      return Response.json({
+        success: true,
+        data: {
+          items: [],
+          assets: [],
+          cursor: 9,
+          next_after_id: "",
+          has_more: false,
         },
       });
     }
@@ -1325,6 +1357,7 @@ async function runRepeatedCanvasProjectConflict({ includeAuthoritativeItem }) {
     firstProjects,
     firstResult,
     originalProject,
+    requestedUrls,
     syncBodies,
   };
 }
@@ -1334,6 +1367,11 @@ test("canvas conflict applies the authoritative item immediately and creates one
     includeAuthoritativeItem: true,
   });
 
+  assert.equal(
+    result.requestedUrls.filter((url) => url.includes("/bootstrap?limit=100"))
+      .length,
+    1,
+  );
   assert.equal(result.firstResult.dataChanged, true);
   assert.deepEqual(result.firstProjects[0], result.authoritativeProject);
   assert.equal(
@@ -1359,6 +1397,11 @@ test("canvas conflict without an authoritative item suppresses repeated copies w
     includeAuthoritativeItem: false,
   });
 
+  assert.equal(
+    result.requestedUrls.filter((url) => url.includes("/bootstrap?limit=100"))
+      .length,
+    1,
+  );
   assert.equal(
     result.syncBodies
       .flatMap((body) => body.mutations)

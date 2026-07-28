@@ -5,7 +5,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const require = createRequire(import.meta.url);
-const ts = require("../../web/default/node_modules/typescript/lib/typescript.js");
+const ts = require("../../web/node_modules/typescript/lib/typescript.js");
 const source = await readFile(new URL("./new-api-bridge.ts", import.meta.url), "utf8");
 
 function createDefaultConfig() {

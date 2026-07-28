@@ -3,47 +3,33 @@ package controller
 import (
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
-	"github.com/gin-contrib/sessions"
-	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func newPixelFlowSessionRouter() *gin.Engine {
+func newPixelFlowTestRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
-	store := cookie.NewStore([]byte("pixelflow-test-secret"))
-	router.Use(sessions.Sessions("session", store))
-	router.GET("/session-setup", func(c *gin.Context) {
-		userId, _ := strconv.Atoi(c.Query("user_id"))
-		session := sessions.Default(c)
-		session.Set("id", userId)
-		session.Set("username", "pixel-user")
-		session.Set("role", common.RoleCommonUser)
-		session.Set("status", common.UserStatusEnabled)
-		session.Set("group", "default")
-		if err := session.Save(); err != nil {
-			c.String(http.StatusInternalServerError, err.Error())
-			return
-		}
-		c.String(http.StatusOK, "ok")
-	})
 	router.GET("/api/pixelflow/session-token-sync", PixelFlowSessionTokenSync)
-
+	router.GET("/api/pixelflow/session-token-sync/data", func(c *gin.Context) {
+		c.Set("id", 7)
+		PixelFlowSessionTokenSyncData(c)
+	})
 	return router
 }
 
-func seedPixelFlowUser(t *testing.T, dbUserId int, username string) {
+func seedPixelFlowUser(t *testing.T, dbUserID int, username string) {
 	t.Helper()
 
 	user := &model.User{
-		Id:          dbUserId,
+		Id:          dbUserID,
 		Username:    username,
 		Password:    "unused",
 		DisplayName: username,
@@ -51,97 +37,62 @@ func seedPixelFlowUser(t *testing.T, dbUserId int, username string) {
 		Status:      common.UserStatusEnabled,
 		Group:       "default",
 	}
-	if err := model.DB.Create(user).Error; err != nil {
-		t.Fatalf("failed to create user: %v", err)
-	}
+	require.NoError(t, model.DB.Create(user).Error)
 }
 
-func performPixelFlowSessionSyncRequest(t *testing.T, router *gin.Engine, origin string, sessionUserId int) *httptest.ResponseRecorder {
-	t.Helper()
-
-	target := "/api/pixelflow/session-token-sync?origin=" + origin
-	request := httptest.NewRequest(http.MethodGet, target, nil)
+func performPixelFlowRequest(router *gin.Engine, path string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, path, nil)
 	recorder := httptest.NewRecorder()
-
-	if sessionUserId > 0 {
-		setupRequest := httptest.NewRequest(
-			http.MethodGet,
-			"/session-setup?user_id="+strconv.Itoa(sessionUserId),
-			nil,
-		)
-		setupRecorder := httptest.NewRecorder()
-		router.ServeHTTP(setupRecorder, setupRequest)
-		for _, cookie := range setupRecorder.Result().Cookies() {
-			request.AddCookie(cookie)
-		}
-	}
-
 	router.ServeHTTP(recorder, request)
-
 	return recorder
 }
 
-func TestPixelFlowSessionTokenSyncRequiresLoggedInSession(t *testing.T) {
-	router := newPixelFlowSessionRouter()
+func TestPixelFlowSessionTokenSyncServesAuthBridgeWithoutEmbeddingCredentials(t *testing.T) {
+	router := newPixelFlowTestRouter()
 
-	recorder := performPixelFlowSessionSyncRequest(t, router, "http%3A%2F%2Flocalhost%3A3030", 0)
+	recorder := performPixelFlowRequest(router, "/api/pixelflow/session-token-sync?origin=http%3A%2F%2Flocalhost%3A3030")
 
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("expected unauthorized, got %d with body %s", recorder.Code, recorder.Body.String())
-	}
-	if !strings.Contains(recorder.Body.String(), "请先登录 NewAPI") {
-		t.Fatalf("expected login hint, got %s", recorder.Body.String())
-	}
+	require.Equal(t, http.StatusOK, recorder.Code)
+	body := recorder.Body.String()
+	assert.Contains(t, body, "fetch('/api/user/auth/refresh'")
+	assert.Contains(t, body, "/api/pixelflow/session-token-sync/data?origin=")
+	assert.Contains(t, body, "Authorization: 'Bearer ' + auth.access_token")
+	assert.Contains(t, body, "window.opener.postMessage(message, targetOrigin)")
+	assert.NotContains(t, body, `"tokens"`)
 }
 
 func TestPixelFlowSessionTokenSyncRejectsUntrustedOrigin(t *testing.T) {
-	db := setupTokenControllerTestDB(t)
-	if err := db.AutoMigrate(&model.User{}); err != nil {
-		t.Fatalf("failed to migrate user table: %v", err)
-	}
-	seedPixelFlowUser(t, 7, "pixel-user")
-	router := newPixelFlowSessionRouter()
+	router := newPixelFlowTestRouter()
 
-	recorder := performPixelFlowSessionSyncRequest(t, router, "https%3A%2F%2Fevil.example.com", 7)
-
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("expected forbidden, got %d with body %s", recorder.Code, recorder.Body.String())
-	}
-	if !strings.Contains(recorder.Body.String(), "不允许同步到该站点") {
-		t.Fatalf("expected origin rejection, got %s", recorder.Body.String())
+	for _, path := range []string{
+		"/api/pixelflow/session-token-sync?origin=https%3A%2F%2Fevil.example.com",
+		"/api/pixelflow/session-token-sync/data?origin=https%3A%2F%2Fevil.example.com",
+	} {
+		recorder := performPixelFlowRequest(router, path)
+		assert.Equal(t, http.StatusForbidden, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), "不允许同步到该站点")
 	}
 }
 
-func TestPixelFlowSessionTokenSyncPostsCurrentUserTokensToAllowedOrigin(t *testing.T) {
+func TestPixelFlowSessionTokenSyncDataReturnsOnlyCurrentUserTokens(t *testing.T) {
 	db := setupTokenControllerTestDB(t)
-	if err := db.AutoMigrate(&model.User{}); err != nil {
-		t.Fatalf("failed to migrate user table: %v", err)
-	}
+	require.NoError(t, db.AutoMigrate(&model.User{}))
 	seedPixelFlowUser(t, 7, "pixel-user")
 	seedToken(t, db, 7, "绘画密钥", "raw-token-key")
 	seedToken(t, db, 8, "其他用户密钥", "other-token-key")
-	router := newPixelFlowSessionRouter()
+	router := newPixelFlowTestRouter()
 
-	recorder := performPixelFlowSessionSyncRequest(t, router, "http%3A%2F%2Flocalhost%3A3030", 7)
+	recorder := performPixelFlowRequest(router, "/api/pixelflow/session-token-sync/data?origin=http%3A%2F%2Flocalhost%3A3030")
 
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected ok, got %d with body %s", recorder.Code, recorder.Body.String())
-	}
-
-	body := recorder.Body.String()
-	if !strings.Contains(body, "window.opener.postMessage") {
-		t.Fatalf("expected postMessage page, got %s", body)
-	}
-	if !strings.Contains(body, `"origin":"http://localhost:3030"`) {
-		t.Fatalf("expected target origin in payload, got %s", body)
-	}
-	if !strings.Contains(body, `"userId":7`) || !strings.Contains(body, `"username":"pixel-user"`) {
-		t.Fatalf("expected current user binding, got %s", body)
-	}
-	if !strings.Contains(body, `"key":"raw-token-key"`) {
-		t.Fatalf("expected current user raw token key, got %s", body)
-	}
-	if strings.Contains(body, "other-token-key") || strings.Contains(body, "其他用户密钥") {
-		t.Fatalf("response leaked another user's token: %s", body)
-	}
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var message pixelFlowSessionSyncMessage
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &message))
+	assert.Equal(t, "pixelflow:newapi-token-sync", message.Type)
+	assert.Equal(t, "http://localhost:3030", message.Origin)
+	assert.Equal(t, 7, message.Payload.Binding.UserID)
+	assert.Equal(t, "pixel-user", message.Payload.Binding.Username)
+	require.Len(t, message.Payload.Tokens, 1)
+	assert.Equal(t, "raw-token-key", message.Payload.Tokens[0].Key)
+	assert.False(t, strings.Contains(recorder.Body.String(), "other-token-key"))
+	assert.False(t, strings.Contains(recorder.Body.String(), "其他用户密钥"))
 }

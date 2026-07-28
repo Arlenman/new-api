@@ -87,10 +87,12 @@ func TestRefreshUpstreamChannelUsesConfiguredProxyClient(t *testing.T) {
 	originalLogDB := model.LOG_DB
 	originalHTTPClient := httpClient
 	originalCryptoSecret := common.CryptoSecret
-	proxyClientLock.Lock()
-	originalProxyClients := proxyClients
-	proxyClients = make(map[string]*http.Client)
-	proxyClientLock.Unlock()
+	proxyClients.mutex.Lock()
+	originalProxyClientMap := proxyClients.clients
+	originalProxyAliasMap := proxyClients.aliases
+	proxyClients.clients = make(map[string]*http.Client)
+	proxyClients.aliases = make(map[string]string)
+	proxyClients.mutex.Unlock()
 
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "refresh-proxy.db")), &gorm.Config{})
 	require.NoError(t, err)
@@ -123,17 +125,18 @@ func TestRefreshUpstreamChannelUsesConfiguredProxyClient(t *testing.T) {
 			return nil, fmt.Errorf("unexpected proxy request path %s", request.URL.Path)
 		}
 	})}
-	proxyClientLock.Lock()
-	proxyClients[proxyURL] = proxyClient
-	proxyClientLock.Unlock()
+	normalizedProxyURL, err := NormalizeProxyURL(proxyURL)
+	require.NoError(t, err)
+	proxyClients.store(clientCacheKey(normalizedProxyURL, defaultHTTPTransportPolicy()), proxyClient)
 	t.Cleanup(func() {
 		model.DB = originalDB
 		model.LOG_DB = originalLogDB
 		httpClient = originalHTTPClient
 		common.CryptoSecret = originalCryptoSecret
-		proxyClientLock.Lock()
-		proxyClients = originalProxyClients
-		proxyClientLock.Unlock()
+		proxyClients.mutex.Lock()
+		proxyClients.clients = originalProxyClientMap
+		proxyClients.aliases = originalProxyAliasMap
+		proxyClients.mutex.Unlock()
 	})
 
 	encryptedToken, err := common.EncryptSecret("upstream-channel-password", "management-token")

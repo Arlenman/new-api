@@ -6,7 +6,7 @@ import test from 'node:test'
 import vm from 'node:vm'
 
 const require = createRequire(import.meta.url)
-const ts = require('../../web/default/node_modules/typescript/lib/typescript.js')
+const ts = require('../../web/node_modules/typescript/lib/typescript.js')
 const sourceUrl = new URL('./new-api-sync.ts', import.meta.url)
 const source = await readFile(sourceUrl, 'utf8')
 
@@ -63,7 +63,7 @@ function jsonEnvelope(data) {
 function loadSyncModule({ db = {}, storage = {}, globals = {} } = {}) {
   const output = ts.transpileModule(source, {
     compilerOptions: {
-      target: ts.ScriptTarget.ES2022,
+      target: ts.ScriptTarget.ES2020,
       module: ts.ModuleKind.CommonJS,
       esModuleInterop: true,
     },

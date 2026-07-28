@@ -9,8 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
-	"github.com/gin-contrib/sessions"
-	"github.com/gin-contrib/sessions/cookie"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -18,25 +17,62 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestUpstreamChannelRoutesRejectNonRootSessions(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	engine := gin.New()
-	engine.Use(sessions.Sessions("session", cookie.NewStore([]byte("upstream-channel-test"))))
-	engine.GET("/session", func(c *gin.Context) {
-		session := sessions.Default(c)
-		session.Set("id", 7)
-		session.Set("username", "admin")
-		session.Set("role", common.RoleAdminUser)
-		session.Set("status", common.UserStatusEnabled)
-		session.Set("group", "default")
-		require.NoError(t, session.Save())
-		c.Status(http.StatusNoContent)
+func setupUpstreamChannelRouterTestDB(t *testing.T, filename string) *gorm.DB {
+	t.Helper()
+	previousDB := model.DB
+	previousLogDB := model.LOG_DB
+	previousRedis := common.RedisEnabled
+	previousSecret := common.SessionSecret
+	previousMainDatabaseType := common.MainDatabaseType()
+	previousLogDatabaseType := common.LogDatabaseType()
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), filename)), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(
+		&model.User{},
+		&model.UserSession{},
+		&model.Channel{},
+		&model.UpstreamChannel{},
+		&model.Log{},
+	))
+	model.DB = db
+	model.LOG_DB = db
+	common.RedisEnabled = false
+	common.SessionSecret = "upstream-channel-router-access-token-test-secret"
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	t.Cleanup(func() {
+		model.DB = previousDB
+		model.LOG_DB = previousLogDB
+		common.RedisEnabled = previousRedis
+		common.SessionSecret = previousSecret
+		common.SetDatabaseTypes(previousMainDatabaseType, previousLogDatabaseType)
+		sqlDB, sqlErr := db.DB()
+		if sqlErr == nil {
+			_ = sqlDB.Close()
+		}
 	})
-	registerUpstreamChannelRoutes(engine.Group("/api"))
+	return db
+}
 
-	setupRecorder := httptest.NewRecorder()
-	engine.ServeHTTP(setupRecorder, httptest.NewRequest(http.MethodGet, "/session", nil))
-	require.Equal(t, http.StatusNoContent, setupRecorder.Code)
+func createUpstreamChannelRouterSession(t *testing.T, db *gorm.DB, id int, username string, role int) (*model.User, *service.AuthBundle) {
+	t.Helper()
+	user := &model.User{
+		Id: id, Username: username, Password: "unused-password-hash", Role: role,
+		Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, AffCode: username + "-aff",
+	}
+	require.NoError(t, db.Create(user).Error)
+	bundle, err := service.CreateLoginSession(user.Id, "password", "127.0.0.1", "upstream-channel-router-test")
+	require.NoError(t, err)
+	return user, bundle
+}
+
+func TestUpstreamChannelRoutesRejectNonRootAccessTokenWithForgedRootHeader(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupUpstreamChannelRouterTestDB(t, "upstream-non-root-route.db")
+	_, adminBundle := createUpstreamChannelRouterSession(t, db, 7, "upstream-admin", common.RoleAdminUser)
+	forgedRoot, _ := createUpstreamChannelRouterSession(t, db, 8, "upstream-forged-root", common.RoleRootUser)
+
+	engine := gin.New()
+	registerUpstreamChannelRoutes(engine.Group("/api"))
 
 	tests := []struct {
 		method string
@@ -72,14 +108,13 @@ func TestUpstreamChannelRoutesRejectNonRootSessions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
 			request := httptest.NewRequest(tt.method, tt.path, nil)
-			request.Header.Set("New-Api-User", "7")
-			for _, sessionCookie := range setupRecorder.Result().Cookies() {
-				request.AddCookie(sessionCookie)
-			}
+			request.Header.Set("Authorization", "Bearer "+adminBundle.AccessToken)
+			request.Header.Set("X-Auth-Session", adminBundle.Session.SID)
+			request.Header.Set("New-Api-User", strconv.Itoa(forgedRoot.Id))
 			recorder := httptest.NewRecorder()
 			engine.ServeHTTP(recorder, request)
 
-			require.Equal(t, http.StatusOK, recorder.Code)
+			require.Equal(t, http.StatusForbidden, recorder.Code)
 			var response struct {
 				Success bool `json:"success"`
 			}
@@ -91,17 +126,9 @@ func TestUpstreamChannelRoutesRejectNonRootSessions(t *testing.T) {
 
 func TestDeleteUpstreamChannelRouteAllowsReferencedConfigurations(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	originalDB := model.DB
-	originalLogDB := model.LOG_DB
-	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "upstream-delete-route.db")), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}))
-	model.DB = db
-	model.LOG_DB = db
-	t.Cleanup(func() {
-		model.DB = originalDB
-		model.LOG_DB = originalLogDB
-	})
+	db := setupUpstreamChannelRouterTestDB(t, "upstream-delete-route.db")
+	_, rootBundle := createUpstreamChannelRouterSession(t, db, 1, "upstream-delete-root", common.RoleRootUser)
+	forgedCommon, _ := createUpstreamChannelRouterSession(t, db, 2, "upstream-delete-forged-common", common.RoleCommonUser)
 
 	inUseBaseURL := "https://used-upstream.example"
 	localChannel := &model.Channel{
@@ -130,30 +157,14 @@ func TestDeleteUpstreamChannelRouteAllowsReferencedConfigurations(t *testing.T) 
 	require.NoError(t, db.Create(unusedChannel).Error)
 
 	engine := gin.New()
-	engine.Use(sessions.Sessions("session", cookie.NewStore([]byte("upstream-channel-delete-test"))))
-	engine.GET("/session", func(c *gin.Context) {
-		session := sessions.Default(c)
-		session.Set("id", 1)
-		session.Set("username", "root")
-		session.Set("role", common.RoleRootUser)
-		session.Set("status", common.UserStatusEnabled)
-		session.Set("group", "default")
-		require.NoError(t, session.Save())
-		c.Status(http.StatusNoContent)
-	})
 	registerUpstreamChannelRoutes(engine.Group("/api"))
 
-	setupRecorder := httptest.NewRecorder()
-	engine.ServeHTTP(setupRecorder, httptest.NewRequest(http.MethodGet, "/session", nil))
-	require.Equal(t, http.StatusNoContent, setupRecorder.Code)
-
-	requestWithRootSession := func(method string, path string) *httptest.ResponseRecorder {
+	requestWithRootAccessToken := func(method string, path string) *httptest.ResponseRecorder {
 		t.Helper()
 		request := httptest.NewRequest(method, path, nil)
-		request.Header.Set("New-Api-User", "1")
-		for _, sessionCookie := range setupRecorder.Result().Cookies() {
-			request.AddCookie(sessionCookie)
-		}
+		request.Header.Set("Authorization", "Bearer "+rootBundle.AccessToken)
+		request.Header.Set("X-Auth-Session", rootBundle.Session.SID)
+		request.Header.Set("New-Api-User", strconv.Itoa(forgedCommon.Id))
 		recorder := httptest.NewRecorder()
 		engine.ServeHTTP(recorder, request)
 		require.Equal(t, http.StatusOK, recorder.Code)
@@ -161,7 +172,7 @@ func TestDeleteUpstreamChannelRouteAllowsReferencedConfigurations(t *testing.T) 
 	}
 
 	for _, upstreamChannelID := range []int{unusedChannel.Id, inUseChannel.Id} {
-		recorder := requestWithRootSession(http.MethodDelete, "/api/upstream-channels/"+strconv.Itoa(upstreamChannelID))
+		recorder := requestWithRootAccessToken(http.MethodDelete, "/api/upstream-channels/"+strconv.Itoa(upstreamChannelID))
 		var response struct {
 			Success bool `json:"success"`
 		}
@@ -179,7 +190,7 @@ func TestDeleteUpstreamChannelRouteAllowsReferencedConfigurations(t *testing.T) 
 	require.NotNil(t, suppressed.SuppressedAt)
 	assert.Empty(t, suppressed.PasswordCiphertext)
 
-	listRecorder := requestWithRootSession(http.MethodGet, "/api/upstream-channels/")
+	listRecorder := requestWithRootAccessToken(http.MethodGet, "/api/upstream-channels/")
 	var listResponse struct {
 		Success bool `json:"success"`
 		Data    []struct {
@@ -195,19 +206,11 @@ func TestDeleteUpstreamChannelRouteAllowsReferencedConfigurations(t *testing.T) 
 	assert.Equal(t, int64(1), rowCount)
 }
 
-func TestUpstreamChannelRoutesAllowRootSession(t *testing.T) {
+func TestUpstreamChannelRoutesAllowRootAccessTokenWithForgedCommonHeader(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	originalDB := model.DB
-	originalLogDB := model.LOG_DB
-	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "upstream-route.db")), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}))
-	model.DB = db
-	model.LOG_DB = db
-	t.Cleanup(func() {
-		model.DB = originalDB
-		model.LOG_DB = originalLogDB
-	})
+	db := setupUpstreamChannelRouterTestDB(t, "upstream-route.db")
+	_, rootBundle := createUpstreamChannelRouterSession(t, db, 1, "upstream-list-root", common.RoleRootUser)
+	forgedCommon, _ := createUpstreamChannelRouterSession(t, db, 2, "upstream-list-forged-common", common.RoleCommonUser)
 
 	baseURL := "https://upstream.example"
 	require.NoError(t, db.Create(&model.Channel{Key: "root-route-test", BaseURL: &baseURL, Status: common.ChannelStatusEnabled}).Error)
@@ -224,28 +227,12 @@ func TestUpstreamChannelRoutesAllowRootSession(t *testing.T) {
 	}).Error)
 
 	engine := gin.New()
-	engine.Use(sessions.Sessions("session", cookie.NewStore([]byte("upstream-channel-root-test"))))
-	engine.GET("/session", func(c *gin.Context) {
-		session := sessions.Default(c)
-		session.Set("id", 1)
-		session.Set("username", "root")
-		session.Set("role", common.RoleRootUser)
-		session.Set("status", common.UserStatusEnabled)
-		session.Set("group", "default")
-		require.NoError(t, session.Save())
-		c.Status(http.StatusNoContent)
-	})
 	registerUpstreamChannelRoutes(engine.Group("/api"))
 
-	setupRecorder := httptest.NewRecorder()
-	engine.ServeHTTP(setupRecorder, httptest.NewRequest(http.MethodGet, "/session", nil))
-	require.Equal(t, http.StatusNoContent, setupRecorder.Code)
-
 	request := httptest.NewRequest(http.MethodGet, "/api/upstream-channels/", nil)
-	request.Header.Set("New-Api-User", "1")
-	for _, sessionCookie := range setupRecorder.Result().Cookies() {
-		request.AddCookie(sessionCookie)
-	}
+	request.Header.Set("Authorization", "Bearer "+rootBundle.AccessToken)
+	request.Header.Set("X-Auth-Session", rootBundle.Session.SID)
+	request.Header.Set("New-Api-User", strconv.Itoa(forgedCommon.Id))
 	recorder := httptest.NewRecorder()
 	engine.ServeHTTP(recorder, request)
 

@@ -13,8 +13,8 @@ logs-rc16/
 logs-rc16-migrate/
 web/default/dist
 web/classic/dist
-web/node_modules
 web/dist
+web/node_modules
 .env
 one-api
 new-api
@@ -32,7 +32,7 @@ plans
 
 electron/node_modules
 electron/dist
-data/
+/data/
 .gomodcache/
 .gocache-temp
 .gopath
@@ -47,4 +47,6 @@ service/relayconvert/chat_responses_live_local_test.go
 service/openaicompat/chat_responses_live_local_test.go
 
 # Generated i18n untranslated reports.
-web/default/src/i18n/locales/_reports/*.untranslated.json
+web/src/i18n/locales/_reports/*.untranslated.json
+go.work
+go.work.sum

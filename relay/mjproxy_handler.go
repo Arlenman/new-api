@@ -19,10 +19,10 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
-	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 )
@@ -41,7 +41,7 @@ func RelayMidjourneyImage(c *gin.Context) {
 	if channel, err := model.CacheGetChannel(midjourneyTask.ChannelId); err == nil {
 		proxy = channel.GetSetting().Proxy
 		if proxy != "" {
-			if httpClient, err = service.NewProxyHttpClient(proxy); err != nil {
+			if httpClient, err = service.GetHttpClientWithProxy(proxy); err != nil {
 				c.JSON(400, gin.H{
 					"error": "proxy_url_invalid",
 				})

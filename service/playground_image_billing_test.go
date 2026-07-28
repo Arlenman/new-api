@@ -11,10 +11,11 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
-	"github.com/QuantumNous/new-api/types"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	relaytypes "github.com/QuantumNous/new-api/relaykit/types"
+	hosttypes "github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -124,15 +125,15 @@ func managedPlaygroundBillingRelayInfo(userID, channelID int, requestID string) 
 		UsingGroup:              "default",
 		RequestId:               requestID,
 		StartTime:               time.Now(),
-		RelayFormat:             types.RelayFormatOpenAIImage,
-		FinalRequestRelayFormat: types.RelayFormatOpenAIImage,
+		RelayFormat:             relaytypes.RelayFormatOpenAIImage,
+		FinalRequestRelayFormat: relaytypes.RelayFormatOpenAIImage,
 		UserSetting: dto.UserSetting{
 			BillingPreference: "wallet_only",
 		},
-		PriceData: types.PriceData{
+		PriceData: hosttypes.PriceData{
 			ModelRatio:      1,
 			CompletionRatio: 1,
-			GroupRatioInfo: types.GroupRatioInfo{
+			GroupRatioInfo: hosttypes.GroupRatioInfo{
 				GroupRatio: 1,
 			},
 		},
@@ -334,7 +335,7 @@ func TestPreConsumeBillingAuditFailureRefundsSynchronously(t *testing.T) {
 
 	apiErr := PreConsumeBilling(ctx, 30, relayInfo)
 	require.NotNil(t, apiErr)
-	assert.Equal(t, types.ErrorCodeUpdateDataError, apiErr.GetErrorCode())
+	assert.Equal(t, relaytypes.ErrorCodeUpdateDataError, apiErr.GetErrorCode())
 	assert.ErrorIs(t, apiErr, auditErr)
 	assert.Equal(t, 1000, getUserQuota(t, 1))
 	require.NotNil(t, relayInfo.Billing)
