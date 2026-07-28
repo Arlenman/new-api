@@ -1111,3 +1111,267 @@ test("checkpoints successful blob uploads so a later 429 retry does not re-uploa
   assert.equal(entries["blob\u0000image:a"].asset_id, "asset-a");
   assert.equal(entries["blob\u0000image:b"].asset_id, "asset-b");
 });
+async function runRepeatedCanvasProjectConflict({ includeAuthoritativeItem }) {
+  const metadataKey = "new-api:test-sync:7";
+  const originalProject = {
+    id: "project-1",
+    title: "本地生成中的画布",
+    createdAt: "2026-07-27T00:00:00.000Z",
+    updatedAt: "2026-07-27T00:01:00.000Z",
+    nodes: [{ id: "local-node" }],
+    chatSessions: [],
+  };
+  const authoritativeProject = {
+    ...originalProject,
+    title: "服务端权威画布",
+    updatedAt: "2026-07-27T00:02:00.000Z",
+    nodes: [{ id: "remote-node" }],
+  };
+  const authoritativeItem = {
+    id: "item-project-1",
+    kind: "canvas-project",
+    key: originalProject.id,
+    schema_version: 1,
+    revision: 4,
+    status: "ready",
+    payload: authoritativeProject,
+    asset_ids: [],
+    created_at: 0,
+    updated_at: 4,
+    deleted: false,
+  };
+  const localStorageValues = new Map([
+    [
+      metadataKey,
+      JSON.stringify({
+        cursor: 9,
+        entries: {
+          ["canvas-project\u0000project-1"]: {
+            revision: 3,
+            hash: "previous-server-hash",
+            deleted: false,
+          },
+        },
+      }),
+    ],
+  ]);
+  const localStorage = {
+    getItem: (key) => localStorageValues.get(key) ?? null,
+    setItem: (key, value) => localStorageValues.set(key, String(value)),
+    removeItem: (key) => localStorageValues.delete(key),
+  };
+  const canvasState = {
+    hydrated: true,
+    projects: [structuredClone(originalProject)],
+    replaceProjects(projects) {
+      this.projects = projects;
+    },
+  };
+  const assetState = {
+    hydrated: true,
+    assets: [],
+    replaceAssets(assets) {
+      this.assets = assets;
+    },
+  };
+  const hydratedStore = (state) => ({
+    getState: () => state,
+    persist: {
+      hasHydrated: () => true,
+      onFinishHydration: () => () => undefined,
+    },
+  });
+  const emptyLocalForageStore = {
+    getItem: async () => null,
+    setItem: async () => undefined,
+    removeItem: async () => undefined,
+    iterate: async () => undefined,
+  };
+  let copySequence = 0;
+  const modules = {
+    localforage: { createInstance: () => emptyLocalForageStore },
+    nanoid: { nanoid: () => `conflict-copy-${++copySequence}` },
+    "@/lib/canvas/canvas-generation-helpers": {
+      hydrateAssistantImages: async (sessions) => sessions,
+      hydrateCanvasImages: async (nodes) => nodes,
+    },
+    "@/lib/new-api-storage": {
+      ensureLegacyInfiniteCanvasStorageMigration: async () => undefined,
+      getNewApiInfiniteCanvasAssetCacheName: () => "new-api:test-assets:7",
+      getNewApiInfiniteCanvasMetadataKey: () => metadataKey,
+      getNewApiInfiniteCanvasPluginDatabaseName: () => "plugins:7",
+      getNewApiInfiniteCanvasUserId: () => "7",
+      listNewApiInfiniteCanvasPluginStoreNames: async () => [],
+      namespacedLocalForageName: (name) => `${name}:7`,
+      namespacedStorageKey: (key) => `${key}:7`,
+      NEW_API_INFINITE_CANVAS_REMOTE_LOGS_CHANGED_EVENT:
+        "new-api:test-remote-logs",
+      NEW_API_INFINITE_CANVAS_STORAGE_CHANGED_EVENT:
+        "new-api:test-storage-changed",
+      runWithoutNewApiInfiniteCanvasSyncNotifications: async (fn) => fn(),
+    },
+    "@/services/file-storage": {
+      getMediaBlob: async () => null,
+      resolveMediaUrl: async (value) => value,
+      setMediaBlob: async () => undefined,
+    },
+    "@/services/image-storage": {
+      getImageBlob: async () => null,
+      resolveImageUrl: async (value) => value,
+      setImageBlob: async () => undefined,
+    },
+    "@/stores/canvas/use-canvas-store": {
+      useCanvasStore: hydratedStore(canvasState),
+    },
+    "@/stores/canvas/use-plugin-store": { usePluginStore: {} },
+    "@/stores/use-agent-store": { useAgentStore: {} },
+    "@/stores/use-asset-store": {
+      useAssetStore: hydratedStore(assetState),
+    },
+    "@/stores/use-canvas-side-panel-store": {
+      CANVAS_SIDE_PANEL_DEFAULT_WIDTH: 360,
+      CANVAS_SIDE_PANEL_MAX_WIDTH: 600,
+      CANVAS_SIDE_PANEL_MIN_WIDTH: 280,
+      useCanvasSidePanelStore: {},
+    },
+    "@/stores/use-config-store": { useConfigStore: {} },
+    "@/stores/use-prompt-source-store": { usePromptSourceStore: {} },
+    "@/stores/use-theme-store": { useThemeStore: {} },
+  };
+  const syncBodies = [];
+  const fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url === "/api/user-tools/infinite-canvas/sync") {
+      const body = JSON.parse(init.body);
+      syncBodies.push(body);
+      return Response.json({
+        success: true,
+        data: {
+          results: body.mutations.map((mutation) => {
+            if (mutation.key === originalProject.id) {
+              return {
+                client_mutation_id: mutation.client_mutation_id,
+                kind: mutation.kind,
+                key: mutation.key,
+                result: "conflict",
+                ...(includeAuthoritativeItem
+                  ? { item: authoritativeItem }
+                  : {}),
+              };
+            }
+            return {
+              client_mutation_id: mutation.client_mutation_id,
+              kind: mutation.kind,
+              key: mutation.key,
+              result: "applied",
+              item: {
+                id: `item-${mutation.key}`,
+                kind: mutation.kind,
+                key: mutation.key,
+                schema_version: 1,
+                revision: 1,
+                status: mutation.status,
+                payload: mutation.payload,
+                asset_ids: mutation.asset_ids,
+                created_at: 0,
+                updated_at: 1,
+                deleted: mutation.deleted,
+              },
+            };
+          }),
+          cursor: 9,
+        },
+      });
+    }
+    if (url.includes("/changes?cursor=9")) {
+      return Response.json({
+        success: true,
+        data: { items: [], assets: [], next_cursor: 9, has_more: false },
+      });
+    }
+    throw new Error(`Unexpected sync request: ${url}`);
+  };
+  const window = {
+    localStorage,
+    clearTimeout,
+    setTimeout,
+    setInterval: () => 1,
+    addEventListener: () => undefined,
+    dispatchEvent: () => true,
+  };
+  const document = {
+    visibilityState: "visible",
+    addEventListener: () => undefined,
+  };
+
+  const first = loadSyncExports({
+    modules,
+    globals: { fetch, window, document },
+  });
+  const firstResult = await first.initializeNewApiInfiniteCanvasSync();
+  const firstProjects = structuredClone(canvasState.projects);
+  const firstMetadata = JSON.parse(localStorage.getItem(metadataKey));
+
+  const second = loadSyncExports({
+    modules,
+    globals: { fetch, window, document },
+  });
+  await second.initializeNewApiInfiniteCanvasSync();
+
+  return {
+    authoritativeProject,
+    canvasState,
+    firstMetadata,
+    firstProjects,
+    firstResult,
+    originalProject,
+    syncBodies,
+  };
+}
+
+test("canvas conflict applies the authoritative item immediately and creates one local-content copy", async () => {
+  const result = await runRepeatedCanvasProjectConflict({
+    includeAuthoritativeItem: true,
+  });
+
+  assert.equal(result.firstResult.dataChanged, true);
+  assert.deepEqual(result.firstProjects[0], result.authoritativeProject);
+  assert.equal(
+    result.firstMetadata.entries["canvas-project\u0000project-1"].revision,
+    4,
+  );
+  assert.equal(
+    result.syncBodies
+      .flatMap((body) => body.mutations)
+      .filter((mutation) => mutation.key === result.originalProject.id).length,
+    1,
+  );
+  assert.equal(
+    result.canvasState.projects.filter((project) =>
+      project.title.includes("冲突副本"),
+    ).length,
+    1,
+  );
+});
+
+test("canvas conflict without an authoritative item suppresses repeated copies while preserving one local-content copy", async () => {
+  const result = await runRepeatedCanvasProjectConflict({
+    includeAuthoritativeItem: false,
+  });
+
+  assert.equal(
+    result.syncBodies
+      .flatMap((body) => body.mutations)
+      .filter((mutation) => mutation.key === result.originalProject.id).length,
+    1,
+  );
+  const conflictCopies = result.canvasState.projects.filter((project) =>
+    project.title.includes("冲突副本"),
+  );
+  assert.equal(conflictCopies.length, 1);
+  assert.deepEqual(conflictCopies[0].nodes, result.originalProject.nodes);
+  assert.notEqual(
+    result.firstMetadata.entries["canvas-project\u0000project-1"].hash,
+    "previous-server-hash",
+  );
+});
