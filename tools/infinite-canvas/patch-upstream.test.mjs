@@ -231,6 +231,11 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
     );
 }
 `,
+  "web/src/pages/canvas/index.tsx": "import { useEffect, useRef } from \"react\";\nimport { useNavigate, useSearchParams } from \"react-router-dom\";\nimport { App, Button } from \"antd\";\nimport { Download, FileUp, Plus } from \"lucide-react\";\n\nimport { readZip } from \"@/lib/zip\";\nimport { setMediaBlob } from \"@/services/file-storage\";\nimport { setImageBlob } from \"@/services/image-storage\";\nimport { CanvasDeleteProjectsDialog } from \"@/components/canvas/canvas-delete-projects-dialog\";\nimport { CanvasProjectCard } from \"@/components/canvas/canvas-project-card\";\nimport type { CanvasExportFile } from \"@/types/canvas-export\";\nimport { useCanvasStore } from \"@/stores/canvas/use-canvas-store\";\nimport { useCanvasUiStore } from \"@/stores/canvas/use-canvas-ui-store\";\nimport { exportCanvasProjects } from \"@/lib/canvas/canvas-export\";\n\nexport default function CanvasPage() {\n    const { message } = App.useApp();\n    const navigate = useNavigate();\n    const [searchParams] = useSearchParams();\n    const inputRef = useRef<HTMLInputElement>(null);\n    const autoOpenRef = useRef(false);\n    const hydrated = useCanvasStore((state) => state.hydrated);\n    const projects = useCanvasStore((state) => state.projects);\n    const createProject = useCanvasStore((state) => state.createProject);\n    const importProject = useCanvasStore((state) => state.importProject);\n    const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);\n    const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);\n\n    const mode = searchParams.get(\"mode\");\n    const agentMode = mode === \"new\" || mode === \"recent\" || mode === \"choose\";\n    const agentQuery = agentMode ? `?${searchParams.toString()}` : \"\";\n    const enterProject = (id: string) => {\n        navigate(`/canvas/${id}${agentQuery}`);\n    };\n    const createAndEnter = () => enterProject(createProject(`无限画布 ${projects.length + 1}`));\n    const importCanvas = async (file?: File) => {\n        if (!file) return;\n        try {\n            const zip = await readZip(file);\n            const projectFile = zip.get(\"projects.json\");\n            if (!projectFile) throw new Error(\"missing projects.json\");\n            const data = JSON.parse(await projectFile.text()) as CanvasExportFile;\n            await Promise.all(\n                data.projects.flatMap((project) =>\n                    project.files.map(async (item) => {\n                        const blob = zip.get(item.path);\n                        if (!blob) return;\n                        const typedBlob = blob.type ? blob : blob.slice(0, blob.size, item.mimeType);\n                        await (item.storageKey.startsWith(\"image:\") ? setImageBlob(item.storageKey, typedBlob) : setMediaBlob(item.storageKey, typedBlob));\n                    }),\n                ),\n            );\n            data.projects.forEach((item) => importProject(item.project));\n            message.success(`已导入 ${data.projects.length} 个画布`);\n        } catch {\n            message.error(\"导入失败，请选择有效的画布压缩包\");\n        } finally {\n            if (inputRef.current) inputRef.current.value = \"\";\n        }\n    };\n\n    useEffect(() => {\n        if (!hydrated || autoOpenRef.current || (mode !== \"new\" && mode !== \"recent\")) return;\n        autoOpenRef.current = true;\n        enterProject(mode === \"new\" ? createProject(`无限画布 ${projects.length + 1}`) : projects[0]?.id || createProject(`无限画布 ${projects.length + 1}`));\n    }, [createProject, hydrated, mode, projects]);\n\n    if (hydrated && (mode === \"new\" || mode === \"recent\")) return <main className=\"flex h-full items-center justify-center bg-background text-sm text-stone-500\">正在打开画布...</main>;\n\n    return (\n        <main className=\"h-full overflow-auto bg-background text-stone-950 dark:text-stone-100\">\n            <div className=\"mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 py-10\">\n                <header className=\"flex flex-wrap items-end justify-between gap-4 border-b border-stone-200 pb-6 dark:border-stone-800\">\n                    <div>\n                        <p className=\"text-xs text-stone-500\">画布库</p>\n                        <h1 className=\"mt-3 text-3xl font-semibold\">无限画布</h1>\n                    </div>\n                    <div className=\"flex items-center gap-2\">\n                        {selectedIds.length ? (\n                            <>\n                                <Button disabled={!hydrated} icon={<Download className=\"size-4\" />} onClick={() => void exportCanvasProjects(projects.filter((project) => selectedIds.includes(project.id)), `无限画布-${selectedIds.length}个项目`)}>\n                                    导出选中\n                                </Button>\n                                <Button disabled={!hydrated} onClick={() => setDeleteIds(selectedIds)}>\n                                    删除选中\n                                </Button>\n                            </>\n                        ) : null}\n                        {projects.length ? (\n                            <Button disabled={!hydrated} onClick={() => setDeleteIds(projects.map((project) => project.id))}>\n                                删除全部\n                            </Button>\n                        ) : null}\n                        <Button disabled={!hydrated} icon={<FileUp className=\"size-4\" />} onClick={() => inputRef.current?.click()}>\n                            导入画布\n                        </Button>\n                        <Button disabled={!hydrated} type=\"primary\" icon={<Plus className=\"size-4\" />} onClick={createAndEnter}>\n                            新建画布\n                        </Button>\n                    </div>\n                </header>\n\n                {!hydrated ? (\n                    <section className=\"flex min-h-[360px] items-center justify-center border-y border-stone-200 text-sm text-stone-500 dark:border-stone-800\">正在加载画布...</section>\n                ) : projects.length ? (\n                    <div className=\"grid gap-5 sm:grid-cols-2 xl:grid-cols-3\">\n                        {projects.map((project) => (\n                            <CanvasProjectCard key={project.id} project={project} />\n                        ))}\n                    </div>\n                ) : (\n                    <section className=\"flex min-h-[360px] flex-col items-center justify-center border-y border-stone-200 text-center dark:border-stone-800\">\n                        <h2 className=\"text-xl font-medium\">还没有画布</h2>\n                        <p className=\"mt-3 text-sm text-stone-500\">新建一个画布后，就可以独立保存节点、连线和画布外观。</p>\n                        <Button type=\"primary\" className=\"mt-6\" icon={<Plus className=\"size-4\" />} onClick={createAndEnter}>\n                            新建画布\n                        </Button>\n                    </section>\n                )}\n            </div>\n\n            <input ref={inputRef} type=\"file\" accept=\"application/zip,.zip\" className=\"hidden\" onChange={(event) => void importCanvas(event.target.files?.[0])} />\n            <CanvasDeleteProjectsDialog />\n        </main>\n    );\n}\n",
+  "web/src/components/canvas/canvas-project-card.tsx": "import { Check, Download, Pencil, Trash2, X } from \"lucide-react\";\nimport { useNavigate, useSearchParams } from \"react-router-dom\";\nimport { Button, Input } from \"antd\";\n\nimport { useCanvasStore, type CanvasProject } from \"@/stores/canvas/use-canvas-store\";\nimport { useCanvasUiStore } from \"@/stores/canvas/use-canvas-ui-store\";\nimport { exportCanvasProjects } from \"@/lib/canvas/canvas-export\";\n\nexport function CanvasProjectCard({ project }: { project: CanvasProject }) {\n    const navigate = useNavigate();\n    const [searchParams] = useSearchParams();\n    const renameProject = useCanvasStore((state) => state.renameProject);\n    const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);\n    const editingId = useCanvasUiStore((state) => state.editingProjectId);\n    const editingTitle = useCanvasUiStore((state) => state.editingProjectTitle);\n    const startEditing = useCanvasUiStore((state) => state.startEditingProject);\n    const setEditingTitle = useCanvasUiStore((state) => state.setEditingProjectTitle);\n    const stopEditing = useCanvasUiStore((state) => state.stopEditingProject);\n    const toggleSelected = useCanvasUiStore((state) => state.toggleSelectedProjectId);\n    const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);\n    const editing = editingId === project.id;\n    const selected = selectedIds.includes(project.id);\n    const open = () => navigate(`/canvas/${project.id}${searchParams.toString() ? `?${searchParams.toString()}` : \"\"}`);\n    const saveTitle = () => {\n        renameProject(project.id, editingTitle);\n        stopEditing();\n    };\n\n    return (\n        <article className=\"group flex min-h-44 cursor-pointer flex-col justify-between rounded-2xl bg-[#f1eee8] p-5 transition hover:bg-[#ebe6dc] dark:bg-white/5 dark:hover:bg-white/10\" onClick={() => !editing && open()}>\n            <div className=\"flex items-start gap-3\">\n                <input\n                    type=\"checkbox\"\n                    checked={selected}\n                    onClick={(event) => event.stopPropagation()}\n                    onChange={(event) => toggleSelected(project.id, event.target.checked)}\n                    className=\"mt-1 size-4 accent-stone-950 dark:accent-stone-100\"\n                    aria-label={`选择 ${project.title}`}\n                />\n                {editing ? (\n                    <Input className=\"min-w-0\" value={editingTitle} onClick={(event) => event.stopPropagation()} onChange={(event) => setEditingTitle(event.target.value)} onKeyDown={(event) => event.key === \"Enter\" && saveTitle()} autoFocus />\n                ) : (\n                    <button\n                        type=\"button\"\n                        className=\"min-w-0 cursor-pointer text-left\"\n                        onClick={(event) => {\n                            event.stopPropagation();\n                            open();\n                        }}\n                    >\n                        <h2 className=\"truncate text-xl font-semibold\">{project.title}</h2>\n                        <p className=\"mt-3 text-sm leading-6 text-stone-600 dark:text-stone-400\">\n                            {project.nodes.length} 个节点 · {project.connections.length} 条连线\n                        </p>\n                    </button>\n                )}\n            </div>\n            <div className=\"mt-8 flex items-end justify-between gap-3\">\n                <p className=\"text-xs text-stone-500\">更新于 {new Date(project.updatedAt).toLocaleString(\"zh-CN\", { month: \"2-digit\", day: \"2-digit\", hour: \"2-digit\", minute: \"2-digit\" })}</p>\n                <div className=\"flex items-center gap-1\" onClick={(event) => event.stopPropagation()}>\n                    {editing ? (\n                        <>\n                            <Button type=\"text\" size=\"small\" shape=\"circle\" icon={<Check className=\"size-4\" />} onClick={saveTitle} aria-label=\"保存名称\" />\n                            <Button type=\"text\" size=\"small\" shape=\"circle\" icon={<X className=\"size-4\" />} onClick={stopEditing} aria-label=\"取消重命名\" />\n                        </>\n                    ) : (\n                        <>\n                            <Button type=\"text\" size=\"small\" shape=\"circle\" icon={<Download className=\"size-4\" />} onClick={() => void exportCanvasProjects([project], project.title || \"无限画布\")} aria-label=\"导出\" />\n                            <Button type=\"text\" size=\"small\" shape=\"circle\" icon={<Pencil className=\"size-4\" />} onClick={() => startEditing(project.id, project.title)} aria-label=\"重命名\" />\n                            <Button type=\"text\" size=\"small\" shape=\"circle\" icon={<Trash2 className=\"size-4\" />} onClick={() => setDeleteIds([project.id])} aria-label=\"删除\" />\n                        </>\n                    )}\n                </div>\n            </div>\n        </article>\n    );\n}\n",
+  "web/src/stores/canvas/use-canvas-ui-store.ts": "import { create } from \"zustand\";\n\ntype CanvasUiStore = {\n    editingProjectId: string | null;\n    editingProjectTitle: string;\n    selectedProjectIds: string[];\n    deleteProjectIds: string[];\n    startEditingProject: (id: string, title: string) => void;\n    setEditingProjectTitle: (title: string) => void;\n    stopEditingProject: () => void;\n    toggleSelectedProjectId: (id: string, selected: boolean) => void;\n    setDeleteProjectIds: (ids: string[]) => void;\n    removeSelectedProjectIds: (ids: string[]) => void;\n};\n\nexport const useCanvasUiStore = create<CanvasUiStore>((set) => ({\n    editingProjectId: null,\n    editingProjectTitle: \"\",\n    selectedProjectIds: [],\n    deleteProjectIds: [],\n    startEditingProject: (editingProjectId, editingProjectTitle) => set({ editingProjectId, editingProjectTitle }),\n    setEditingProjectTitle: (editingProjectTitle) => set({ editingProjectTitle }),\n    stopEditingProject: () => set({ editingProjectId: null }),\n    toggleSelectedProjectId: (id, selected) => set((state) => ({ selectedProjectIds: selected ? [...new Set([...state.selectedProjectIds, id])] : state.selectedProjectIds.filter((item) => item !== id) })),\n    setDeleteProjectIds: (deleteProjectIds) => set({ deleteProjectIds }),\n    removeSelectedProjectIds: (ids) => set((state) => ({ selectedProjectIds: state.selectedProjectIds.filter((id) => !ids.includes(id)) })),\n}));\n",
+  "plugins/infinite-canvas/skills/open-canvas/SKILL.md": "---\nname: open-canvas\ndescription: 打开 Infinite Canvas 在线或本地画布，并自动连接本地 Canvas Agent。用户要求打开、启动、进入或使用 Infinite Canvas 画布时使用。\n---\n\n# Open Infinite Canvas\n\n默认打开在线版。只有用户明确要求使用本地项目时，才启动本地前端。\n\n## 在线版\n\n1. 启动本地 Canvas Agent 并保持运行：\n\n```bash\nnpx -y @basketikun/canvas-agent\n```\n\n2. 从启动输出取得 `Local URL` 和 `Connect token`。\n\n3. 在 Codex 右侧浏览器打开：\n\n```text\nhttps://canvas.best/canvas?mode=new&agentUrl=<Local URL>&agentToken=<Connect token>\n```\n\n## 本地版\n\n1. 在 Infinite Canvas 项目中启动前端，并使用 Vite 输出的 `Local` 地址：\n\n```bash\ncd web\nbun install\nbun run dev\n```\n\n2. 启动本地 Canvas Agent：\n\n```bash\nnpx -y @basketikun/canvas-agent\n```\n\n3. 从启动输出取得 `Local URL` 和 `Connect token`，在 Codex 右侧浏览器打开：\n\n```text\n<Vite Local 地址>/canvas?mode=new&agentUrl=<Local URL>&agentToken=<Connect token>\n```\n\n## MCP 与连接地址\n\n插件在新的 Codex 任务中加载时会自动启动 `npx -y @basketikun/canvas-agent mcp`。这个 MCP 进程负责提供画布工具，不提供网页连接服务；\n上面启动的普通 Canvas Agent 负责提供 `Local URL` 和 `Connect token`。两个进程读取同一份本地配置，因此不需要用户手动填写地址或 token。\n\n## 打开模式\n\n用户没有明确指定打开方式时，始终使用 `mode=new` 新建画布。只有用户明确要求时才替换为：\n\n- 最近画布：`mode=recent`\n- 自己选择：`mode=choose`\n",
+
 };
 
 async function createFixture(overrides = {}) {
@@ -245,6 +250,106 @@ async function createFixture(overrides = {}) {
   );
   return root;
 }
+
+
+test("renders selectable grid and list canvas views and consumes one-shot launches", async (t) => {
+  const root = await createFixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await applyUpstreamPatch(root, { bridgeSource: "export {}\n" });
+
+  const pageSource = await readFile(
+    path.join(root, "web/src/pages/canvas/index.tsx"),
+    "utf8",
+  );
+  const cardSource = await readFile(
+    path.join(root, "web/src/components/canvas/canvas-project-card.tsx"),
+    "utf8",
+  );
+  const uiStoreSource = await readFile(
+    path.join(root, "web/src/stores/canvas/use-canvas-ui-store.ts"),
+    "utf8",
+  );
+  const openCanvasSkillSource = await readFile(
+    path.join(root, "plugins/infinite-canvas/skills/open-canvas/SKILL.md"),
+    "utf8",
+  );
+
+  assert.match(pageSource, /LayoutGrid, List/);
+  assert.match(pageSource, /aria-label="画布视图"/);
+  assert.match(pageSource, /viewMode === "grid" \? "primary" : "text"/);
+  assert.match(pageSource, /viewMode === "list" \? "primary" : "text"/);
+  assert.match(pageSource, /setViewMode\("grid"\)/);
+  assert.match(pageSource, /setViewMode\("list"\)/);
+  assert.match(pageSource, /viewMode === "grid" \? "grid gap-5 sm:grid-cols-2 xl:grid-cols-3"/);
+  assert.match(pageSource, /divide-y/);
+  assert.match(pageSource, /viewMode=\{viewMode\}/);
+  assert.match(pageSource, /const selectedProjects = projects\.filter/);
+  assert.match(pageSource, /projectIds\.every\(\(id\) => selectedIds\.includes\(id\)\)/);
+  assert.match(pageSource, /setSelectedIds\(allSelected \? \[\] : projectIds\)/);
+  assert.match(pageSource, /allSelected \? "全不选" : "全选"/);
+  assert.match(pageSource, /setDeleteIds\(selectedProjects\.map\(\(project\) => project\.id\)\)/);
+  assert.match(pageSource, /sessionStorage\.getItem\(launchStorageKey\)/);
+  assert.match(pageSource, /sessionStorage\.setItem\(launchStorageKey, projectId\)/);
+  assert.match(pageSource, /enterProject\(projectId, true\)/);
+  assert.match(pageSource, /projectSearchParams\.delete\("mode"\)/);
+  assert.match(pageSource, /projectSearchParams\.delete\("launchId"\)/);
+
+  assert.match(cardSource, /CanvasProjectViewMode/);
+  assert.match(cardSource, /viewMode === "grid"/);
+  assert.match(cardSource, /grid-cols-\[auto_minmax\(0,1fr\)_auto_auto\]/);
+  assert.match(cardSource, /viewMode === "grid" \? "flex items-start gap-3" : "contents"/);
+  assert.match(cardSource, /flex min-w-0 cursor-pointer items-center gap-3 text-left/);
+  assert.match(cardSource, /hidden shrink-0 whitespace-nowrap text-xs text-stone-500 sm:block/);
+  assert.match(cardSource, /hidden whitespace-nowrap text-xs text-stone-500 md:block/);
+  assert.match(cardSource, /checked=\{selected\}/);
+  assert.match(cardSource, /toggleSelected\(project\.id, event\.target\.checked\)/);
+  assert.match(cardSource, /aria-label=\{`选择 \$\{project\.title\}`\}/);
+  assert.match(cardSource, /exportCanvasProjects\(\[project\]/);
+  assert.match(cardSource, /startEditing\(project\.id, project\.title\)/);
+  assert.match(cardSource, /setDeleteIds\(\[project\.id\]\)/);
+
+  assert.match(uiStoreSource, /export type CanvasProjectViewMode = "grid" \| "list"/);
+  assert.match(uiStoreSource, /projectViewMode: CanvasProjectViewMode/);
+  assert.match(uiStoreSource, /projectViewMode: "grid"/);
+  assert.match(uiStoreSource, /setProjectViewMode: \(mode: CanvasProjectViewMode\) => void/);
+  assert.match(uiStoreSource, /setProjectViewMode: \(projectViewMode\) => set\(\{ projectViewMode \}\)/);
+  assert.match(uiStoreSource, /setSelectedProjectIds: \(ids: string\[\]\) => void/);
+  assert.match(uiStoreSource, /setSelectedProjectIds: \(selectedProjectIds\) => set\(\{ selectedProjectIds: \[\.\.\.new Set\(selectedProjectIds\)\] \}\)/);
+
+  assert.match(openCanvasSkillSource, /默认使用 `mode=recent`/);
+  assert.match(openCanvasSkillSource, /只有用户明确要求新建画布时，才使用 `mode=new`/);
+  assert.match(openCanvasSkillSource, /launchId/);
+});
+
+test("fails closed when the canvas view layout marker changes", async (t) => {
+  const root = await createFixture({
+    "web/src/pages/canvas/index.tsx": FIXTURE_FILES["web/src/pages/canvas/index.tsx"].replace(
+      'className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3"',
+      'className="grid gap-4 md:grid-cols-2"',
+    ),
+  });
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    applyUpstreamPatch(root, { bridgeSource: "export {}\n" }),
+    /upstream canvas project view layout marker did not match exactly once/,
+  );
+});
+
+test("fails closed when the canvas launch mode marker changes", async (t) => {
+  const root = await createFixture({
+    "plugins/infinite-canvas/skills/open-canvas/SKILL.md": FIXTURE_FILES[
+      "plugins/infinite-canvas/skills/open-canvas/SKILL.md"
+    ].replace("始终使用 `mode=new` 新建画布", "默认打开画布列表"),
+  });
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    applyUpstreamPatch(root, { bridgeSource: "export {}\n" }),
+    /upstream canvas default open mode marker did not match exactly once/,
+  );
+});
 
 test("injects subpath routing, bridge, per-user storage, and managed key redaction", async (t) => {
   const root = await createFixture();
