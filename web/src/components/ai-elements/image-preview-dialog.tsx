@@ -121,7 +121,7 @@ export function ImagePreviewDialog({
             >
               <ZoomIn className='size-4' />
             </Button>
-            <span className='w-12 text-center text-xs tabular-nums text-white/80'>
+            <span className='w-12 text-center text-xs text-white/80 tabular-nums'>
               {Math.round(zoom * 100)}%
             </span>
           </div>
@@ -149,7 +149,7 @@ export function ImagePreviewDialog({
           <div className='pointer-events-none flex min-h-full min-w-full items-center justify-center px-6 py-20'>
             <img
               alt={alt}
-              className='pointer-events-auto block h-auto select-none rounded-lg object-contain shadow-2xl'
+              className='pointer-events-auto block h-auto rounded-lg object-contain shadow-2xl select-none'
               draggable={false}
               src={src}
               style={{

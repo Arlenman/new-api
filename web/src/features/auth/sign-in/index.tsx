@@ -18,14 +18,15 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { Link, useSearch } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
-import { cn } from '@/lib/utils'
+
 import { useStatus } from '@/hooks/use-status'
+import { cn } from '@/lib/utils'
 
 import { AuthLayout } from '../auth-layout'
 import { TermsFooter } from '../components/terms-footer'
 import { LoginAnnouncements } from './components/login-announcements'
-import { getLoginAnnouncements } from './lib/login-announcements'
 import { UserAuthForm } from './components/user-auth-form'
+import { getLoginAnnouncements } from './lib/login-announcements'
 
 export function SignIn() {
   const { t } = useTranslation()

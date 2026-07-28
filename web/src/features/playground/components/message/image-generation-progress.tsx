@@ -80,7 +80,7 @@ export function ImageGenerationProgress({
       >
         <div className='absolute inset-0 bg-[radial-gradient(circle_at_25%_20%,color-mix(in_oklch,var(--primary)_18%,transparent),transparent_34%),radial-gradient(circle_at_70%_75%,color-mix(in_oklch,var(--accent-foreground)_10%,transparent),transparent_32%)]' />
         <div className='absolute inset-0 animate-[pulse_2.8s_ease-in-out_infinite] bg-[linear-gradient(110deg,transparent_0%,color-mix(in_oklch,var(--primary)_10%,transparent)_42%,color-mix(in_oklch,var(--primary)_20%,transparent)_50%,color-mix(in_oklch,var(--primary)_10%,transparent)_58%,transparent_100%)] bg-[length:220%_100%]' />
-        <div className='absolute inset-x-0 top-0 h-px animate-[ping_2.4s_cubic-bezier(0,0,0.2,1)_infinite] bg-primary/60' />
+        <div className='bg-primary/60 absolute inset-x-0 top-0 h-px animate-[ping_2.4s_cubic-bezier(0,0,0.2,1)_infinite]' />
         <div className='absolute inset-0 grid grid-cols-4 gap-px opacity-20'>
           {PLACEHOLDER_GRID_CELLS.map((cell) => (
             <div
@@ -103,9 +103,7 @@ export function ImageGenerationProgress({
 
       <div className='mt-3 flex items-center gap-2 text-sm'>
         <span className='bg-primary/80 size-2 animate-pulse rounded-full' />
-        <Shimmer duration={1.4}>
-          {t(TEXT_STEPS[stepIndex])}
-        </Shimmer>
+        <Shimmer duration={1.4}>{t(TEXT_STEPS[stepIndex])}</Shimmer>
       </div>
     </div>
   )

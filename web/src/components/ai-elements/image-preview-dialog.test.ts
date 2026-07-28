@@ -27,8 +27,14 @@ describe('ImagePreviewDialog viewer layout', () => {
   test('uses a full-window image viewer layout instead of a narrow document panel', () => {
     assert.match(imagePreviewDialogSource, /showCloseButton=\{false\}/)
     assert.match(imagePreviewDialogSource, /bg-black\/90/)
-    assert.match(imagePreviewDialogSource, /maxHeight: `calc\(\(100svh - 8rem\) \* \$\{zoom\}\)`/)
-    assert.match(imagePreviewDialogSource, /maxWidth: `calc\(\(100vw - 4rem\) \* \$\{zoom\}\)`/)
+    assert.match(
+      imagePreviewDialogSource,
+      /maxHeight: `calc\(\(100svh - 8rem\) \* \$\{zoom\}\)`/
+    )
+    assert.match(
+      imagePreviewDialogSource,
+      /maxWidth: `calc\(\(100vw - 4rem\) \* \$\{zoom\}\)`/
+    )
     assert.doesNotMatch(imagePreviewDialogSource, /grid-rows-\[auto_minmax/)
     assert.doesNotMatch(imagePreviewDialogSource, /RotateCcw/)
     assert.doesNotMatch(imagePreviewDialogSource, /scale\(\$\{zoom\}\)/)
@@ -37,9 +43,15 @@ describe('ImagePreviewDialog viewer layout', () => {
 
   test('closes from the empty viewer backdrop but not from image controls', () => {
     assert.match(imagePreviewDialogSource, /handleBackdropPointerDown/)
-    assert.match(imagePreviewDialogSource, /event\.target !== event\.currentTarget/)
+    assert.match(
+      imagePreviewDialogSource,
+      /event\.target !== event\.currentTarget/
+    )
     assert.match(imagePreviewDialogSource, /onOpenChange\(false\)/)
-    assert.match(imagePreviewDialogSource, /onPointerDown=\{handleBackdropPointerDown\}/)
+    assert.match(
+      imagePreviewDialogSource,
+      /onPointerDown=\{handleBackdropPointerDown\}/
+    )
     assert.match(imagePreviewDialogSource, /pointer-events-auto/)
   })
 
@@ -48,7 +60,10 @@ describe('ImagePreviewDialog viewer layout', () => {
     assert.match(imagePreviewDialogSource, /Reset zoom to 100%/)
     assert.match(imagePreviewDialogSource, /Zoom in/)
     assert.match(imagePreviewDialogSource, /100%/)
-    assert.match(imagePreviewDialogSource, /disabled=\{zoom === DEFAULT_IMAGE_PREVIEW_ZOOM\}/)
+    assert.match(
+      imagePreviewDialogSource,
+      /disabled=\{zoom === DEFAULT_IMAGE_PREVIEW_ZOOM\}/
+    )
   })
 
   test('reuses the shared image preview dialog for playground file images', () => {

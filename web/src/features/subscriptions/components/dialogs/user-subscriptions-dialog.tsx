@@ -22,8 +22,11 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
+import {
+  DataTableRowActionMenu,
+  StaticDataTable,
+} from '@/components/data-table'
 import { Dialog } from '@/components/dialog'
-import { DataTableRowActionMenu, StaticDataTable } from '@/components/data-table'
 import {
   sideDrawerContentClassName,
   sideDrawerFormClassName,
@@ -32,13 +35,13 @@ import {
 import { StatusBadge } from '@/components/status-badge'
 import { TableId } from '@/components/table-id'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuShortcut,
 } from '@/components/ui/dropdown-menu'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -55,13 +58,14 @@ import {
   SheetDescription,
 } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/switch'
-import dayjs from '@/lib/dayjs'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
+import dayjs from '@/lib/dayjs'
 import {
   formatQuota,
   parseQuotaFromDollars,
   quotaUnitsToDollars,
 } from '@/lib/format'
+
 import {
   getAdminPlans,
   getUserSubscriptions,
@@ -172,10 +176,12 @@ function EditUserSubscriptionDialog(props: {
     if (!props.open || !sub) return
     setEndTime(formatSubscriptionInput(sub.end_time))
     setMode('override')
-    setAmount(formatAmountInput(quotaUnitsToDollars(sub.amount_total || 0), tokensOnly))
+    setAmount(
+      formatAmountInput(quotaUnitsToDollars(sub.amount_total || 0), tokensOnly)
+    )
   }, [props.open, sub, tokensOnly])
 
-  const amountValue = parseFloat(amount) || 0
+  const amountValue = Number.parseFloat(amount) || 0
   const quotaValue =
     mode === 'override'
       ? parseQuotaFromDollars(amountValue)
@@ -257,31 +263,36 @@ function EditUserSubscriptionDialog(props: {
         <div className='space-y-2'>
           <Label>{t('Mode')}</Label>
           <div className='flex gap-1'>
-            {(['add', 'subtract', 'override'] as const).map((item) => (
-              <Button
-                key={item}
-                type='button'
-                variant={mode === item ? 'default' : 'outline'}
-                size='sm'
-                onClick={() => {
-                  setMode(item)
-                  setAmount(
-                    item === 'override' && sub
-                      ? formatAmountInput(
-                          quotaUnitsToDollars(sub.amount_total || 0),
-                          tokensOnly
-                        )
-                      : ''
-                  )
-                }}
-              >
-                {item === 'add'
-                  ? t('Add')
-                  : item === 'subtract'
-                    ? t('Subtract')
-                    : t('Override')}
-              </Button>
-            ))}
+            {(['add', 'subtract', 'override'] as const).map((item) => {
+              let label = t('Override')
+              if (item === 'add') {
+                label = t('Add')
+              } else if (item === 'subtract') {
+                label = t('Subtract')
+              }
+
+              return (
+                <Button
+                  key={item}
+                  type='button'
+                  variant={mode === item ? 'default' : 'outline'}
+                  size='sm'
+                  onClick={() => {
+                    setMode(item)
+                    setAmount(
+                      item === 'override' && sub
+                        ? formatAmountInput(
+                            quotaUnitsToDollars(sub.amount_total || 0),
+                            tokensOnly
+                          )
+                        : ''
+                    )
+                  }}
+                >
+                  {label}
+                </Button>
+              )
+            })}
           </div>
         </div>
 
@@ -307,10 +318,12 @@ function EditUserSubscriptionDialog(props: {
               {t('Used')}: {formatQuota(sub.amount_used || 0)}
             </div>
             <div>
-              {t('Current total')}: {currentTotal > 0 ? formatQuota(currentTotal) : t('Unlimited')}
+              {t('Current total')}:{' '}
+              {currentTotal > 0 ? formatQuota(currentTotal) : t('Unlimited')}
             </div>
             <div>
-              {t('New total')}: {nextTotal > 0 ? formatQuota(nextTotal) : t('Unlimited')}
+              {t('New total')}:{' '}
+              {nextTotal > 0 ? formatQuota(nextTotal) : t('Unlimited')}
             </div>
           </div>
         )}

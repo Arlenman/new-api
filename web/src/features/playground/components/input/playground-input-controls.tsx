@@ -129,8 +129,9 @@ export function PlaygroundInputControls({
             <ImageIcon className='text-muted-foreground size-4 shrink-0' />
             <SelectValue>
               {t(
-                imageSizeOptions.find((option) => option.value === imageSizeValue)
-                  ?.label ?? 'Auto'
+                imageSizeOptions.find(
+                  (option) => option.value === imageSizeValue
+                )?.label ?? 'Auto'
               )}
             </SelectValue>
           </SelectTrigger>

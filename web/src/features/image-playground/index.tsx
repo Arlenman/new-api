@@ -54,15 +54,15 @@ import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
 import {
-  isImagePlaygroundInitialLoadPending,
-  reconcileImagePlaygroundConfiguration,
-  type ImagePlaygroundAppliedConfiguration,
-} from './lib/configuration-state'
-import {
   createNewApiConfigureMessage,
   createProbeMessage,
   isTrustedImagePlaygroundMessage,
 } from './lib/bridge'
+import {
+  isImagePlaygroundInitialLoadPending,
+  reconcileImagePlaygroundConfiguration,
+  type ImagePlaygroundAppliedConfiguration,
+} from './lib/configuration-state'
 import {
   persistImagePlaygroundStreamImages,
   readImagePlaygroundStreamImages,

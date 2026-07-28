@@ -101,7 +101,7 @@ export function PlaygroundFileImage({ image }: PlaygroundFileImageProps) {
     <>
       <button
         aria-label={t('Open image preview')}
-        className='border-border/70 bg-muted/10 inline-flex max-h-[min(30svh,260px)] max-w-[min(100%,15rem)] cursor-zoom-in self-start overflow-hidden rounded-lg border text-left focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none'
+        className='border-border/70 bg-muted/10 focus-visible:ring-ring inline-flex max-h-[min(30svh,260px)] max-w-[min(100%,15rem)] cursor-zoom-in self-start overflow-hidden rounded-lg border text-left focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none'
         onClick={() => setPreviewOpen(true)}
         type='button'
       >

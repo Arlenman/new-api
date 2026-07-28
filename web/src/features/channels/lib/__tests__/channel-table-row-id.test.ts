@@ -45,9 +45,11 @@ describe('channel table row identity', () => {
 
   test('uses separate namespaces for tag and channel rows', () => {
     const tagRow = {
+      aggregateType: 'tag',
       id: '202' as unknown as number,
       tag: '202',
       children: [channel(202)],
+      enabledCount: 1,
     } as TagRow
 
     assert.equal(getChannelTableRowId(tagRow), 'tag:202')

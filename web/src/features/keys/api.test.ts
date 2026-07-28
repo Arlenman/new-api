@@ -34,10 +34,7 @@ test('loadAllApiKeyPages loads every backend-capped page', async () => {
     if (page === 1) {
       pageItems = Array.from({ length: 100 }, (_, index) => apiKey(index + 1))
     } else if (page === 2) {
-      pageItems = Array.from(
-        { length: 100 },
-        (_, index) => apiKey(index + 101)
-      )
+      pageItems = Array.from({ length: 100 }, (_, index) => apiKey(index + 101))
     } else {
       pageItems = [apiKey(201)]
     }
