@@ -1911,6 +1911,7 @@
     "Failed to load": "読み込みに失敗しました",
     "Failed to load API key": "APIキーの読み込みに失敗しました",
     "Failed to load API keys": "APIキーの読み込みに失敗しました",
+    "Failed to start tool session": "ツールセッションの開始に失敗しました",
     "Failed to load Passkey status": "Passkeyのステータスの読み込みに失敗しました",
     "Failed to load alert rule configuration": "アラートルール設定の読み込みに失敗しました",
     "Failed to load billing history": "請求履歴の読み込みに失敗しました",

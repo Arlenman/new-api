@@ -286,6 +286,44 @@ func TokenOrUserAuth() func(c *gin.Context) {
 	}
 }
 
+// UserToolAssetAuth preserves explicit Authorization support while allowing an
+// embedded same-origin iframe to authenticate its asset navigation with the
+// short-lived, HttpOnly dashboard-session cookie issued for that tool.
+func UserToolAssetAuth(tool string) func(c *gin.Context) {
+	return func(c *gin.Context) {
+		if strings.TrimSpace(c.GetHeader("Authorization")) != "" {
+			TokenOrUserAuth()(c)
+			return
+		}
+		cookiePath, ok := service.UserToolAccessPath(tool)
+		if !ok || !strings.HasPrefix(c.Request.URL.Path, cookiePath) {
+			writeDashboardAuthError(c, service.ErrAuthTokenInvalid)
+			return
+		}
+		raw, err := c.Cookie(service.UserToolAccessCookieName)
+		if err != nil || strings.TrimSpace(raw) == "" {
+			writeDashboardAuthError(c, service.ErrAuthTokenInvalid)
+			return
+		}
+		identity, internal, err := service.ParseDashboardAccessToken(raw)
+		if !internal {
+			writeDashboardAuthError(c, service.ErrAuthTokenInvalid)
+			return
+		}
+		if err != nil {
+			writeDashboardAuthError(c, err)
+			return
+		}
+		_, user, err := service.ValidateLoginSession(identity)
+		if err != nil {
+			writeDashboardAuthError(c, err)
+			return
+		}
+		setDashboardAuthContext(c, user, identity, false)
+		c.Next()
+	}
+}
+
 // TokenAuthReadOnly 宽松版本的令牌认证中间件，用于只读查询接口。
 // 只验证令牌 key 是否存在，不检查令牌状态、过期时间和额度。
 // 即使令牌已过期、已耗尽或已禁用，也允许访问。

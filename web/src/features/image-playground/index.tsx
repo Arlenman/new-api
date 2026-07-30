@@ -43,6 +43,7 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import {
+  createUserToolBrowserSession,
   createUserToolRuntimeSession,
   getAllUserToolTokens,
   getUserToolPreference,
@@ -163,6 +164,13 @@ export function ImagePlayground({
       setKeysLoading(true)
       setErrorMessage(null)
       try {
+        const browserSession =
+          await createUserToolBrowserSession('image-playground')
+        if (!browserSession.success || !browserSession.data) {
+          throw new Error(
+            browserSession.message || t('Failed to start tool session')
+          )
+        }
         const response = await getAllUserToolTokens('image-playground')
         if (!response.success || !response.data) {
           throw new Error(response.message || 'Failed to load API keys')

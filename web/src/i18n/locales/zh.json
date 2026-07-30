@@ -1911,6 +1911,7 @@
     "Failed to load": "加载失败",
     "Failed to load API key": "加载 API Key 失败",
     "Failed to load API keys": "加载 API 密钥失败",
+    "Failed to start tool session": "启动工具会话失败",
     "Failed to load Passkey status": "加载 Passkey 状态失败",
     "Failed to load alert rule configuration": "加载告警规则配置失败",
     "Failed to load billing history": "加载计费历史失败",

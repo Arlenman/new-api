@@ -1911,6 +1911,7 @@
     "Failed to load": "Échec du chargement",
     "Failed to load API key": "Échec du chargement de la clé API",
     "Failed to load API keys": "Échec du chargement des Clés API",
+    "Failed to start tool session": "Échec du démarrage de la session de l’outil",
     "Failed to load Passkey status": "Échec du chargement du statut Passkey",
     "Failed to load alert rule configuration": "Échec du chargement de la configuration des règles d’alerte",
     "Failed to load billing history": "Échec du chargement de l'historique de facturation",

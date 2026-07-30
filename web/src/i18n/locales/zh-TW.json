@@ -1911,6 +1911,7 @@
     "Failed to load": "載入失敗",
     "Failed to load API key": "載入 API Key 失敗",
     "Failed to load API keys": "載入 API 金鑰失敗",
+    "Failed to start tool session": "啟動工具工作階段失敗",
     "Failed to load Passkey status": "載入 Passkey 狀態失敗",
     "Failed to load alert rule configuration": "載入告警規則設定失敗",
     "Failed to load billing history": "載入收費歷史失敗",

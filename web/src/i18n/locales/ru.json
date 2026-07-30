@@ -1911,6 +1911,7 @@
     "Failed to load": "Не удалось загрузить",
     "Failed to load API key": "Не удалось загрузить API-ключ",
     "Failed to load API keys": "Не удалось загрузить API ключи",
+    "Failed to start tool session": "Не удалось запустить сеанс инструмента",
     "Failed to load Passkey status": "Не удалось загрузить статус Passkey",
     "Failed to load alert rule configuration": "Не удалось загрузить настройки правил оповещения",
     "Failed to load billing history": "Не удалось загрузить историю платежей",

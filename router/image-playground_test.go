@@ -117,7 +117,7 @@ func TestImagePlaygroundAccessTokenAuthIgnoresForgedDashboardHeaderAndAuthFailur
 	engine.GET(
 		imagePlaygroundRoute+"/*filepath",
 		middleware.DisableCache(),
-		middleware.TokenOrUserAuth(),
+		middleware.UserToolAssetAuth(model.UserToolImagePlayground),
 		tool.serve,
 	)
 
@@ -137,6 +137,31 @@ func TestImagePlaygroundAccessTokenAuthIgnoresForgedDashboardHeaderAndAuthFailur
 	assert.NotContains(t, authenticated.Body.String(), "window.__NEW_API_USER_ID__=456")
 	assert.Equal(t, "no-cache", authenticated.Header().Get("Cache-Control"))
 	assert.Contains(t, authenticated.Body.String(), "tool index")
+
+	cookieRequest := httptest.NewRequest(http.MethodGet, imagePlaygroundRoute+"/?new_api_user=456", nil)
+	cookieRequest.AddCookie(&http.Cookie{
+		Name:  "new_api_user_tool_access",
+		Value: bundle.AccessToken,
+	})
+	cookieRequest.Header.Set("New-Api-User", "456")
+	cookieAuthenticated := httptest.NewRecorder()
+	engine.ServeHTTP(cookieAuthenticated, cookieRequest)
+
+	assert.Equal(t, http.StatusOK, cookieAuthenticated.Code)
+	assert.Contains(t, cookieAuthenticated.Body.String(), "window.__NEW_API_USER_ID__=123")
+	assert.NotContains(t, cookieAuthenticated.Body.String(), "window.__NEW_API_USER_ID__=456")
+	assert.Equal(t, "no-cache", cookieAuthenticated.Header().Get("Cache-Control"))
+	assert.Contains(t, cookieAuthenticated.Body.String(), "tool index")
+
+	opaqueCookieRequest := httptest.NewRequest(http.MethodGet, imagePlaygroundRoute+"/", nil)
+	opaqueCookieRequest.AddCookie(&http.Cookie{
+		Name:  service.UserToolAccessCookieName,
+		Value: "opaque-dashboard-pat-or-relay-key",
+	})
+	opaqueCookieResponse := httptest.NewRecorder()
+	engine.ServeHTTP(opaqueCookieResponse, opaqueCookieRequest)
+	assert.Equal(t, http.StatusUnauthorized, opaqueCookieResponse.Code)
+	assert.Equal(t, "no-store, no-cache, must-revalidate, private, max-age=0", opaqueCookieResponse.Header().Get("Cache-Control"))
 }
 
 func TestLoadImagePlaygroundRejectsIncompleteDistribution(t *testing.T) {

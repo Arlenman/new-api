@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -52,10 +53,11 @@ func TestUserToolRoutesUseAccessTokenIdentityInsteadOfForgedDashboardUserHeader(
 		_ = sqlDB.Close()
 	})
 
+	ownerPAT := "user-tool-owner-dashboard-pat-01"
 	owner := &model.User{
 		Id: 101, Username: "user-tool-owner", Password: "unused-password-hash",
 		Role: common.RoleCommonUser, Status: common.UserStatusEnabled, Group: "default",
-		AuthVersion: 1, AffCode: "user-tool-owner-aff",
+		AuthVersion: 1, AffCode: "user-tool-owner-aff", AccessToken: &ownerPAT,
 	}
 	forgedUser := &model.User{
 		Id: 202, Username: "user-tool-forged", Password: "unused-password-hash",
@@ -108,6 +110,51 @@ func TestUserToolRoutesUseAccessTokenIdentityInsteadOfForgedDashboardUserHeader(
 		engine.ServeHTTP(recorder, request)
 		return recorder
 	}
+
+	t.Run("browser session issues a tool-scoped internal access cookie", func(t *testing.T) {
+		for _, tool := range []string{model.UserToolImagePlayground, model.UserToolInfiniteCanvas} {
+			t.Run(tool, func(t *testing.T) {
+				recorder := requestWithAccessToken(http.MethodPost, "/api/user-tools/"+tool+"/browser-session", "")
+				require.Equal(t, http.StatusOK, recorder.Code)
+				var response struct {
+					Success bool `json:"success"`
+					Data    struct {
+						ExpiresAt int64 `json:"expires_at"`
+					} `json:"data"`
+				}
+				require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+				require.True(t, response.Success)
+				assert.Greater(t, response.Data.ExpiresAt, time.Now().Unix())
+
+				cookies := recorder.Result().Cookies()
+				require.Len(t, cookies, 1)
+				cookie := cookies[0]
+				expectedPath, ok := service.UserToolAccessPath(tool)
+				require.True(t, ok)
+				assert.Equal(t, service.UserToolAccessCookieName, cookie.Name)
+				assert.Equal(t, expectedPath, cookie.Path)
+				assert.True(t, cookie.HttpOnly)
+				assert.Equal(t, http.SameSiteStrictMode, cookie.SameSite)
+				assert.Equal(t, common.SessionCookieSecure, cookie.Secure)
+				assert.Positive(t, cookie.MaxAge)
+
+				identity, internal, err := service.ParseDashboardAccessToken(cookie.Value)
+				require.NoError(t, err)
+				require.True(t, internal)
+				assert.Equal(t, owner.Id, identity.UserID)
+				assert.Equal(t, bundle.Session.SID, identity.SessionID)
+			})
+		}
+	})
+
+	t.Run("browser session rejects dashboard PAT authentication", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodPost, "/api/user-tools/infinite-canvas/browser-session", nil)
+		request.Header.Set("Authorization", "Bearer "+ownerPAT)
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, request)
+		assert.Equal(t, http.StatusForbidden, recorder.Code)
+		assert.Empty(t, recorder.Result().Cookies())
+	})
 
 	t.Run("bootstrap and changes remain scoped to the token owner", func(t *testing.T) {
 		for _, path := range []string{
@@ -199,6 +246,12 @@ func TestUserToolRoutesUseAccessTokenIdentityInsteadOfForgedDashboardUserHeader(
 		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 		require.True(t, response.Success)
 		assert.Equal(t, ownerToken.Id, response.Data.Token.ID)
+		cookies := recorder.Result().Cookies()
+		require.Len(t, cookies, 1)
+		assert.Equal(t, service.UserToolAccessCookieName, cookies[0].Name)
+		expectedPath, ok := service.UserToolAccessPath(model.UserToolInfiniteCanvas)
+		require.True(t, ok)
+		assert.Equal(t, expectedPath, cookies[0].Path)
 		session, err := model.ResolveUserToolRuntimeSession(response.Data.Credential)
 		require.NoError(t, err)
 		assert.Equal(t, owner.Id, session.UserID)

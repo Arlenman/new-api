@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -380,6 +382,23 @@ func UpdateUserToolPreferences(c *gin.Context) {
 	common.ApiSuccess(c, gin.H{"selected_token_id": preference.SelectedTokenID, "updated_at": preference.UpdatedTime})
 }
 
+func CreateUserToolBrowserSession(c *gin.Context) {
+	_, tool, ok := userToolRequestScope(c)
+	if !ok {
+		return
+	}
+	identity, ok := requireBrowserSession(c)
+	if !ok {
+		return
+	}
+	expiresAt, err := service.IssueUserToolBrowserSession(c, identity, tool)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, gin.H{"expires_at": expiresAt})
+}
+
 func CreateUserToolRuntimeSession(c *gin.Context) {
 	userID, tool, ok := userToolRequestScope(c)
 	if !ok {
@@ -417,6 +436,12 @@ func CreateUserToolRuntimeSession(c *gin.Context) {
 	displayLabel := displayName
 	if displayGroup != "" {
 		displayLabel += " · " + displayGroup
+	}
+	if identity, ok := middleware.GetSessionAuthIdentity(c); ok {
+		if _, err := service.IssueUserToolBrowserSession(c, identity, tool); err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 	common.ApiSuccess(c, gin.H{
 		"credential": credential,
