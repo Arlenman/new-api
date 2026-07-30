@@ -96,16 +96,17 @@ func UserAuth() func(c *gin.Context) {
 	}
 }
 
-// PlaygroundAuth prefers an explicitly supplied API token so embedded tools can
-// use the selected token's group and limits, while preserving session auth for
-// the dashboard playground.
+// PlaygroundAuth accepts both dashboard access JWTs and relay API credentials.
+// TokenOrUserAuth performs the credential classification so recognized internal
+// JWTs never fall back to relay token validation. Preserve UserAuth for requests
+// without Authorization because its existing error contract differs from TokenAuth.
 func PlaygroundAuth() func(c *gin.Context) {
 	return func(c *gin.Context) {
-		if strings.TrimSpace(c.GetHeader("Authorization")) != "" {
-			TokenAuth()(c)
+		if strings.TrimSpace(c.GetHeader("Authorization")) == "" {
+			UserAuth()(c)
 			return
 		}
-		UserAuth()(c)
+		TokenOrUserAuth()(c)
 	}
 }
 
