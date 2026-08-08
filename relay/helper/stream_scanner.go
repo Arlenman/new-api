@@ -209,14 +209,31 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			wg.Done()
 		}()
 		sr := newStreamResult(info.StreamStatus)
+		responseBoundaryInstalled := common.GetContextKeyBool(c, constant.ContextKeyRelayResponseBoundaryInstalled)
 		for data := range dataChan {
 			sr.reset()
+			businessResponseWrittenBefore := false
+			if responseBoundaryInstalled {
+				businessResponseWrittenBefore = common.GetContextKeyBool(c, constant.ContextKeyRelayBusinessResponseWritten)
+			}
 			func() {
 				writeMutex.Lock()
 				defer writeMutex.Unlock()
 				ExtendWriteDeadline(c)
 				dataHandler(data, sr)
 			}()
+			if !sr.Failed() {
+				var businessResponseReceived bool
+				if responseBoundaryInstalled {
+					businessResponseReceived = !businessResponseWrittenBefore && common.GetContextKeyBool(c, constant.ContextKeyRelayBusinessResponseWritten)
+				} else {
+					businessResponseReceived = HasBusinessResponseData([]byte(data))
+				}
+				if businessResponseReceived {
+					info.SetFirstResponseTime()
+					info.ReceivedResponseCount++
+				}
+			}
 			if sr.IsStopped() {
 				return
 			}
@@ -248,24 +265,22 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			}
 
 			ticker.Reset(streamingTimeout)
-			data := scanner.Text()
+			data := strings.TrimSpace(scanner.Text())
 			logger.LogDebug(c, "stream scanner data: %s", data)
 
-			if len(data) < 6 {
+			if data == "[DONE]" {
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+				logger.LogDebug(c, "received [DONE], stopping scanner")
+				return
+			}
+			if !strings.HasPrefix(data, "data:") {
 				continue
 			}
-			if data[:5] != "data:" && data[:6] != "[DONE]" {
-				continue
-			}
-			data = data[5:]
-			data = strings.TrimSpace(data)
+			data = strings.TrimSpace(strings.TrimPrefix(data, "data:"))
 			if data == "" {
 				continue
 			}
 			if !strings.HasPrefix(data, "[DONE]") {
-				info.SetFirstResponseTime()
-				info.ReceivedResponseCount++
-
 				select {
 				case dataChan <- data:
 				case <-ctx.Done():

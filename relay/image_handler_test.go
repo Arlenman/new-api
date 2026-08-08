@@ -256,7 +256,7 @@ func TestImageHelperAdaptorFailuresKeepManagedBillingForCheckedRefund(t *testing
 
 			relayErr := ImageHelper(c, info)
 			require.NotNil(t, relayErr)
-			assert.Equal(t, types.ErrorCodeBadResponse, relayErr.GetErrorCode())
+			assert.Equal(t, types.ErrorCodeEmptyResponse, relayErr.GetErrorCode())
 			assert.Equal(t, channelID, info.ChannelMeta.ChannelId)
 
 			info.Billing.Refund(c)

@@ -156,12 +156,20 @@ func streamMetaResponseZhipu2OpenAI(zhipuResponse *ZhipuStreamMetaResponse) (*dt
 }
 
 func zhipuStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	defer service.CloseResponseBodyGracefully(resp)
+	info.ReceivedResponseCount = 0
+
 	var usage *dto.Usage
 	scanner := helper.NewStreamScanner(resp.Body)
 	scanner.Split(bufio.ScanLines)
 	dataChan := make(chan string)
 	metaChan := make(chan string)
-	stopChan := make(chan bool)
+	stopChan := make(chan error)
+	streamDone := make(chan struct{})
+	var requestDone <-chan struct{}
+	if c.Request != nil {
+		requestDone = c.Request.Context().Done()
+	}
 	go func() {
 		for scanner.Scan() {
 			data := scanner.Text()
@@ -171,41 +179,84 @@ func zhipuStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 					continue
 				}
 				if line[:5] == "data:" {
-					dataChan <- line[5:]
+					select {
+					case dataChan <- line[5:]:
+					case <-streamDone:
+						return
+					case <-requestDone:
+						return
+					}
 					if i != len(lines)-1 {
-						dataChan <- "\n"
+						select {
+						case dataChan <- "\n":
+						case <-streamDone:
+							return
+						case <-requestDone:
+							return
+						}
 					}
 				} else if line[:5] == "meta:" {
-					metaChan <- line[5:]
+					select {
+					case metaChan <- line[5:]:
+					case <-streamDone:
+						return
+					case <-requestDone:
+						return
+					}
 				}
 			}
 		}
-		if err := scanner.Err(); err != nil {
-			common.SysLog("error reading stream: " + err.Error())
+		scanErr := scanner.Err()
+		requestCanceled := false
+		select {
+		case <-requestDone:
+			requestCanceled = true
+		default:
 		}
-		stopChan <- true
+		if scanErr != nil && !requestCanceled {
+			common.SysLog("error reading stream: " + scanErr.Error())
+		}
+		select {
+		case stopChan <- scanErr:
+		case <-streamDone:
+		case <-requestDone:
+		}
 	}()
 	helper.SetEventStreamHeaders(c)
-	c.Stream(func(w io.Writer) bool {
+	var streamErr error
+	clientGone := c.Stream(func(w io.Writer) bool {
 		select {
 		case data := <-dataChan:
+			trimmedData := strings.TrimSpace(data)
+			if data == "" || trimmedData == "[DONE]" {
+				return true
+			}
 			response := streamResponseZhipu2OpenAI(data)
-			jsonResponse, err := json.Marshal(response)
+			jsonResponse, err := common.Marshal(response)
 			if err != nil {
 				common.SysLog("error marshalling stream response: " + err.Error())
 				return true
 			}
+			if trimmedData != "" {
+				info.ReceivedResponseCount++
+				if info.ReceivedResponseCount == 1 {
+					info.FirstResponseTime = time.Now()
+				}
+			}
 			c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonResponse)})
 			return true
 		case data := <-metaChan:
+			data = strings.TrimSpace(data)
+			if data == "" || info.ReceivedResponseCount == 0 {
+				return true
+			}
 			var zhipuResponse ZhipuStreamMetaResponse
-			err := json.Unmarshal([]byte(data), &zhipuResponse)
-			if err != nil {
+			if err := common.Unmarshal([]byte(data), &zhipuResponse); err != nil {
 				common.SysLog("error unmarshalling stream response: " + err.Error())
 				return true
 			}
 			response, zhipuUsage := streamMetaResponseZhipu2OpenAI(&zhipuResponse)
-			jsonResponse, err := json.Marshal(response)
+			jsonResponse, err := common.Marshal(response)
 			if err != nil {
 				common.SysLog("error marshalling stream response: " + err.Error())
 				return true
@@ -213,12 +264,23 @@ func zhipuStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 			usage = zhipuUsage
 			c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonResponse)})
 			return true
-		case <-stopChan:
-			c.Render(-1, common.CustomEvent{Data: "data: [DONE]"})
+		case streamErr = <-stopChan:
+			return false
+		case <-requestDone:
 			return false
 		}
 	})
-	service.CloseResponseBodyGracefully(resp)
+	close(streamDone)
+	if clientGone || (c.Request != nil && c.Request.Context().Err() != nil) {
+		return usage, nil
+	}
+	if streamErr != nil {
+		return nil, types.NewOpenAIError(streamErr, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
+	}
+	if emptyErr := helper.ValidateStreamResponse(info); emptyErr != nil {
+		return nil, emptyErr
+	}
+	helper.Done(c)
 	return usage, nil
 }
 

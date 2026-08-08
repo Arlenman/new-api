@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -8,6 +9,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -92,8 +95,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	defer func() {
 		if newAPIError != nil {
+			prepareRelayErrorResponse(c)
 			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
+			if writeCommittedRelayStreamError(c, relayFormat, newAPIError) {
+				return
+			}
 			switch relayFormat {
 			case types.RelayFormatOpenAIRealtime:
 				helper.WssError(c, ws, newAPIError.ToOpenAIError())
@@ -200,17 +207,24 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
-	maxRetryTimes := common.RetryTimes
+	retryState := newRelayRetryState()
+	if relayFormat != types.RelayFormatOpenAIRealtime {
+		installRelayResponseWriter(c, relayInfo)
+	} else {
+		// Realtime is a WebSocket stream. Its business output bypasses the HTTP
+		// ResponseWriter, so the normal Relay response boundary cannot safely
+		// determine whether replaying the request is still side-effect free.
+		retryState.relayServerErrorRetryEnabled = false
+		retryState.upstreamAttemptLimit = 0
+	}
 
-	for ; retryParam.GetRetry() <= maxRetryTimes; retryParam.IncreaseRetry() {
+	for ; retryState.shouldContinue(retryParam.GetRetry()); retryParam.IncreaseRetry() {
+		retryState.beginIteration()
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
-			if relayInfo.LastError != nil && (isModelCapacityError(relayInfo.LastError) ||
-				isPlaygroundImageQuotaExhaustedError(c, relayInfo.LastError) ||
-				isPlaygroundRelayTransportFailure(c, relayInfo.LastError) ||
-				isPlaygroundRelayGatewayTimeout(c, relayInfo.LastError.StatusCode)) {
+			if shouldPreserveRelayErrorOnChannelSelectionFailure(c, relayInfo.LastError, channelErr) {
 				newAPIError = relayInfo.LastError
 			} else {
 				newAPIError = channelErr
@@ -236,6 +250,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		c.Request.Body = io.NopCloser(bodyStorage)
 
 		common.SetContextKey(c, constant.ContextKeySensitiveRequestReason, "")
+		beginRelayUpstreamAttempt(c, relayInfo)
+		retryState.recordUpstreamAttempt()
 		switch relayFormat {
 		case types.RelayFormatOpenAIRealtime:
 			newAPIError = relay.WssHelper(c, relayInfo)
@@ -247,6 +263,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = relayHandler(c, relayInfo)
 		}
 
+		newAPIError = finishRelayUpstreamAttempt(c, newAPIError)
+
 		if setting.LogSensitiveRequestEnabled {
 			marker := common.GetContextKeyString(c, constant.ContextKeySensitiveRequestReason)
 			if signal, sensitive := service.ClassifySensitiveUpstreamBlock(marker, newAPIError); sensitive {
@@ -255,6 +273,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			}
 		}
 
+		if relayFormat != types.RelayFormatOpenAIRealtime && newAPIError == nil && c.Request.Context().Err() == nil && !hasRelayBusinessResponseWritten(c) {
+			newAPIError = helper.NewEmptyResponseError("")
+		}
 		if newAPIError == nil {
 			relayInfo.LastError = nil
 			return
@@ -273,12 +294,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
-		if shouldIncreaseRelayRetryBudget(c, newAPIError) && maxRetryTimes < 3 {
-			maxRetryTimes = 3
-		}
-
-		willRetry := shouldRetry(c, newAPIError, maxRetryTimes-retryParam.GetRetry())
+		willRetry := retryState.shouldRetry(c, newAPIError, retryParam.GetRetry())
 		handlePlaygroundRelayChannelFailure(c, channel.Id, newAPIError, willRetry)
+		handleRelayServerErrorChannelFailure(c, channel.Id, newAPIError, willRetry)
 		if !willRetry {
 			break
 		}
@@ -319,7 +337,593 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-const playgroundRelayGatewayTimeoutSameChannelRetryLimit = 1
+const (
+	playgroundRelayGatewayTimeoutSameChannelRetryLimit = 1
+	relayServerErrorMaxAttempts                        = 5
+	relayHeartbeatPayload                              = ": PING\n\n"
+)
+
+type relayRetryState struct {
+	maxRetryTimes                int
+	upstreamAttemptCount         int
+	upstreamAttemptLimit         int
+	relayServerErrorRetryEnabled bool
+	relayServerErrorRetryPending bool
+}
+
+func newRelayRetryState() *relayRetryState {
+	return &relayRetryState{
+		maxRetryTimes:                common.RetryTimes,
+		upstreamAttemptLimit:         0,
+		relayServerErrorRetryEnabled: true,
+	}
+}
+
+func (state *relayRetryState) shouldContinue(retry int) bool {
+	if state.upstreamAttemptLimit > 0 && state.upstreamAttemptCount >= state.upstreamAttemptLimit {
+		return false
+	}
+	return retry <= state.maxRetryTimes || state.relayServerErrorRetryPending
+}
+
+func (state *relayRetryState) beginIteration() {
+	state.relayServerErrorRetryPending = false
+}
+
+func (state *relayRetryState) recordUpstreamAttempt() {
+	state.upstreamAttemptCount++
+}
+
+func (state *relayRetryState) shouldRetry(c *gin.Context, err *types.NewAPIError, retry int) bool {
+	serverError := state.relayServerErrorRetryEnabled && isRelayServerErrorRetryTarget(err)
+	if serverError && state.upstreamAttemptLimit == 0 {
+		state.upstreamAttemptLimit = relayServerErrorMaxAttempts
+	}
+	if !serverError && shouldIncreaseRelayRetryBudget(c, err) && state.maxRetryTimes < 3 {
+		state.maxRetryTimes = 3
+	}
+
+	willRetry := false
+	if serverError {
+		willRetry = shouldRetryForRelayServerError(c, err, state.upstreamAttemptCount)
+	} else {
+		willRetry = shouldRetry(c, err, state.maxRetryTimes-retry)
+	}
+	if state.upstreamAttemptLimit > 0 && state.upstreamAttemptCount >= state.upstreamAttemptLimit {
+		willRetry = false
+	}
+	state.relayServerErrorRetryPending = serverError && willRetry
+	return willRetry
+}
+
+type relayResponseWriter struct {
+	gin.ResponseWriter
+	context                 *gin.Context
+	mu                      sync.Mutex
+	pendingSSE              bytes.Buffer
+	deferredSSE             bytes.Buffer
+	pendingBody             bytes.Buffer
+	pendingStatusCode       int
+	initialHeader           http.Header
+	forcePassthrough        bool
+	allowAudioTextResponse  bool
+	clientStreamCommitted   atomic.Bool
+	businessResponseWritten atomic.Bool
+}
+
+func (writer *relayResponseWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+
+func (writer *relayResponseWriter) Write(body []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.writeLocked(body)
+}
+
+func (writer *relayResponseWriter) WriteString(body string) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.writeLocked([]byte(body))
+}
+
+func (writer *relayResponseWriter) WriteHeader(code int) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.forcePassthrough || writer.businessResponseWritten.Load() {
+		writer.writePendingHeaderLocked()
+		writer.ResponseWriter.WriteHeader(code)
+		return
+	}
+	// Match net/http's first-header-wins behavior while the attempt is still
+	// buffered. A later provider write must not change the status that will be
+	// committed with the first business payload.
+	if writer.pendingStatusCode == 0 {
+		writer.pendingStatusCode = code
+	}
+}
+
+func (writer *relayResponseWriter) Flush() {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.forcePassthrough || writer.businessResponseWritten.Load() {
+		writer.writePendingHeaderLocked()
+		writer.ResponseWriter.Flush()
+	}
+}
+
+func (writer *relayResponseWriter) WriteHeaderNow() {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.forcePassthrough || writer.businessResponseWritten.Load() {
+		writer.writePendingHeaderLocked()
+		writer.ResponseWriter.WriteHeaderNow()
+	}
+}
+
+func (writer *relayResponseWriter) writeLocked(body []byte) (int, error) {
+	if len(body) == 0 {
+		return 0, nil
+	}
+	if writer.forcePassthrough {
+		writer.writePendingHeaderLocked()
+		return writer.ResponseWriter.Write(body)
+	}
+	if writer.businessResponseWritten.Load() {
+		writer.writePendingHeaderLocked()
+		return writer.ResponseWriter.Write(body)
+	}
+	if !isRelaySSEPayload(writer.Header().Get("Content-Type"), body) {
+		if len(bytes.TrimSpace(body)) == 0 {
+			return len(body), nil
+		}
+		contentType := writer.Header().Get("Content-Type")
+		if isRelayJSONPayload(contentType, body) {
+			return writer.writeJSONBodyLocked(body)
+		}
+		if writer.allowAudioTextResponse {
+			mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
+			trimmed := bytes.TrimSpace(body)
+			lowerBody := bytes.ToLower(trimmed)
+			isHTML := mediaType == "text/html" ||
+				bytes.HasPrefix(lowerBody, []byte("<!doctype html")) ||
+				bytes.HasPrefix(lowerBody, []byte("<html"))
+			if !isHTML && (mediaType == "" || mediaType == "text/plain" || mediaType == "text/vtt" ||
+				mediaType == "application/x-subrip" || mediaType == "application/srt") {
+				writer.writePendingHeaderLocked()
+				n, err := writer.ResponseWriter.Write(body)
+				if n > 0 {
+					writer.markBusinessResponseWritten()
+				}
+				if err != nil {
+					return n, err
+				}
+				return len(body), nil
+			}
+		}
+		if !isRelayBinaryPayload(contentType) {
+			// A 200 text/HTML body is frequently a proxy or provider failure page,
+			// not model output. Keep it uncommitted so the controller can fail over.
+			_, _ = writer.pendingBody.Write(body)
+			return len(body), nil
+		}
+		writer.writePendingHeaderLocked()
+		n, err := writer.ResponseWriter.Write(body)
+		if n > 0 {
+			writer.markBusinessResponseWritten()
+		}
+		if err != nil {
+			return n, err
+		}
+		return len(body), nil
+	}
+
+	_, _ = writer.pendingSSE.Write(body)
+	for {
+		event, consumed, ok := splitNextRelaySSEEvent(writer.pendingSSE.Bytes())
+		if !ok {
+			break
+		}
+		event = append([]byte(nil), event...)
+		remaining := append([]byte(nil), writer.pendingSSE.Bytes()[consumed:]...)
+		writer.pendingSSE.Reset()
+		_, _ = writer.pendingSSE.Write(remaining)
+
+		if err := writer.processRelaySSEEventLocked(event); err != nil {
+			return 0, err
+		}
+	}
+	return len(body), nil
+}
+
+func (writer *relayResponseWriter) processRelaySSEEventLocked(event []byte) error {
+	switch classifyRelaySSEEvent(event) {
+	case relaySSEEventHeartbeat:
+		writer.writePendingHeaderLocked()
+		if _, err := writer.ResponseWriter.Write(event); err != nil {
+			return err
+		}
+		writer.clientStreamCommitted.Store(true)
+		writer.ResponseWriter.Flush()
+	case relaySSEEventDeferred:
+		_, _ = writer.deferredSSE.Write(event)
+	case relaySSEEventBusiness:
+		writer.writePendingHeaderLocked()
+		if writer.deferredSSE.Len() > 0 {
+			if _, err := writer.ResponseWriter.Write(writer.deferredSSE.Bytes()); err != nil {
+				return err
+			}
+			writer.deferredSSE.Reset()
+		}
+		if _, err := writer.ResponseWriter.Write(event); err != nil {
+			return err
+		}
+		writer.markBusinessResponseWritten()
+		if writer.pendingSSE.Len() > 0 {
+			if _, err := writer.ResponseWriter.Write(writer.pendingSSE.Bytes()); err != nil {
+				return err
+			}
+			writer.pendingSSE.Reset()
+		}
+	case relaySSEEventDiscard:
+		// Terminal-only markers, empty data events and event-only metadata must
+		// not commit the client stream before another channel can be tried.
+	}
+	return nil
+}
+
+func (writer *relayResponseWriter) finishAttempt() {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.pendingSSE.Len() == 0 {
+		return
+	}
+
+	// The upstream handler has returned, so the buffered bytes can no longer be
+	// a partial write. Process them as the final SSE event without adding a
+	// synthetic delimiter to the client response.
+	event := append([]byte(nil), writer.pendingSSE.Bytes()...)
+	writer.pendingSSE.Reset()
+	_ = writer.processRelaySSEEventLocked(event)
+}
+
+func (writer *relayResponseWriter) markBusinessResponseWritten() {
+	writer.businessResponseWritten.Store(true)
+	if writer.context != nil {
+		common.SetContextKey(writer.context, constant.ContextKeyRelayBusinessResponseWritten, true)
+	}
+}
+
+func (writer *relayResponseWriter) beginAttempt() {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	writer.pendingSSE.Reset()
+	writer.deferredSSE.Reset()
+	writer.pendingBody.Reset()
+	writer.pendingStatusCode = 0
+	writer.forcePassthrough = false
+	writer.businessResponseWritten.Store(false)
+	if writer.context != nil {
+		common.SetContextKey(writer.context, constant.ContextKeyRelayBusinessResponseWritten, false)
+		writer.context.Set("event_stream_headers_set", false)
+	}
+	writer.restoreAttemptHeadersLocked()
+}
+
+func (writer *relayResponseWriter) prepareErrorResponse() {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	writer.pendingSSE.Reset()
+	writer.deferredSSE.Reset()
+	writer.pendingBody.Reset()
+	writer.pendingStatusCode = 0
+	writer.forcePassthrough = true
+	if !writer.businessResponseWritten.Load() && !writer.ResponseWriter.Written() {
+		writer.restoreAttemptHeadersLocked()
+		if writer.context != nil {
+			writer.context.Set("event_stream_headers_set", false)
+		}
+	}
+}
+
+func (writer *relayResponseWriter) writePendingHeaderLocked() {
+	if writer.pendingStatusCode == 0 {
+		return
+	}
+	writer.ResponseWriter.WriteHeader(writer.pendingStatusCode)
+	writer.pendingStatusCode = 0
+}
+
+func (writer *relayResponseWriter) restoreAttemptHeadersLocked() {
+	header := writer.Header()
+	for key := range header {
+		header.Del(key)
+	}
+	for key, values := range writer.initialHeader {
+		header[key] = append([]string(nil), values...)
+	}
+}
+
+func (writer *relayResponseWriter) writeJSONBodyLocked(body []byte) (int, error) {
+	_, _ = writer.pendingBody.Write(body)
+
+	var value any
+	if err := common.Unmarshal(writer.pendingBody.Bytes(), &value); err != nil {
+		// Keep a possibly fragmented JSON response pending. If the handler ends
+		// without producing a complete business payload, the controller will
+		// fail over instead of committing an empty 200 response.
+		return len(body), nil
+	}
+	if !helper.HasBusinessResponseData(writer.pendingBody.Bytes()) {
+		writer.pendingBody.Reset()
+		return len(body), nil
+	}
+
+	payload := append([]byte(nil), writer.pendingBody.Bytes()...)
+	writer.pendingBody.Reset()
+	writer.writePendingHeaderLocked()
+	if _, err := writer.ResponseWriter.Write(payload); err != nil {
+		return 0, err
+	}
+	writer.markBusinessResponseWritten()
+	return len(body), nil
+}
+
+type relaySSEEventKind uint8
+
+const (
+	relaySSEEventDiscard relaySSEEventKind = iota
+	relaySSEEventHeartbeat
+	relaySSEEventDeferred
+	relaySSEEventBusiness
+)
+
+func isRelayJSONPayload(contentType string, body []byte) bool {
+	contentType = strings.ToLower(contentType)
+	if strings.Contains(contentType, "json") {
+		return true
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return false
+	}
+	switch trimmed[0] {
+	case '{', '[', '"':
+		return true
+	default:
+		return bytes.Equal(trimmed, []byte("null"))
+	}
+}
+
+func isRelayBinaryPayload(contentType string) bool {
+	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
+	if strings.HasPrefix(mediaType, "audio/") || strings.HasPrefix(mediaType, "image/") || strings.HasPrefix(mediaType, "video/") {
+		return true
+	}
+	switch mediaType {
+	case "application/octet-stream", "application/pdf", "application/zip", "application/gzip":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRelaySSEPayload(contentType string, body []byte) bool {
+	if strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {
+		return true
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return false
+	}
+	for _, prefix := range [][]byte{
+		[]byte(":"),
+		[]byte("data:"),
+		[]byte("event:"),
+		[]byte("id:"),
+		[]byte("retry:"),
+	} {
+		if bytes.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func splitNextRelaySSEEvent(buffer []byte) ([]byte, int, bool) {
+	lfIndex := bytes.Index(buffer, []byte("\n\n"))
+	crlfIndex := bytes.Index(buffer, []byte("\r\n\r\n"))
+	index := -1
+	delimiterLength := 0
+	if lfIndex >= 0 {
+		index = lfIndex
+		delimiterLength = 2
+	}
+	if crlfIndex >= 0 && (index < 0 || crlfIndex < index) {
+		index = crlfIndex
+		delimiterLength = 4
+	}
+	if index < 0 {
+		return nil, 0, false
+	}
+	consumed := index + delimiterLength
+	return buffer[:consumed], consumed, true
+}
+
+func classifyRelaySSEEvent(event []byte) relaySSEEventKind {
+	normalized := strings.ReplaceAll(string(event), "\r\n", "\n")
+	trimmed := strings.TrimSpace(normalized)
+	if trimmed == "" {
+		return relaySSEEventDiscard
+	}
+	if strings.EqualFold(trimmed, "[DONE]") {
+		return relaySSEEventDiscard
+	}
+
+	lines := strings.Split(normalized, "\n")
+	commentOnly := true
+	hasData := false
+	dataParts := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		commentOnly = false
+		if strings.HasPrefix(line, "data:") {
+			hasData = true
+			dataParts = append(dataParts, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	if commentOnly {
+		return relaySSEEventHeartbeat
+	}
+	if !hasData {
+		return relaySSEEventDeferred
+	}
+
+	payload := strings.TrimSpace(strings.Join(dataParts, "\n"))
+	switch {
+	case payload == "":
+		return relaySSEEventDiscard
+	case strings.EqualFold(payload, "[DONE]"):
+		return relaySSEEventDiscard
+	case strings.EqualFold(payload, "null"):
+		return relaySSEEventDiscard
+	case payload == "{}" || payload == "[]":
+		return relaySSEEventDiscard
+	}
+
+	var imageEvent struct {
+		Type    string `json:"type"`
+		URL     string `json:"url"`
+		B64JSON string `json:"b64_json"`
+		Data    []struct {
+			URL     string `json:"url"`
+			B64JSON string `json:"b64_json"`
+		} `json:"data"`
+	}
+	if err := common.Unmarshal([]byte(payload), &imageEvent); err == nil {
+		switch strings.ToLower(strings.TrimSpace(imageEvent.Type)) {
+		case "image_generation.partial_image", "image_edit.partial_image":
+			return relaySSEEventDeferred
+		case "image_generation.completed", "image_edit.completed":
+			if strings.TrimSpace(imageEvent.URL) != "" || strings.TrimSpace(imageEvent.B64JSON) != "" {
+				return relaySSEEventBusiness
+			}
+			for _, image := range imageEvent.Data {
+				if strings.TrimSpace(image.URL) != "" || strings.TrimSpace(image.B64JSON) != "" {
+					return relaySSEEventBusiness
+				}
+			}
+			return relaySSEEventDeferred
+		}
+	}
+	if helper.HasBusinessResponseData([]byte(payload)) {
+		return relaySSEEventBusiness
+	}
+	return relaySSEEventDeferred
+}
+
+func installRelayResponseWriter(c *gin.Context, relayInfo *relaycommon.RelayInfo) *relayResponseWriter {
+	if writer, ok := c.Writer.(*relayResponseWriter); ok {
+		return writer
+	}
+	allowAudioTextResponse := false
+	if relayInfo != nil {
+		switch relayInfo.RelayMode {
+		case relayconstant.RelayModeAudioTranscription, relayconstant.RelayModeAudioTranslation:
+			if audioRequest, ok := relayInfo.Request.(*dto.AudioRequest); ok {
+				switch strings.ToLower(strings.TrimSpace(audioRequest.ResponseFormat)) {
+				case "text", "srt", "vtt":
+					allowAudioTextResponse = true
+				}
+			}
+		}
+	}
+	writer := &relayResponseWriter{
+		ResponseWriter:         c.Writer,
+		context:                c,
+		initialHeader:          c.Writer.Header().Clone(),
+		allowAudioTextResponse: allowAudioTextResponse,
+	}
+	c.Writer = writer
+	common.SetContextKey(c, constant.ContextKeyRelayResponseBoundaryInstalled, true)
+	common.SetContextKey(c, constant.ContextKeyRelayBusinessResponseWritten, false)
+	return writer
+}
+
+func hasRelayBusinessResponseWritten(c *gin.Context) bool {
+	writer, ok := c.Writer.(*relayResponseWriter)
+	return ok && writer.businessResponseWritten.Load()
+}
+
+func beginRelayUpstreamAttempt(c *gin.Context, info *relaycommon.RelayInfo) {
+	if info != nil {
+		info.ReceivedResponseCount = 0
+		info.SendResponseCount = 0
+		info.StreamStatus = nil
+	}
+	if writer, ok := c.Writer.(*relayResponseWriter); ok {
+		writer.beginAttempt()
+	}
+}
+
+func finishRelayUpstreamAttempt(c *gin.Context, relayErr *types.NewAPIError) *types.NewAPIError {
+	writer, ok := c.Writer.(*relayResponseWriter)
+	if !ok {
+		return relayErr
+	}
+	writer.finishAttempt()
+	if relayErr != nil && relayErr.GetErrorCode() == types.ErrorCodeEmptyResponse && writer.businessResponseWritten.Load() {
+		// Provider handlers may validate the response boundary before returning.
+		// Once the EOF-terminated event is committed, that empty-response error is stale.
+		return nil
+	}
+	return relayErr
+}
+
+func prepareRelayErrorResponse(c *gin.Context) {
+	if writer, ok := c.Writer.(*relayResponseWriter); ok {
+		writer.prepareErrorResponse()
+	}
+}
+
+func writeCommittedRelayStreamError(c *gin.Context, relayFormat types.RelayFormat, relayErr *types.NewAPIError) bool {
+	writer, ok := c.Writer.(*relayResponseWriter)
+	if !ok || relayErr == nil || writer.businessResponseWritten.Load() || !writer.clientStreamCommitted.Load() {
+		return false
+	}
+
+	var payload any
+	if relayFormat == types.RelayFormatClaude {
+		payload = gin.H{"type": "error", "error": relayErr.ToClaudeError()}
+	} else {
+		payload = gin.H{"error": relayErr.ToOpenAIError()}
+	}
+	encoded, err := common.Marshal(payload)
+	if err != nil {
+		return false
+	}
+
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	writer.forcePassthrough = true
+	var event []byte
+	if relayFormat == types.RelayFormatClaude {
+		event = []byte("event: error\ndata: " + string(encoded) + "\n\n")
+	} else {
+		event = []byte("data: " + string(encoded) + "\n\ndata: [DONE]\n\n")
+	}
+	if _, err := writer.ResponseWriter.Write(event); err != nil {
+		return false
+	}
+	writer.ResponseWriter.Flush()
+	return true
+}
 
 func addUsedChannel(c *gin.Context, channelId int) {
 	useChannel := c.GetStringSlice("use_channel")
@@ -356,6 +960,14 @@ func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 	return meta
 }
 
+type noAvailableRelayChannelError struct {
+	message string
+}
+
+func (err *noAvailableRelayChannelError) Error() string {
+	return err.message
+}
+
 func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
 	if info.ChannelMeta == nil {
 		autoBan := c.GetBool("auto_ban")
@@ -378,7 +990,9 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", selectGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 	if channel == nil {
-		return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		return nil, types.NewError(&noAvailableRelayChannelError{
+			message: fmt.Sprintf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName),
+		}, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
@@ -406,6 +1020,57 @@ func shouldRetryByAutomaticDisableStatusCode(openaiErr *types.NewAPIError) bool 
 		return false
 	}
 	return operation_setting.ShouldDisableByStatusCode(code)
+}
+
+func isRelayServerErrorRetryTarget(openaiErr *types.NewAPIError) bool {
+	if openaiErr == nil {
+		return false
+	}
+	if openaiErr.GetErrorCode() == types.ErrorCodeEmptyResponse {
+		return true
+	}
+	if openaiErr.OriginalStatusCode == http.StatusInternalServerError {
+		return true
+	}
+	return openaiErr.OriginalStatusCode == 0 &&
+		openaiErr.StatusCode == http.StatusInternalServerError &&
+		openaiErr.GetErrorCode() == types.ErrorCodeDoRequestFailed
+}
+
+func shouldRetryForRelayServerError(c *gin.Context, openaiErr *types.NewAPIError, attempts int) bool {
+	if !isRelayServerErrorRetryTarget(openaiErr) || types.IsSkipRetryError(openaiErr) {
+		return false
+	}
+	if c.Request != nil && c.Request.Context().Err() != nil {
+		return false
+	}
+	if attempts >= relayServerErrorMaxAttempts {
+		return false
+	}
+	if hasRelayBusinessResponseWritten(c) {
+		return false
+	}
+	if _, ok := c.Get("specific_channel_id"); ok {
+		return false
+	}
+	if _, ok := c.Get(string(constant.ContextKeyTokenSpecificChannelId)); ok {
+		return false
+	}
+	return true
+}
+
+func shouldPreserveRelayErrorOnChannelSelectionFailure(c *gin.Context, lastErr, channelErr *types.NewAPIError) bool {
+	if lastErr == nil {
+		return false
+	}
+	if isRelayServerErrorRetryTarget(lastErr) {
+		var noCandidateErr *noAvailableRelayChannelError
+		return errors.As(channelErr, &noCandidateErr)
+	}
+	return isModelCapacityError(lastErr) ||
+		isPlaygroundImageQuotaExhaustedError(c, lastErr) ||
+		isPlaygroundRelayTransportFailure(c, lastErr) ||
+		isPlaygroundRelayGatewayTimeout(c, lastErr.StatusCode)
 }
 
 func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {
@@ -605,6 +1270,20 @@ func handlePlaygroundRelayChannelFailure(c *gin.Context, channelID int, err *typ
 	}
 	excludedChannelIDs[channelID] = struct{}{}
 	common.SetContextKey(c, constant.ContextKeyPlaygroundRelayExcludedChannelIds, excludedChannelIDs)
+}
+
+func handleRelayServerErrorChannelFailure(c *gin.Context, channelID int, err *types.NewAPIError, willRetry bool) {
+	if channelID <= 0 || !willRetry || !isRelayServerErrorRetryTarget(err) {
+		return
+	}
+
+	service.ClearCurrentChannelAffinityCache(c)
+	excludedChannelIDs, _ := common.GetContextKeyType[map[int]struct{}](c, constant.ContextKeyRelayServerErrorExcludedChannelIds)
+	if excludedChannelIDs == nil {
+		excludedChannelIDs = make(map[int]struct{})
+	}
+	excludedChannelIDs[channelID] = struct{}{}
+	common.SetContextKey(c, constant.ContextKeyRelayServerErrorExcludedChannelIds, excludedChannelIDs)
 }
 
 func shouldStopPlaygroundRelayGatewayTimeoutRetry(c *gin.Context, channelID int, lastErr *types.NewAPIError, retry int) bool {

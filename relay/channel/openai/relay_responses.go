@@ -164,6 +164,9 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			}
 		}
 	})
+	if emptyErr := helper.ValidateStreamResponse(info); emptyErr != nil {
+		return nil, emptyErr
+	}
 
 	if usage.CompletionTokens == 0 {
 		// 计算输出文本的 token 数量

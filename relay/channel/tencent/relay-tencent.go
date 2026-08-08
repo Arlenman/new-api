@@ -91,46 +91,65 @@ func streamResponseTencent2OpenAI(TencentResponse *TencentChatResponse) *dto.Cha
 }
 
 func tencentStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	defer service.CloseResponseBodyGracefully(resp)
+	info.ReceivedResponseCount = 0
+
 	var responseText string
 	scanner := helper.NewStreamScanner(resp.Body)
 	scanner.Split(bufio.ScanLines)
-
 	helper.SetEventStreamHeaders(c)
 
 	for scanner.Scan() {
-		data := scanner.Text()
-		if len(data) < 5 || !strings.HasPrefix(data, "data:") {
+		data := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(data, "data:") {
 			continue
 		}
-		data = strings.TrimPrefix(data, "data:")
+		data = strings.TrimSpace(strings.TrimPrefix(data, "data:"))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
 
 		var tencentResponse TencentChatResponse
-		err := common.Unmarshal([]byte(data), &tencentResponse)
-		if err != nil {
+		if err := common.Unmarshal([]byte(data), &tencentResponse); err != nil {
 			common.SysLog("error unmarshalling stream response: " + err.Error())
 			continue
 		}
 
 		response := streamResponseTencent2OpenAI(&tencentResponse)
-		if len(response.Choices) != 0 {
-			responseText += response.Choices[0].Delta.GetContentString()
+		if len(response.Choices) == 0 {
+			continue
+		}
+		content := response.Choices[0].Delta.GetContentString()
+		if content == "" && info.ReceivedResponseCount == 0 {
+			continue
+		}
+		responseText += content
+		if strings.TrimSpace(content) != "" {
+			info.ReceivedResponseCount++
+			if info.ReceivedResponseCount == 1 {
+				info.FirstResponseTime = time.Now()
+			}
 		}
 
-		err = helper.ObjectData(c, response)
-		if err != nil {
+		if err := helper.ObjectData(c, response); err != nil {
 			common.SysLog(err.Error())
 		}
 	}
 
+	usage := service.ResponseText2Usage(c, responseText, info.UpstreamModelName, info.GetEstimatePromptTokens())
+	if c.Request != nil && c.Request.Context().Err() != nil {
+		return usage, nil
+	}
 	if err := scanner.Err(); err != nil {
 		common.SysLog("error reading stream: " + err.Error())
+		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
+	}
+	if emptyErr := helper.ValidateStreamResponse(info); emptyErr != nil {
+		return nil, emptyErr
 	}
 
 	helper.Done(c)
-
-	service.CloseResponseBodyGracefully(resp)
-
-	return service.ResponseText2Usage(c, responseText, info.UpstreamModelName, info.GetEstimatePromptTokens()), nil
+	return usage, nil
 }
 
 func tencentHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {

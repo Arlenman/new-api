@@ -158,3 +158,74 @@ func TestCacheGetRandomSatisfiedChannelExcludesFailedPlaygroundRelayChannelAtSam
 		})
 	}
 }
+
+func TestCacheGetRandomSatisfiedChannelExcludesRelayServerErrorChannel(t *testing.T) {
+	require.NoError(t, model.DB.AutoMigrate(&model.Ability{}))
+
+	originalMemoryCacheEnabled := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = true
+	t.Cleanup(func() {
+		common.MemoryCacheEnabled = originalMemoryCacheEnabled
+		model.InitChannelCache()
+	})
+
+	modelName := "relay-server-error-fallback-memory-cache"
+	failedChannelID := 9221
+	fallbackChannelID := 9222
+	channelIDs := []int{failedChannelID, fallbackChannelID}
+	require.NoError(t, model.DB.Where("channel_id IN ?", channelIDs).Delete(&model.Ability{}).Error)
+	require.NoError(t, model.DB.Where("id IN ?", channelIDs).Delete(&model.Channel{}).Error)
+	t.Cleanup(func() {
+		require.NoError(t, model.DB.Where("channel_id IN ?", channelIDs).Delete(&model.Ability{}).Error)
+		require.NoError(t, model.DB.Where("id IN ?", channelIDs).Delete(&model.Channel{}).Error)
+	})
+
+	priority := int64(100)
+	for _, channel := range []*model.Channel{
+		{
+			Id:       failedChannelID,
+			Type:     1,
+			Key:      "failed-server-error-key-1\nfailed-server-error-key-2",
+			Status:   common.ChannelStatusEnabled,
+			Name:     "failed-server-error-channel",
+			Models:   modelName,
+			Group:    "default",
+			Priority: &priority,
+			ChannelInfo: model.ChannelInfo{
+				IsMultiKey:   true,
+				MultiKeySize: 2,
+			},
+		},
+		{
+			Id:       fallbackChannelID,
+			Type:     1,
+			Key:      "fallback-server-error-key",
+			Status:   common.ChannelStatusEnabled,
+			Name:     "fallback-server-error-channel",
+			Models:   modelName,
+			Group:    "default",
+			Priority: &priority,
+		},
+	} {
+		require.NoError(t, channel.Insert())
+	}
+	model.InitChannelCache()
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyRelayServerErrorExcludedChannelIds, map[int]struct{}{
+		failedChannelID: {},
+	})
+
+	channel, selectedGroup, err := CacheGetRandomSatisfiedChannel(&RetryParam{
+		Ctx:         ctx,
+		TokenGroup:  "default",
+		ModelName:   modelName,
+		RequestPath: "/v1/chat/completions",
+		Retry:       common.GetPointer(1),
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "default", selectedGroup)
+	require.NotNil(t, channel)
+	require.Equal(t, fallbackChannelID, channel.Id)
+}

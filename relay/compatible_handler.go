@@ -80,6 +80,9 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		if newApiErr != nil {
 			return newApiErr
 		}
+		if newApiErr = validateRelayResponseBoundary(c, info); newApiErr != nil {
+			return newApiErr
+		}
 
 		var containAudioTokens = usage.CompletionTokenDetails.AudioTokens > 0 || usage.PromptTokensDetails.AudioTokens > 0
 		var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
@@ -208,6 +211,9 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	if newApiErr != nil {
 		// reset status code 重置状态码
 		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
+		return newApiErr
+	}
+	if newApiErr = validateRelayResponseBoundary(c, info); newApiErr != nil {
 		return newApiErr
 	}
 

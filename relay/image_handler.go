@@ -153,6 +153,9 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError
 	}
+	if newAPIError = validateRelayResponseBoundary(c, info); newAPIError != nil {
+		return newAPIError
+	}
 
 	imageN := uint(1)
 	if request.N != nil {

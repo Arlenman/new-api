@@ -134,6 +134,9 @@ func baiduStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 			sr.Error(err)
 		}
 	})
+	if emptyErr := helper.ValidateStreamResponse(info); emptyErr != nil {
+		return emptyErr, nil
+	}
 	service.CloseResponseBodyGracefully(resp)
 	return nil, usage
 }

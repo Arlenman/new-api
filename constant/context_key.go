@@ -86,3 +86,10 @@ const (
 )
 
 const ContextKeyModelCapacityExcludedChannelIds ContextKey = "model_capacity_excluded_channel_ids"
+
+const ContextKeyRelayServerErrorExcludedChannelIds ContextKey = "relay_server_error_excluded_channel_ids"
+
+const (
+	ContextKeyRelayResponseBoundaryInstalled ContextKey = "relay_response_boundary_installed"
+	ContextKeyRelayBusinessResponseWritten   ContextKey = "relay_business_response_written"
+)

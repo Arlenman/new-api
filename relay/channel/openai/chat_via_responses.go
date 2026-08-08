@@ -82,6 +82,7 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 		return nil, types.NewOpenAIError(fmt.Errorf("invalid response"), types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
 	defer service.CloseResponseBodyGracefully(resp)
+	info.ReceivedResponseCount = 0
 
 	accumulator := relayconvert.NewResponsesBufferedAccumulator()
 	var finalResponse *dto.OpenAIResponsesResponse
@@ -101,6 +102,9 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 				break
 			}
 			continue
+		}
+		if helper.HasBusinessResponseData(common.StringToByteSlice(data)) {
+			info.ReceivedResponseCount++
 		}
 
 		var streamResp dto.ResponsesStreamResponse
@@ -139,6 +143,9 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+	}
+	if emptyErr := helper.ValidateStreamResponse(info); emptyErr != nil {
+		return nil, emptyErr
 	}
 	if finalResponse == nil {
 		finalResponse = &dto.OpenAIResponsesResponse{
@@ -309,6 +316,9 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 
 	if streamErr != nil {
 		return nil, streamErr
+	}
+	if emptyErr := helper.ValidateStreamResponse(info); emptyErr != nil {
+		return nil, emptyErr
 	}
 
 	usage := state.Usage()

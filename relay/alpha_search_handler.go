@@ -100,6 +100,9 @@ func AlphaSearchHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError
 	if _, err := io.Copy(c.Writer, httpResp.Body); err != nil {
 		return types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
 	}
+	if newAPIError = validateRelayResponseBoundary(c, info); newAPIError != nil {
+		return newAPIError
+	}
 
 	// Upstream alpha search returns no usage; bill one web_search_preview call.
 	if info.ResponsesUsageInfo == nil {

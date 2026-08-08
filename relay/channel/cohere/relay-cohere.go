@@ -81,6 +81,9 @@ func stopReasonCohere2OpenAI(reason string) string {
 }
 
 func cohereStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	defer service.CloseResponseBodyGracefully(resp)
+	info.ReceivedResponseCount = 0
+
 	responseId := helper.GetResponseID(c)
 	createdTime := common.GetTimestamp()
 	usage := &dto.Usage{}
@@ -99,39 +102,62 @@ func cohereStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		return 0, nil, nil
 	})
 	dataChan := make(chan string)
-	stopChan := make(chan bool)
+	stopChan := make(chan error)
+	streamDone := make(chan struct{})
+	var requestDone <-chan struct{}
+	if c.Request != nil {
+		requestDone = c.Request.Context().Done()
+	}
 	go func() {
 		for scanner.Scan() {
-			data := scanner.Text()
-			dataChan <- data
+			select {
+			case dataChan <- scanner.Text():
+			case <-streamDone:
+				return
+			case <-requestDone:
+				return
+			}
 		}
-		if err := scanner.Err(); err != nil {
-			common.SysLog("error reading stream: " + err.Error())
+		scanErr := scanner.Err()
+		requestCanceled := false
+		select {
+		case <-requestDone:
+			requestCanceled = true
+		default:
 		}
-		stopChan <- true
+		if scanErr != nil && !requestCanceled {
+			common.SysLog("error reading stream: " + scanErr.Error())
+		}
+		select {
+		case stopChan <- scanErr:
+		case <-streamDone:
+		case <-requestDone:
+		}
 	}()
 	helper.SetEventStreamHeaders(c)
-	isFirst := true
-	c.Stream(func(w io.Writer) bool {
+	var streamErr error
+	clientGone := c.Stream(func(w io.Writer) bool {
 		select {
 		case data := <-dataChan:
-			if isFirst {
-				isFirst = false
-				info.FirstResponseTime = time.Now()
+			data = strings.TrimSpace(strings.TrimSuffix(data, "\r"))
+			if data == "" || strings.HasPrefix(data, ":") || data == "[DONE]" || data == "data: [DONE]" {
+				return true
 			}
-			data = strings.TrimSuffix(data, "\r")
 			var cohereResp CohereResponse
-			err := json.Unmarshal([]byte(data), &cohereResp)
-			if err != nil {
+			if err := common.Unmarshal([]byte(data), &cohereResp); err != nil {
 				common.SysLog("error unmarshalling stream response: " + err.Error())
 				return true
 			}
+
 			var openaiResp dto.ChatCompletionsStreamResponse
 			openaiResp.Id = responseId
 			openaiResp.Created = createdTime
 			openaiResp.Object = "chat.completion.chunk"
 			openaiResp.Model = info.UpstreamModelName
 			if cohereResp.IsFinished {
+				if info.ReceivedResponseCount == 0 {
+					return true
+				}
 				finishReason := stopReasonCohere2OpenAI(cohereResp.FinishReason)
 				openaiResp.Choices = []dto.ChatCompletionsStreamResponseChoice{
 					{
@@ -145,6 +171,9 @@ func cohereStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 					usage.CompletionTokens = cohereResp.Response.Meta.BilledUnits.OutputTokens
 				}
 			} else {
+				if cohereResp.Text == "" {
+					return true
+				}
 				openaiResp.Choices = []dto.ChatCompletionsStreamResponseChoice{
 					{
 						Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
@@ -155,22 +184,40 @@ func cohereStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 					},
 				}
 				responseText += cohereResp.Text
+				if strings.TrimSpace(cohereResp.Text) != "" {
+					info.ReceivedResponseCount++
+					if info.ReceivedResponseCount == 1 {
+						info.FirstResponseTime = time.Now()
+					}
+				}
 			}
-			jsonStr, err := json.Marshal(openaiResp)
+			jsonStr, err := common.Marshal(openaiResp)
 			if err != nil {
 				common.SysLog("error marshalling stream response: " + err.Error())
 				return true
 			}
 			c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonStr)})
 			return true
-		case <-stopChan:
-			c.Render(-1, common.CustomEvent{Data: "data: [DONE]"})
+		case streamErr = <-stopChan:
+			return false
+		case <-requestDone:
 			return false
 		}
 	})
+	close(streamDone)
+	if clientGone || (c.Request != nil && c.Request.Context().Err() != nil) {
+		return usage, nil
+	}
+	if streamErr != nil {
+		return nil, types.NewOpenAIError(streamErr, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
+	}
+	if emptyErr := helper.ValidateStreamResponse(info); emptyErr != nil {
+		return nil, emptyErr
+	}
 	if usage.PromptTokens == 0 {
 		usage = service.ResponseText2Usage(c, responseText, info.UpstreamModelName, info.GetEstimatePromptTokens())
 	}
+	helper.Done(c)
 	return usage, nil
 }
 

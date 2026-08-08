@@ -142,7 +142,7 @@ func OpenaiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 	if imageMetadata.ImageCount == 0 {
 		message := "upstream image response did not include a valid url or b64_json"
 		logOpenAIImageFailure(c, "validate_image_data", resp.StatusCode, resp.Header.Get("Content-Type"), 0, imageMetadata.HasURL, imageMetadata.HasB64JSON, message)
-		return nil, invalidOpenAIImageDataError(message)
+		return nil, helper.NewEmptyResponseError(message)
 	}
 	updateOpenAIImageCount(info, imageMetadata.ImageCount)
 
@@ -269,17 +269,19 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 		return nil, invalidOpenAIImageDataError(streamError)
 	}
 	if !clientAborted && completedImages == 0 {
+		if upstreamFinished && len(lastStreamData) == 0 {
+			const message = "empty image stream response"
+			logOpenAIImageFailure(c, "parse_stream", resp.StatusCode, resp.Header.Get("Content-Type"), 0, hasCompletedURL, hasCompletedB64JSON, message)
+			return nil, helper.NewEmptyResponseError(message)
+		}
 		stage := "parse_stream"
 		message := "image stream ended before a completed image was received"
-		if upstreamFinished {
-			message = "empty image stream response"
-		}
 		if sawCompletedEvent {
 			stage = "validate_image_data"
 			message = "completed image stream event did not include a valid url or b64_json"
 		}
 		logOpenAIImageFailure(c, stage, resp.StatusCode, resp.Header.Get("Content-Type"), 0, hasCompletedURL, hasCompletedB64JSON, message)
-		return nil, invalidOpenAIImageDataError(message)
+		return nil, helper.NewEmptyResponseError(message)
 	}
 
 	// StreamScannerHandler consumes the upstream [DONE]; re-emit it so the
@@ -394,7 +396,7 @@ func openaiImageJSONAsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 	if imageMetadata.ImageCount == 0 {
 		message := "upstream image response did not include a valid url or b64_json"
 		logOpenAIImageFailure(c, "validate_image_data", resp.StatusCode, resp.Header.Get("Content-Type"), 0, imageMetadata.HasURL, imageMetadata.HasB64JSON, message)
-		return nil, invalidOpenAIImageDataError(message)
+		return nil, helper.NewEmptyResponseError(message)
 	}
 	normalizeOpenAIUsage(&usageResp.Usage)
 	applyUsagePostProcessing(info, &usageResp.Usage, responseBody)

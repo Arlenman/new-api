@@ -10,6 +10,7 @@ import (
 type StreamResult struct {
 	status  *relaycommon.StreamStatus
 	stopped bool
+	failed  bool
 }
 
 func newStreamResult(status *relaycommon.StreamStatus) *StreamResult {
@@ -23,6 +24,7 @@ func (r *StreamResult) Error(err error) {
 		return
 	}
 	r.status.RecordError(err.Error())
+	r.failed = true
 }
 
 // Stop records a fatal error and marks the stream to stop after this chunk.
@@ -32,6 +34,7 @@ func (r *StreamResult) Stop(err error) {
 	}
 	r.status.SetEndReason(relaycommon.StreamEndReasonHandlerStop, err)
 	r.stopped = true
+	r.failed = true
 }
 
 // Done signals that the handler has finished processing normally
@@ -46,7 +49,13 @@ func (r *StreamResult) IsStopped() bool {
 	return r.stopped
 }
 
-// reset clears the per-chunk stopped flag so the object can be reused.
+// Failed reports whether the current chunk raised a soft or fatal handler error.
+func (r *StreamResult) Failed() bool {
+	return r.failed
+}
+
+// reset clears per-chunk state so the object can be reused.
 func (r *StreamResult) reset() {
 	r.stopped = false
+	r.failed = false
 }

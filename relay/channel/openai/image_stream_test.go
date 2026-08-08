@@ -123,16 +123,26 @@ func TestOpenaiImageStreamHandlerRejectsStreamsWithoutCompletedImage(t *testing.
 	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
 
 	tests := []struct {
-		name string
-		body string
+		name          string
+		body          string
+		errorCode     types.ErrorCode
+		statusCode    int
+		skipRetry     bool
+		wantBody      string
+		wantEmptyBody bool
 	}{
 		{
-			name: "SSE comment only",
-			body: ": PING\n\n",
+			name:          "empty body",
+			errorCode:     types.ErrorCodeEmptyResponse,
+			statusCode:    http.StatusInternalServerError,
+			wantEmptyBody: true,
 		},
 		{
-			name: "done event only",
-			body: "data: [DONE]\n\n",
+			name:          "SSE comment only",
+			body:          ": PING\n\n",
+			errorCode:     types.ErrorCodeEmptyResponse,
+			statusCode:    http.StatusInternalServerError,
+			wantEmptyBody: true,
 		},
 		{
 			name: "partial image without completed image",
@@ -143,21 +153,35 @@ func TestOpenaiImageStreamHandlerRejectsStreamsWithoutCompletedImage(t *testing.
 				`data: [DONE]`,
 				``,
 			}, "\n"),
+			errorCode:  types.ErrorCodeEmptyResponse,
+			statusCode: http.StatusInternalServerError,
+			wantBody:   `b64_json":"partial"`,
+		},
+		{
+			name:          "done event only",
+			body:          "data: [DONE]\n\n",
+			errorCode:     types.ErrorCodeEmptyResponse,
+			statusCode:    http.StatusInternalServerError,
+			wantEmptyBody: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, _, resp, info := newImageTestContext(t, tt.body, "text/event-stream", true)
+			c, recorder, resp, info := newImageTestContext(t, tt.body, "text/event-stream", true)
 
 			usage, err := OpenaiImageStreamHandler(c, info, resp)
 
 			require.NotNil(t, err)
-			require.Equal(t, types.ErrorCodeBadResponse, err.GetErrorCode())
-			require.Equal(t, http.StatusBadGateway, err.StatusCode)
-			require.Equal(t, "empty image stream response", err.Error())
-			require.True(t, types.IsSkipRetryError(err))
-			require.Nil(t, usage)
+			assert.Equal(t, tt.errorCode, err.GetErrorCode())
+			assert.Equal(t, tt.statusCode, err.StatusCode)
+			assert.Equal(t, tt.skipRetry, types.IsSkipRetryError(err))
+			assert.Nil(t, usage)
+			if tt.wantEmptyBody {
+				assert.Empty(t, recorder.Body.String())
+			} else {
+				assert.Contains(t, recorder.Body.String(), tt.wantBody)
+			}
 		})
 	}
 }
@@ -180,8 +204,9 @@ func TestOpenaiImageStreamHandlerRejectsAbnormalTerminationWithoutCompletedImage
 	usage, err := OpenaiImageStreamHandler(c, info, resp)
 
 	require.NotNil(t, err)
-	assert.Equal(t, types.ErrorCodeBadResponse, err.GetErrorCode())
-	assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+	assert.Equal(t, types.ErrorCodeEmptyResponse, err.GetErrorCode())
+	assert.Equal(t, http.StatusInternalServerError, err.StatusCode)
+	assert.False(t, types.IsSkipRetryError(err))
 	assert.Equal(t, "image stream ended before a completed image was received", err.Error())
 	assert.Nil(t, usage)
 	require.NotNil(t, info.StreamStatus)
@@ -230,10 +255,10 @@ func TestOpenaiImageStreamHandlerRejectsCompletedEventsWithoutImageData(t *testi
 			usage, err := OpenaiImageStreamHandler(c, info, resp)
 
 			require.NotNil(t, err)
-			assert.Equal(t, types.ErrorCodeBadResponse, err.GetErrorCode())
-			assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+			assert.Equal(t, types.ErrorCodeEmptyResponse, err.GetErrorCode())
+			assert.Equal(t, http.StatusInternalServerError, err.StatusCode)
+			assert.False(t, types.IsSkipRetryError(err))
 			assert.Contains(t, strings.ToLower(err.Error()), "image")
-			assert.True(t, types.IsSkipRetryError(err))
 			assert.Nil(t, usage)
 			assert.NotContains(t, recorder.Body.String(), "data: [DONE]")
 		})
@@ -574,8 +599,9 @@ func TestOpenaiImageHandlerRejectsResponsesWithoutValidImageData(t *testing.T) {
 			usage, err := OpenaiImageHandler(c, info, resp)
 
 			require.NotNil(t, err)
-			assert.Equal(t, types.ErrorCodeBadResponse, err.GetErrorCode())
-			assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+			assert.Equal(t, types.ErrorCodeEmptyResponse, err.GetErrorCode())
+			assert.Equal(t, http.StatusInternalServerError, err.StatusCode)
+			assert.False(t, types.IsSkipRetryError(err))
 			assert.Contains(t, strings.ToLower(err.Error()), "image")
 			assert.Nil(t, usage, "usage-only responses must not reach billing as successful usage")
 			assert.Empty(t, recorder.Body.String(), "invalid image responses must not be forwarded as success")
@@ -615,8 +641,9 @@ func TestOpenaiImageJSONAsStreamRejectsResponsesWithoutValidImageData(t *testing
 			usage, err := OpenaiImageStreamHandler(c, info, resp)
 
 			require.NotNil(t, err)
-			assert.Equal(t, types.ErrorCodeBadResponse, err.GetErrorCode())
-			assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+			assert.Equal(t, types.ErrorCodeEmptyResponse, err.GetErrorCode())
+			assert.Equal(t, http.StatusInternalServerError, err.StatusCode)
+			assert.False(t, types.IsSkipRetryError(err))
 			assert.Contains(t, strings.ToLower(err.Error()), "image")
 			assert.Nil(t, usage, "usage-only responses must not reach billing as successful usage")
 			assert.NotContains(t, recorder.Body.String(), "image_generation.completed")

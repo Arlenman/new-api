@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -195,6 +196,100 @@ func TestStreamScannerHandler_SkipsNonDataLines(t *testing.T) {
 	})
 
 	assert.Equal(t, int64(100), count.Load())
+}
+
+func TestStreamScannerHandlerCountsOnlyFramesSuccessfullyHandledAsBusinessData(t *testing.T) {
+	testCases := []struct {
+		name       string
+		body       string
+		markError  bool
+		wantCalled int
+		wantCount  int
+	}{
+		{
+			name:       "malformed JSON is not a business response",
+			body:       "data: not-json\n",
+			wantCalled: 1,
+			wantCount:  0,
+		},
+		{
+			name:       "truncated JSON is not a business response",
+			body:       "data: {\"choices\":[\n",
+			wantCalled: 1,
+			wantCount:  0,
+		},
+		{
+			name:       "error-only JSON is not a business response",
+			body:       "data: {\"error\":{\"message\":\"upstream failed\"}}\n",
+			wantCalled: 1,
+			wantCount:  0,
+		},
+		{
+			name:       "provider handler error does not count parsed output",
+			body:       "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n",
+			markError:  true,
+			wantCalled: 1,
+			wantCount:  0,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			c, resp, info := setupStreamTest(t, strings.NewReader(testCase.body))
+			var called int
+			StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+				called++
+				if testCase.markError {
+					sr.Error(fmt.Errorf("provider could not decode frame"))
+				}
+			})
+			assert.Equal(t, testCase.wantCalled, called)
+			assert.Equal(t, testCase.wantCount, info.ReceivedResponseCount)
+		})
+	}
+}
+
+func TestStreamScannerHandlerCountsAdapterMarkedBusinessResponse(t *testing.T) {
+	c, resp, info := setupStreamTest(t, strings.NewReader("data: provider-specific-event\n"))
+	common.SetContextKey(c, constant.ContextKeyRelayResponseBoundaryInstalled, true)
+	common.SetContextKey(c, constant.ContextKeyRelayBusinessResponseWritten, false)
+
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+		assert.Equal(t, "provider-specific-event", data)
+		common.SetContextKey(c, constant.ContextKeyRelayBusinessResponseWritten, true)
+	})
+
+	assert.Equal(t, 1, info.ReceivedResponseCount)
+}
+
+func TestStreamScannerHandlerDoesNotCountAdapterMarkedBusinessResponseAfterFailure(t *testing.T) {
+	c, resp, info := setupStreamTest(t, strings.NewReader("data: provider-specific-event\n"))
+	common.SetContextKey(c, constant.ContextKeyRelayResponseBoundaryInstalled, true)
+	common.SetContextKey(c, constant.ContextKeyRelayBusinessResponseWritten, false)
+
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+		assert.Equal(t, "provider-specific-event", data)
+		common.SetContextKey(c, constant.ContextKeyRelayBusinessResponseWritten, true)
+		sr.Error(fmt.Errorf("adapter failed after writing response"))
+	})
+
+	assert.Zero(t, info.ReceivedResponseCount)
+}
+
+func TestStreamScannerHandlerCountsBusinessFrameAfterPreviousFrameError(t *testing.T) {
+	body := "data: {\"choices\":[{\"delta\":{\"content\":\"bad\"}}]}\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n"
+	c, resp, info := setupStreamTest(t, strings.NewReader(body))
+	var called int
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+		called++
+		if called == 1 {
+			sr.Error(fmt.Errorf("first frame failed"))
+		}
+	})
+
+	assert.Equal(t, 2, called)
+	assert.Equal(t, 1, info.ReceivedResponseCount)
 }
 
 func TestStreamScannerHandler_DataWithExtraSpaces(t *testing.T) {

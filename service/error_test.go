@@ -159,3 +159,29 @@ func withDebugEnabled(t *testing.T, enabled bool) {
 		common.DebugEnabled = oldDebug
 	})
 }
+
+func TestRelayErrorHandlerPreservesOriginalStatusCode(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"upstream failed"}}`)),
+	}
+
+	newAPIError := RelayErrorHandler(context.Background(), resp, false)
+
+	require.NotNil(t, newAPIError)
+	require.Equal(t, http.StatusInternalServerError, newAPIError.StatusCode)
+	require.Equal(t, http.StatusInternalServerError, newAPIError.OriginalStatusCode)
+}
+
+func TestRelayErrorHandlerPreservesOriginalStatusCodeAfterMapping(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"upstream failed"}}`)),
+	}
+
+	newAPIError := RelayErrorHandler(context.Background(), resp, false)
+	ResetStatusCode(newAPIError, `{"500":502}`)
+
+	require.Equal(t, http.StatusBadGateway, newAPIError.StatusCode)
+	require.Equal(t, http.StatusInternalServerError, newAPIError.OriginalStatusCode)
+}

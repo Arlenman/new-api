@@ -148,6 +148,9 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		if newApiErr != nil {
 			return newApiErr
 		}
+		if newApiErr = validateRelayResponseBoundary(c, info); newApiErr != nil {
+			return newApiErr
+		}
 
 		service.PostTextConsumeQuota(c, info, usage, nil)
 		return nil
@@ -219,6 +222,9 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	if newAPIError != nil {
 		// reset status code 重置状态码
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+		return newAPIError
+	}
+	if newAPIError = validateRelayResponseBoundary(c, info); newAPIError != nil {
 		return newAPIError
 	}
 
