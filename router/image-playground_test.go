@@ -9,11 +9,13 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/middleware"
-	"github.com/gin-contrib/sessions"
-	"github.com/gin-contrib/sessions/cookie"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestImagePlaygroundHandlerServesOnlyBuiltToolAssetsWithExpectedCachePolicy(t *testing.T) {
@@ -60,8 +62,45 @@ func TestImagePlaygroundHandlerServesOnlyBuiltToolAssetsWithExpectedCachePolicy(
 	assert.NotContains(t, missing.Body.String(), "tool index")
 }
 
-func TestImagePlaygroundSessionAuthWorksWithoutDashboardHeaderAndAuthFailuresAreNotCached(t *testing.T) {
+func TestImagePlaygroundAccessTokenAuthIgnoresForgedDashboardHeaderAndAuthFailuresAreNotCached(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	previousDB := model.DB
+	previousRedis := common.RedisEnabled
+	previousSecret := common.SessionSecret
+	previousDatabaseType := common.MainDatabaseType()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}))
+	model.DB = db
+	common.RedisEnabled = false
+	common.SessionSecret = "image-playground-access-token-test-secret"
+	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
+	t.Cleanup(func() {
+		model.DB = previousDB
+		common.RedisEnabled = previousRedis
+		common.SessionSecret = previousSecret
+		common.SetMainDatabaseType(previousDatabaseType)
+		_ = sqlDB.Close()
+	})
+
+	user := &model.User{
+		Id: 123, Username: "image-playground-owner", Password: "unused-password-hash",
+		Role: common.RoleCommonUser, Status: common.UserStatusEnabled, Group: "default",
+		AuthVersion: 1, AffCode: "image-playground-owner-aff",
+	}
+	require.NoError(t, db.Create(user).Error)
+	forgedUser := &model.User{
+		Id: 456, Username: "image-playground-forged", Password: "unused-password-hash",
+		Role: common.RoleCommonUser, Status: common.UserStatusEnabled, Group: "default",
+		AuthVersion: 1, AffCode: "image-playground-forged-aff",
+	}
+	require.NoError(t, db.Create(forgedUser).Error)
+	bundle, err := service.CreateLoginSession(user.Id, "password", "127.0.0.1", "image-playground-router-test")
+	require.NoError(t, err)
+
 	dist := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dist, "index.html"), []byte("<html>tool index</html>"), 0o644))
 	buildInfo, err := common.Marshal(map[string]string{
@@ -74,19 +113,11 @@ func TestImagePlaygroundSessionAuthWorksWithoutDashboardHeaderAndAuthFailuresAre
 	require.NoError(t, err)
 
 	engine := gin.New()
-	engine.Use(sessions.Sessions("session", cookie.NewStore([]byte("image-playground-test-secret"))))
 	engine.Use(middleware.Cache())
-	engine.GET("/login-fixture", func(c *gin.Context) {
-		session := sessions.Default(c)
-		session.Set("id", 123)
-		session.Set("status", common.UserStatusEnabled)
-		require.NoError(t, session.Save())
-		c.Status(http.StatusNoContent)
-	})
 	engine.GET(
 		imagePlaygroundRoute+"/*filepath",
 		middleware.DisableCache(),
-		middleware.TokenOrUserAuth(),
+		middleware.UserToolAssetAuth(model.UserToolImagePlayground),
 		tool.serve,
 	)
 
@@ -94,12 +125,10 @@ func TestImagePlaygroundSessionAuthWorksWithoutDashboardHeaderAndAuthFailuresAre
 	assert.Equal(t, http.StatusUnauthorized, unauthenticated.Code)
 	assert.Equal(t, "no-store, no-cache, must-revalidate, private, max-age=0", unauthenticated.Header().Get("Cache-Control"))
 
-	login := performImagePlaygroundRequest(engine, "/login-fixture")
-	require.Equal(t, http.StatusNoContent, login.Code)
-	require.NotEmpty(t, login.Result().Cookies())
-
 	authenticatedRequest := httptest.NewRequest(http.MethodGet, imagePlaygroundRoute+"/?new_api_user=456", nil)
-	authenticatedRequest.AddCookie(login.Result().Cookies()[0])
+	authenticatedRequest.Header.Set("Authorization", "Bearer "+bundle.AccessToken)
+	authenticatedRequest.Header.Set("X-Auth-Session", bundle.Session.SID)
+	authenticatedRequest.Header.Set("New-Api-User", "456")
 	authenticated := httptest.NewRecorder()
 	engine.ServeHTTP(authenticated, authenticatedRequest)
 
@@ -108,6 +137,31 @@ func TestImagePlaygroundSessionAuthWorksWithoutDashboardHeaderAndAuthFailuresAre
 	assert.NotContains(t, authenticated.Body.String(), "window.__NEW_API_USER_ID__=456")
 	assert.Equal(t, "no-cache", authenticated.Header().Get("Cache-Control"))
 	assert.Contains(t, authenticated.Body.String(), "tool index")
+
+	cookieRequest := httptest.NewRequest(http.MethodGet, imagePlaygroundRoute+"/?new_api_user=456", nil)
+	cookieRequest.AddCookie(&http.Cookie{
+		Name:  "new_api_user_tool_access",
+		Value: bundle.AccessToken,
+	})
+	cookieRequest.Header.Set("New-Api-User", "456")
+	cookieAuthenticated := httptest.NewRecorder()
+	engine.ServeHTTP(cookieAuthenticated, cookieRequest)
+
+	assert.Equal(t, http.StatusOK, cookieAuthenticated.Code)
+	assert.Contains(t, cookieAuthenticated.Body.String(), "window.__NEW_API_USER_ID__=123")
+	assert.NotContains(t, cookieAuthenticated.Body.String(), "window.__NEW_API_USER_ID__=456")
+	assert.Equal(t, "no-cache", cookieAuthenticated.Header().Get("Cache-Control"))
+	assert.Contains(t, cookieAuthenticated.Body.String(), "tool index")
+
+	opaqueCookieRequest := httptest.NewRequest(http.MethodGet, imagePlaygroundRoute+"/", nil)
+	opaqueCookieRequest.AddCookie(&http.Cookie{
+		Name:  service.UserToolAccessCookieName,
+		Value: "opaque-dashboard-pat-or-relay-key",
+	})
+	opaqueCookieResponse := httptest.NewRecorder()
+	engine.ServeHTTP(opaqueCookieResponse, opaqueCookieRequest)
+	assert.Equal(t, http.StatusUnauthorized, opaqueCookieResponse.Code)
+	assert.Equal(t, "no-store, no-cache, must-revalidate, private, max-age=0", opaqueCookieResponse.Header().Get("Cache-Control"))
 }
 
 func TestLoadImagePlaygroundRejectsIncompleteDistribution(t *testing.T) {

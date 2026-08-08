@@ -503,3 +503,43 @@ func TestGetTokenTagQuotaAnalyticsAggregatesRepeatedModelLogs(t *testing.T) {
 	require.Equal(t, 2, aggregated.Count)
 	require.EqualValues(t, 1600, aggregated.LastUsedAt)
 }
+
+func TestGetTokenTagQuotaAnalyticsWithTrendGroupsHourlyUsageByTag(t *testing.T) {
+	truncateTables(t)
+	require.NoError(t, DB.Create(&User{Id: 1, Username: "alice", Password: "password123", AffCode: "alice-trend"}).Error)
+	seedTokenForTags(t, Token{Id: 501, UserId: 1, Key: "trend-primary", Name: "primary"})
+	seedTokenForTags(t, Token{Id: 502, UserId: 1, Key: "trend-secondary", Name: "secondary"})
+	require.NoError(t, ReplaceTokenTags(1, 501, []string{"Client A"}))
+	require.NoError(t, ReplaceTokenTags(1, 502, []string{"Internal"}))
+
+	logs := []Log{
+		{UserId: 1, Username: "alice", TokenId: 501, TokenName: "primary", ModelName: "gpt-a", Type: LogTypeConsume, Quota: 10, PromptTokens: 2, CompletionTokens: 3, CreatedAt: 3601},
+		{UserId: 1, Username: "alice", TokenId: 501, TokenName: "primary", ModelName: "gpt-b", Type: LogTypeConsume, Quota: 15, PromptTokens: 4, CompletionTokens: 1, CreatedAt: 3650},
+		{UserId: 1, Username: "alice", TokenId: 502, TokenName: "secondary", ModelName: "gpt-a", Type: LogTypeConsume, Quota: 20, PromptTokens: 5, CompletionTokens: 5, CreatedAt: 3700},
+		{UserId: 1, Username: "alice", TokenId: 501, TokenName: "primary", ModelName: "gpt-a", Type: LogTypeConsume, Quota: 30, PromptTokens: 6, CompletionTokens: 4, CreatedAt: 7201},
+	}
+	for index := range logs {
+		require.NoError(t, LOG_DB.Create(&logs[index]).Error)
+	}
+
+	result, err := GetTokenTagQuotaAnalyticsWithTrend(3600, 10800, "", 0, common.RoleAdminUser, TokenTagQuotaFilters{})
+	require.NoError(t, err)
+	require.Equal(t, TokenTagQuotaSummary{Quota: 75, TokenUsed: 30, Count: 4}, result.Summary)
+	require.Len(t, result.Trend, 3)
+	require.Equal(t, TokenTagQuotaTrendData{
+		TagID:     result.Trend[0].TagID,
+		TagName:   "Client A",
+		UserID:    1,
+		Username:  "alice",
+		CreatedAt: 3600,
+		TokenUsed: 10,
+		Count:     2,
+		Quota:     25,
+	}, *result.Trend[0])
+	require.Equal(t, "Internal", result.Trend[1].TagName)
+	require.EqualValues(t, 3600, result.Trend[1].CreatedAt)
+	require.Equal(t, 20, result.Trend[1].Quota)
+	require.Equal(t, "Client A", result.Trend[2].TagName)
+	require.EqualValues(t, 7200, result.Trend[2].CreatedAt)
+	require.Equal(t, 30, result.Trend[2].Quota)
+}

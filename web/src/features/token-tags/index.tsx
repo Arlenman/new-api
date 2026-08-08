@@ -22,8 +22,10 @@ import {
   ArrowUp,
   ArrowUpDown,
   BarChart3,
+  LineChart,
   List,
   Loader2,
+  PieChart,
   RotateCcw,
   Search,
 } from 'lucide-react'
@@ -58,6 +60,7 @@ import {
 import type {
   TokenTagQuotaDataItem,
   TokenTagQuotaSummary,
+  TokenTagQuotaTrendItem,
 } from '@/features/dashboard/types'
 import { fetchApiKeyIPLocations } from '@/features/keys/api'
 import { RecordedIPsCell } from '@/features/keys/components/api-keys-cells'
@@ -68,16 +71,20 @@ import { formatNumber, formatQuota } from '@/lib/format'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { DistributionChart } from './components/distribution-chart'
 import { RankingChart } from './components/ranking-chart'
 import {
   TagMultiSelect,
   type TagMultiSelectOption,
 } from './components/tag-multi-select'
+import { TrendChart } from './components/trend-chart'
 import {
   NO_TAG_FILTER_VALUE,
   TOKEN_TAGS_CONTENT_CLASS,
   TOKEN_TAGS_FIXED_CONTENT,
+  buildDistributionChartData,
   buildKeyRankingChartData,
+  buildTagTrendChartData,
   buildTagRankingChartData,
   buildTokenKeyRows,
   buildTokenTagOptionNames,
@@ -89,9 +96,10 @@ import {
   type TokenTagRankingMetric,
   type TokenTagSortKey,
   type TokenTagSortState,
+  type TokenTagTrendGranularity,
 } from './lib'
 
-type ViewMode = 'table' | 'chart'
+type ViewMode = 'table' | 'bar' | 'pie' | 'trend'
 
 const TOKEN_IP_LOCATION_BATCH_SIZE = 50
 
@@ -182,8 +190,16 @@ export function TokenTagsDashboard() {
   const [stableRows, setStableRows] = useState<TokenTagQuotaDataItem[]>([])
   const [stableSummary, setStableSummary] =
     useState<TokenTagQuotaSummary>(EMPTY_SUMMARY)
+  const [stableTrend, setStableTrend] = useState<TokenTagQuotaTrendItem[]>([])
+  const [stableTrendRange, setStableTrendRange] = useState({
+    startTimestamp: toSeconds(defaultRange.start),
+    endTimestamp: toSeconds(defaultRange.end),
+  })
   const [viewMode, setViewMode] = useState<ViewMode>('table')
   const [metric, setMetric] = useState<TokenTagRankingMetric>('quota')
+  const [trendMetric, setTrendMetric] = useState<TokenTagRankingMetric>('quota')
+  const [trendGranularity, setTrendGranularity] =
+    useState<TokenTagTrendGranularity>('day')
   const [tagSort, setTagSort] = useState<TokenTagSortState>({
     key: 'quota',
     direction: 'desc',
@@ -236,8 +252,13 @@ export function TokenTagsDashboard() {
     if (query.data?.success) {
       setStableRows(query.data.data || [])
       setStableSummary(query.data.summary || EMPTY_SUMMARY)
+      setStableTrend(query.data.trend || [])
+      setStableTrendRange({
+        startTimestamp: toSeconds(appliedFilters.startTime),
+        endTimestamp: toSeconds(appliedFilters.endTime),
+      })
     }
-  }, [query.data])
+  }, [appliedFilters.endTime, appliedFilters.startTime, query.data])
 
   const rows = stableRows
   const optionRows = useMemo(() => {
@@ -352,6 +373,25 @@ export function TokenTagsDashboard() {
   const keyChart = useMemo(
     () => buildKeyRankingChartData(rows, metric, chartOptions),
     [chartOptions, metric, rows]
+  )
+  const tagDistribution = useMemo(
+    () => buildDistributionChartData(tagChart),
+    [tagChart]
+  )
+  const keyDistribution = useMemo(
+    () => buildDistributionChartData(keyChart),
+    [keyChart]
+  )
+  const trendChart = useMemo(
+    () =>
+      buildTagTrendChartData(
+        stableTrend,
+        trendMetric,
+        trendGranularity,
+        chartOptions,
+        stableTrendRange
+      ),
+    [chartOptions, stableTrend, trendGranularity, trendMetric, stableTrendRange]
   )
   const modelColorMap = useMemo(() => {
     const models = [...new Set([...tagChart.models, ...keyChart.models])].sort(
@@ -505,11 +545,29 @@ export function TokenTagsDashboard() {
               <Button
                 type='button'
                 size='sm'
-                variant={viewMode === 'chart' ? 'secondary' : 'ghost'}
-                onClick={() => setViewMode('chart')}
+                variant={viewMode === 'bar' ? 'secondary' : 'ghost'}
+                onClick={() => setViewMode('bar')}
               >
                 <BarChart3 className='size-4' />
                 {t('Bar Chart')}
+              </Button>
+              <Button
+                type='button'
+                size='sm'
+                variant={viewMode === 'pie' ? 'secondary' : 'ghost'}
+                onClick={() => setViewMode('pie')}
+              >
+                <PieChart className='size-4' />
+                {t('Pie Chart')}
+              </Button>
+              <Button
+                type='button'
+                size='sm'
+                variant={viewMode === 'trend' ? 'secondary' : 'ghost'}
+                onClick={() => setViewMode('trend')}
+              >
+                <LineChart className='size-4' />
+                {t('Trend Chart')}
               </Button>
             </div>
             <div className='flex flex-wrap items-center gap-2'>
@@ -534,7 +592,7 @@ export function TokenTagsDashboard() {
                   </Button>
                 </>
               )}
-              {viewMode === 'chart' && (
+              {(viewMode === 'bar' || viewMode === 'pie') && (
                 <div className='flex items-center gap-2'>
                   <span className='text-muted-foreground text-sm'>
                     {t('Ranking Metric')}
@@ -564,233 +622,318 @@ export function TokenTagsDashboard() {
                   </Select>
                 </div>
               )}
+              {viewMode === 'trend' && (
+                <>
+                  <div className='flex items-center gap-2'>
+                    <span className='text-muted-foreground text-sm'>
+                      {t('Usage Metric')}
+                    </span>
+                    <Select
+                      value={trendMetric}
+                      onValueChange={(value) =>
+                        setTrendMetric(value as TokenTagRankingMetric)
+                      }
+                    >
+                      <SelectTrigger className='w-40'>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent alignItemWithTrigger={false}>
+                        <SelectGroup>
+                          <SelectItem value='quota'>
+                            {t('Cost Consumption')}
+                          </SelectItem>
+                          <SelectItem value='token_used'>
+                            {t('Token Count')}
+                          </SelectItem>
+                          <SelectItem value='count'>
+                            {t('Request Count')}
+                          </SelectItem>
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className='flex items-center gap-2'>
+                    <span className='text-muted-foreground text-sm'>
+                      {t('Time Granularity')}
+                    </span>
+                    <Select
+                      value={trendGranularity}
+                      onValueChange={(value) =>
+                        setTrendGranularity(value as TokenTagTrendGranularity)
+                      }
+                    >
+                      <SelectTrigger className='w-32'>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent alignItemWithTrigger={false}>
+                        <SelectGroup>
+                          <SelectItem value='day'>{t('Daily')}</SelectItem>
+                          <SelectItem value='week'>{t('Weekly')}</SelectItem>
+                          <SelectItem value='month'>{t('Monthly')}</SelectItem>
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </>
+              )}
             </div>
           </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>{t('Tag Ranking')}</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {viewMode === 'chart' ? (
-                <RankingChart
-                  data={tagChart}
-                  metric={metric}
-                  colorMap={modelColorMap}
-                  kind='tag'
-                />
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className='w-16'>{t('No.')}</TableHead>
-                      {isAdmin && <TableHead>{t('User')}</TableHead>}
-                      <TableHead>{t('Key Tag')}</TableHead>
-                      <SortableHead
-                        label={t('Cost')}
-                        sortKey='quota'
-                        sort={tagSort}
-                        onSort={(key) =>
-                          setTagSort((current) =>
-                            getNextSortState(current, key)
-                          )
-                        }
-                        className='text-right'
-                      />
-                      <SortableHead
-                        label={t('Tokens')}
-                        sortKey='token_used'
-                        sort={tagSort}
-                        onSort={(key) =>
-                          setTagSort((current) =>
-                            getNextSortState(current, key)
-                          )
-                        }
-                        className='text-right'
-                      />
-                      <SortableHead
-                        label={t('Requests')}
-                        sortKey='count'
-                        sort={tagSort}
-                        onSort={(key) =>
-                          setTagSort((current) =>
-                            getNextSortState(current, key)
-                          )
-                        }
-                        className='text-right'
-                      />
-                      <SortableHead
-                        label={t('Last Used At')}
-                        sortKey='last_used_at'
-                        sort={tagSort}
-                        onSort={(key) =>
-                          setTagSort((current) =>
-                            getNextSortState(current, key)
-                          )
-                        }
-                      />
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {groupedRows.map((row, index) => (
-                      <TableRow
-                        key={`${row.user_id || row.username || 'self'}-${row.tag_id}-${row.tag_name}`}
-                      >
-                        <TableCell>{index + 1}</TableCell>
-                        {isAdmin && (
-                          <TableCell>{row.username || '-'}</TableCell>
-                        )}
-                        <TableCell className='font-medium'>
-                          {row.tag_name || t('No tags')}
-                        </TableCell>
-                        <TableCell className='text-right'>
-                          {formatQuota(row.quota || 0)}
-                        </TableCell>
-                        <TableCell className='text-right'>
-                          {formatNumber(row.token_used)}
-                        </TableCell>
-                        <TableCell className='text-right'>
-                          {formatNumber(row.count)}
-                        </TableCell>
-                        <TableCell>
-                          {formatTokenTagLastUsedAt(row.last_used_at)}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                    {!isInitialLoading && groupedRows.length === 0 && (
-                      <TableRow>
-                        <TableCell
-                          colSpan={isAdmin ? 7 : 6}
-                          className='text-muted-foreground h-24 text-center'
-                        >
-                          {t('No data')}
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              )}
-            </CardContent>
-          </Card>
+          {viewMode === 'trend' && (
+            <Card>
+              <CardHeader>
+                <CardTitle>{t('Tag Usage Trend')}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <TrendChart data={trendChart} metric={trendMetric} />
+              </CardContent>
+            </Card>
+          )}
 
-          <Card>
-            <CardHeader>
-              <CardTitle>{t('Key Ranking')}</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {viewMode === 'chart' ? (
-                <RankingChart
-                  data={keyChart}
-                  metric={metric}
-                  colorMap={modelColorMap}
-                  kind='key'
-                />
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className='w-16'>{t('No.')}</TableHead>
-                      {isAdmin && <TableHead>{t('User')}</TableHead>}
-                      <TableHead>{t('Key Tag')}</TableHead>
-                      <TableHead>{t('API Key')}</TableHead>
-                      {isRoot && <TableHead>{t('IP')}</TableHead>}
-                      <SortableHead
-                        label={t('Cost')}
-                        sortKey='quota'
-                        sort={keySort}
-                        onSort={(key) =>
-                          setKeySort((current) =>
-                            getNextSortState(current, key)
-                          )
-                        }
-                        className='text-right'
-                      />
-                      <SortableHead
-                        label={t('Tokens')}
-                        sortKey='token_used'
-                        sort={keySort}
-                        onSort={(key) =>
-                          setKeySort((current) =>
-                            getNextSortState(current, key)
-                          )
-                        }
-                        className='text-right'
-                      />
-                      <SortableHead
-                        label={t('Requests')}
-                        sortKey='count'
-                        sort={keySort}
-                        onSort={(key) =>
-                          setKeySort((current) =>
-                            getNextSortState(current, key)
-                          )
-                        }
-                        className='text-right'
-                      />
-                      <SortableHead
-                        label={t('Last Used At')}
-                        sortKey='last_used_at'
-                        sort={keySort}
-                        onSort={(key) =>
-                          setKeySort((current) =>
-                            getNextSortState(current, key)
-                          )
-                        }
-                      />
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {sortedKeyRows.map((row, index) => (
-                      <TableRow
-                        key={`${row.user_id || row.username || 'self'}-${row.tag_id}-${row.token_id}`}
-                      >
-                        <TableCell>{index + 1}</TableCell>
-                        {isAdmin && (
-                          <TableCell>{row.username || '-'}</TableCell>
-                        )}
-                        <TableCell>{row.tag_name || t('No tags')}</TableCell>
-                        <TableCell>
-                          {row.token_name || `#${row.token_id}`}
-                        </TableCell>
-                        {isRoot && (
-                          <TableCell>
-                            <RecordedIPsCell
-                              tokenId={row.token_id}
-                              ips={row.ips}
-                              onFetchLocation={handleFetchIPLocation}
-                              loadingIP={loadingIP}
-                            />
-                          </TableCell>
-                        )}
-                        <TableCell className='text-right'>
-                          {formatQuota(row.quota || 0)}
-                        </TableCell>
-                        <TableCell className='text-right'>
-                          {formatNumber(row.token_used)}
-                        </TableCell>
-                        <TableCell className='text-right'>
-                          {formatNumber(row.count)}
-                        </TableCell>
-                        <TableCell>
-                          {formatTokenTagLastUsedAt(row.last_used_at)}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                    {!isInitialLoading && sortedKeyRows.length === 0 && (
+          {viewMode !== 'trend' && (
+            <Card>
+              <CardHeader>
+                <CardTitle>{t('Tag Ranking')}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {viewMode === 'bar' && (
+                  <RankingChart
+                    data={tagChart}
+                    metric={metric}
+                    colorMap={modelColorMap}
+                    kind='tag'
+                  />
+                )}
+                {viewMode === 'pie' && (
+                  <DistributionChart
+                    data={tagDistribution}
+                    metric={metric}
+                    kind='tag'
+                  />
+                )}
+                {viewMode === 'table' && (
+                  <Table>
+                    <TableHeader>
                       <TableRow>
-                        <TableCell
-                          colSpan={keyTableColumnCount}
-                          className='text-muted-foreground h-24 text-center'
-                        >
-                          {t('No data')}
-                        </TableCell>
+                        <TableHead className='w-16'>{t('No.')}</TableHead>
+                        {isAdmin && <TableHead>{t('User')}</TableHead>}
+                        <TableHead>{t('Key Tag')}</TableHead>
+                        <SortableHead
+                          label={t('Cost')}
+                          sortKey='quota'
+                          sort={tagSort}
+                          onSort={(key) =>
+                            setTagSort((current) =>
+                              getNextSortState(current, key)
+                            )
+                          }
+                          className='text-right'
+                        />
+                        <SortableHead
+                          label={t('Tokens')}
+                          sortKey='token_used'
+                          sort={tagSort}
+                          onSort={(key) =>
+                            setTagSort((current) =>
+                              getNextSortState(current, key)
+                            )
+                          }
+                          className='text-right'
+                        />
+                        <SortableHead
+                          label={t('Requests')}
+                          sortKey='count'
+                          sort={tagSort}
+                          onSort={(key) =>
+                            setTagSort((current) =>
+                              getNextSortState(current, key)
+                            )
+                          }
+                          className='text-right'
+                        />
+                        <SortableHead
+                          label={t('Last Used At')}
+                          sortKey='last_used_at'
+                          sort={tagSort}
+                          onSort={(key) =>
+                            setTagSort((current) =>
+                              getNextSortState(current, key)
+                            )
+                          }
+                        />
                       </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              )}
-            </CardContent>
-          </Card>
+                    </TableHeader>
+                    <TableBody>
+                      {groupedRows.map((row, index) => (
+                        <TableRow
+                          key={`${row.user_id || row.username || 'self'}-${row.tag_id}-${row.tag_name}`}
+                        >
+                          <TableCell>{index + 1}</TableCell>
+                          {isAdmin && (
+                            <TableCell>{row.username || '-'}</TableCell>
+                          )}
+                          <TableCell className='font-medium'>
+                            {row.tag_name || t('No tags')}
+                          </TableCell>
+                          <TableCell className='text-right'>
+                            {formatQuota(row.quota || 0)}
+                          </TableCell>
+                          <TableCell className='text-right'>
+                            {formatNumber(row.token_used)}
+                          </TableCell>
+                          <TableCell className='text-right'>
+                            {formatNumber(row.count)}
+                          </TableCell>
+                          <TableCell>
+                            {formatTokenTagLastUsedAt(row.last_used_at)}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                      {!isInitialLoading && groupedRows.length === 0 && (
+                        <TableRow>
+                          <TableCell
+                            colSpan={isAdmin ? 7 : 6}
+                            className='text-muted-foreground h-24 text-center'
+                          >
+                            {t('No data')}
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {viewMode !== 'trend' && (
+            <Card>
+              <CardHeader>
+                <CardTitle>{t('Key Ranking')}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {viewMode === 'bar' && (
+                  <RankingChart
+                    data={keyChart}
+                    metric={metric}
+                    colorMap={modelColorMap}
+                    kind='key'
+                  />
+                )}
+                {viewMode === 'pie' && (
+                  <DistributionChart
+                    data={keyDistribution}
+                    metric={metric}
+                    kind='key'
+                  />
+                )}
+                {viewMode === 'table' && (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className='w-16'>{t('No.')}</TableHead>
+                        {isAdmin && <TableHead>{t('User')}</TableHead>}
+                        <TableHead>{t('Key Tag')}</TableHead>
+                        <TableHead>{t('API Key')}</TableHead>
+                        {isRoot && <TableHead>{t('IP')}</TableHead>}
+                        <SortableHead
+                          label={t('Cost')}
+                          sortKey='quota'
+                          sort={keySort}
+                          onSort={(key) =>
+                            setKeySort((current) =>
+                              getNextSortState(current, key)
+                            )
+                          }
+                          className='text-right'
+                        />
+                        <SortableHead
+                          label={t('Tokens')}
+                          sortKey='token_used'
+                          sort={keySort}
+                          onSort={(key) =>
+                            setKeySort((current) =>
+                              getNextSortState(current, key)
+                            )
+                          }
+                          className='text-right'
+                        />
+                        <SortableHead
+                          label={t('Requests')}
+                          sortKey='count'
+                          sort={keySort}
+                          onSort={(key) =>
+                            setKeySort((current) =>
+                              getNextSortState(current, key)
+                            )
+                          }
+                          className='text-right'
+                        />
+                        <SortableHead
+                          label={t('Last Used At')}
+                          sortKey='last_used_at'
+                          sort={keySort}
+                          onSort={(key) =>
+                            setKeySort((current) =>
+                              getNextSortState(current, key)
+                            )
+                          }
+                        />
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {sortedKeyRows.map((row, index) => (
+                        <TableRow
+                          key={`${row.user_id || row.username || 'self'}-${row.tag_id}-${row.token_id}`}
+                        >
+                          <TableCell>{index + 1}</TableCell>
+                          {isAdmin && (
+                            <TableCell>{row.username || '-'}</TableCell>
+                          )}
+                          <TableCell>{row.tag_name || t('No tags')}</TableCell>
+                          <TableCell>
+                            {row.token_name || `#${row.token_id}`}
+                          </TableCell>
+                          {isRoot && (
+                            <TableCell>
+                              <RecordedIPsCell
+                                tokenId={row.token_id}
+                                ips={row.ips}
+                                onFetchLocation={handleFetchIPLocation}
+                                loadingIP={loadingIP}
+                              />
+                            </TableCell>
+                          )}
+                          <TableCell className='text-right'>
+                            {formatQuota(row.quota || 0)}
+                          </TableCell>
+                          <TableCell className='text-right'>
+                            {formatNumber(row.token_used)}
+                          </TableCell>
+                          <TableCell className='text-right'>
+                            {formatNumber(row.count)}
+                          </TableCell>
+                          <TableCell>
+                            {formatTokenTagLastUsedAt(row.last_used_at)}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                      {!isInitialLoading && sortedKeyRows.length === 0 && (
+                        <TableRow>
+                          <TableCell
+                            colSpan={keyTableColumnCount}
+                            className='text-muted-foreground h-24 text-center'
+                          >
+                            {t('No data')}
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          )}
         </div>
       </SectionPageLayout.Content>
     </SectionPageLayout>

@@ -41,6 +41,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import {
+  createUserToolBrowserSession,
   createUserToolRuntimeSession,
   getAllUserToolTokens,
   getUserToolPreference,
@@ -122,6 +123,13 @@ export function InfiniteCanvas(props: InfiniteCanvasProps) {
       setKeysLoading(true)
       setErrorMessage(null)
       try {
+        const browserSession =
+          await createUserToolBrowserSession('infinite-canvas')
+        if (!browserSession.success || !browserSession.data) {
+          throw new Error(
+            browserSession.message || t('Failed to start tool session')
+          )
+        }
         const response = await getAllUserToolTokens('infinite-canvas')
         if (!response.success || !response.data) {
           throw new Error(response.message || 'Failed to load API keys')

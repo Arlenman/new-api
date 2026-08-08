@@ -6,7 +6,7 @@ import test from 'node:test'
 import vm from 'node:vm'
 
 const require = createRequire(import.meta.url)
-const ts = require('../../web/default/node_modules/typescript/lib/typescript.js')
+const ts = require('../../web/node_modules/typescript/lib/typescript.js')
 const sourceUrl = new URL('./new-api-sync.ts', import.meta.url)
 const source = await readFile(sourceUrl, 'utf8')
 
@@ -63,7 +63,7 @@ function jsonEnvelope(data) {
 function loadSyncModule({ db = {}, storage = {}, globals = {} } = {}) {
   const output = ts.transpileModule(source, {
     compilerOptions: {
-      target: ts.ScriptTarget.ES2022,
+      target: ts.ScriptTarget.ES2020,
       module: ts.ModuleKind.CommonJS,
       esModuleInterop: true,
     },
@@ -108,8 +108,10 @@ function loadSyncModule({ db = {}, storage = {}, globals = {} } = {}) {
     ...db,
   }
   const storageModule = {
+    clearNewApiImagePlaygroundPendingDeletion: () => {},
     getNewApiImagePlaygroundAssetCacheName: () => 'new-api-image-playground-assets-user-7',
     getNewApiImagePlaygroundMetadataKey: () => 'new-api-image-playground-metadata-user-7',
+    getNewApiImagePlaygroundPendingDeletions: () => [],
     getNewApiImagePlaygroundStorageKey: () => 'new-api-image-playground-state-user-7',
     getNewApiImagePlaygroundUserId: () => '7',
     NEW_API_IMAGE_PLAYGROUND_STORAGE_CHANGED_EVENT: 'new-api-image-playground-storage-changed',
@@ -138,8 +140,8 @@ function loadSyncModule({ db = {}, storage = {}, globals = {} } = {}) {
     FileReader: TestFileReader,
     Event,
     StorageEvent: class StorageEvent {},
-    setTimeout,
-    clearTimeout,
+    setTimeout: globals.setTimeout ?? setTimeout,
+    clearTimeout: globals.clearTimeout ?? clearTimeout,
     fetch: globals.fetch,
     caches,
     window,
@@ -518,6 +520,297 @@ test('first sync restores remote image and task into an empty browser without up
     syncBodies[0].mutations.some((mutation) => mutation.deleted && (mutation.kind === 'image' || mutation.kind === 'task')),
     false,
   )
+})
+
+test('explicit task deletion without metadata retries the server revision conflict and clears the tombstone', async () => {
+  const metadataKey = 'new-api-image-playground-metadata-user-7'
+  const localStorage = createLocalStorage()
+  const pendingDeletions = [{ kind: 'task', key: 'deleted-task' }]
+  const cleared = []
+  const syncBodies = []
+  const restoredTasks = []
+  const liveTask = remoteItem({
+    kind: 'task',
+    key: 'deleted-task',
+    revision: 4,
+    status: 'completed',
+    payload: { id: 'deleted-task', status: 'completed', createdAt: 10 },
+  })
+  const deletedTask = remoteItem({
+    ...liveTask,
+    revision: 5,
+    status: 'deleted',
+    payload: {},
+    deleted: true,
+  })
+  const fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url
+    if (url === '/api/user-tools/image-playground/sync') {
+      const body = JSON.parse(init.body)
+      syncBodies.push(body)
+      const deletion = body.mutations.find((mutation) => mutation.kind === 'task')
+      if (!deletion) return jsonEnvelope({ results: [], cursor: 0 })
+      if (deletion.base_revision === 0) {
+        return jsonEnvelope({
+          results: [{
+            client_mutation_id: deletion.client_mutation_id,
+            kind: deletion.kind,
+            key: deletion.key,
+            result: 'conflict',
+            item: liveTask,
+          }],
+          cursor: 4,
+        })
+      }
+      assert.equal(deletion.base_revision, 4)
+      return jsonEnvelope({
+        results: [{
+          client_mutation_id: deletion.client_mutation_id,
+          kind: deletion.kind,
+          key: deletion.key,
+          result: 'applied',
+          item: deletedTask,
+        }],
+        cursor: 5,
+      })
+    }
+    if (url.startsWith('/api/user-tools/image-playground/bootstrap?')) {
+      return jsonEnvelope({
+        items: [liveTask],
+        assets: [],
+        cursor: 5,
+        next_after_id: '',
+        has_more: false,
+      })
+    }
+    if (url.startsWith('/api/user-tools/image-playground/changes?cursor=5')) {
+      return jsonEnvelope({ items: [], assets: [], next_cursor: 5, has_more: false })
+    }
+    throw new Error(`Unexpected request: ${url}`)
+  }
+  const { module } = loadSyncModule({
+    db: {
+      putTask: async (task) => restoredTasks.push(task),
+    },
+    storage: {
+      getNewApiImagePlaygroundPendingDeletions: () => [...pendingDeletions],
+      clearNewApiImagePlaygroundPendingDeletion: (kind, key) => {
+        cleared.push({ kind, key })
+        const index = pendingDeletions.findIndex((value) => value.kind === kind && value.key === key)
+        if (index >= 0) pendingDeletions.splice(index, 1)
+      },
+    },
+    globals: { localStorage, fetch },
+  })
+
+  await module.initializeNewApiImagePlaygroundSync()
+
+  const taskMutations = syncBodies
+    .flatMap((body) => body.mutations)
+    .filter((mutation) => mutation.kind === 'task')
+  assert.deepEqual(taskMutations.map(({ base_revision, deleted }) => ({ base_revision, deleted })), [
+    { base_revision: 0, deleted: true },
+    { base_revision: 4, deleted: true },
+  ])
+  assert.deepEqual(restoredTasks, [])
+  assert.deepEqual(cleared, [{ kind: 'task', key: 'deleted-task' }])
+  assert.deepEqual(pendingDeletions, [])
+  const taskEntry = JSON.parse(localStorage.value(metadataKey)).entries['task\u0000deleted-task']
+  assert.equal(taskEntry.revision, 5)
+  assert.equal(taskEntry.deleted, true)
+})
+
+test('pending task deletion survives a failed sync and is retried after module reload', async () => {
+  const pendingKey = 'pending-task-deletions'
+  const localStorage = createLocalStorage({
+    [pendingKey]: JSON.stringify([{ kind: 'task', key: 'reload-delete-task' }]),
+  })
+  const storage = {
+    getNewApiImagePlaygroundPendingDeletions: () => JSON.parse(localStorage.value(pendingKey) ?? '[]'),
+    clearNewApiImagePlaygroundPendingDeletion: (kind, key) => {
+      const remaining = JSON.parse(localStorage.value(pendingKey) ?? '[]')
+        .filter((value) => value.kind !== kind || value.key !== key)
+      localStorage.setItem(pendingKey, JSON.stringify(remaining))
+    },
+  }
+  const failedBodies = []
+  const first = loadSyncModule({
+    storage,
+    globals: {
+      localStorage,
+      fetch: async (input, init = {}) => {
+        const url = typeof input === 'string' ? input : input.url
+        if (url === '/api/user-tools/image-playground/sync') {
+          failedBodies.push(JSON.parse(init.body))
+          return new Response('', { status: 503 })
+        }
+        throw new Error(`Unexpected request: ${url}`)
+      },
+    },
+  })
+
+  await first.module.initializeNewApiImagePlaygroundSync()
+
+  assert.equal(failedBodies[0].mutations.some((mutation) => mutation.kind === 'task' && mutation.deleted), true)
+  assert.equal(JSON.parse(localStorage.value(pendingKey)).length, 1)
+
+  const successfulBodies = []
+  const second = loadSyncModule({
+    storage,
+    globals: {
+      localStorage,
+      fetch: async (input, init = {}) => {
+        const url = typeof input === 'string' ? input : input.url
+        if (url === '/api/user-tools/image-playground/sync') {
+          const body = JSON.parse(init.body)
+          successfulBodies.push(body)
+          const deletion = body.mutations.find((mutation) => mutation.kind === 'task')
+          return jsonEnvelope({
+            results: deletion ? [{
+              client_mutation_id: deletion.client_mutation_id,
+              kind: deletion.kind,
+              key: deletion.key,
+              result: 'applied',
+              item: remoteItem({
+                kind: deletion.kind,
+                key: deletion.key,
+                status: 'deleted',
+                payload: {},
+                deleted: true,
+              }),
+            }] : [],
+            cursor: 1,
+          })
+        }
+        if (url.startsWith('/api/user-tools/image-playground/bootstrap?')) {
+          return jsonEnvelope({ items: [], assets: [], cursor: 1, next_after_id: '', has_more: false })
+        }
+        if (url.startsWith('/api/user-tools/image-playground/changes?cursor=1')) {
+          return jsonEnvelope({ items: [], assets: [], next_cursor: 1, has_more: false })
+        }
+        throw new Error(`Unexpected request: ${url}`)
+      },
+    },
+  })
+
+  await second.module.initializeNewApiImagePlaygroundSync()
+
+  assert.equal(successfulBodies[0].mutations.some((mutation) => mutation.kind === 'task' && mutation.deleted), true)
+  assert.deepEqual(JSON.parse(localStorage.value(pendingKey)), [])
+})
+
+test('storage changes during an active sync queue another pass for the pending task deletion', async () => {
+  const localStorage = createLocalStorage()
+  const pendingDeletions = []
+  const listeners = new Map()
+  const restoredTasks = []
+  const syncBodies = []
+  let resolveFirstSync
+  let markFirstSyncStarted
+  const firstSyncStarted = new Promise((resolve) => {
+    markFirstSyncStarted = resolve
+  })
+  const liveTask = remoteItem({
+    kind: 'task',
+    key: 'deleted-during-sync',
+    revision: 4,
+    status: 'completed',
+    payload: { id: 'deleted-during-sync', status: 'completed', createdAt: 10 },
+  })
+  const deletedTask = remoteItem({
+    ...liveTask,
+    revision: 5,
+    status: 'deleted',
+    payload: {},
+    deleted: true,
+  })
+  const fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url
+    if (url === '/api/user-tools/image-playground/sync') {
+      const body = JSON.parse(init.body)
+      syncBodies.push(body)
+      if (syncBodies.length === 1) {
+        markFirstSyncStarted()
+        return new Promise((resolve) => {
+          resolveFirstSync = () => resolve(jsonEnvelope({ results: [], cursor: 4 }))
+        })
+      }
+      const deletion = body.mutations.find((mutation) => mutation.kind === 'task')
+      return jsonEnvelope({
+        results: deletion ? [{
+          client_mutation_id: deletion.client_mutation_id,
+          kind: deletion.kind,
+          key: deletion.key,
+          result: 'applied',
+          item: deletedTask,
+        }] : [],
+        cursor: 5,
+      })
+    }
+    if (url.startsWith('/api/user-tools/image-playground/bootstrap?')) {
+      return jsonEnvelope({ items: [liveTask], assets: [], cursor: 4, next_after_id: '', has_more: false })
+    }
+    if (url.startsWith('/api/user-tools/image-playground/changes?cursor=4')) {
+      return jsonEnvelope({ items: [], assets: [], next_cursor: 4, has_more: false })
+    }
+    throw new Error(`Unexpected request: ${url}`)
+  }
+  const window = {
+    localStorage,
+    caches: {
+      async open() {
+        return {
+          async delete() { return false },
+          async match() { return undefined },
+          async put() {},
+        }
+      },
+    },
+    addEventListener(type, listener) {
+      listeners.set(type, listener)
+    },
+    setInterval() { return 1 },
+  }
+  const { module } = loadSyncModule({
+    db: {
+      putTask: async (task) => restoredTasks.push(task),
+    },
+    storage: {
+      getNewApiImagePlaygroundPendingDeletions: () => [...pendingDeletions],
+      clearNewApiImagePlaygroundPendingDeletion: (kind, key) => {
+        const index = pendingDeletions.findIndex((value) => value.kind === kind && value.key === key)
+        if (index >= 0) pendingDeletions.splice(index, 1)
+      },
+    },
+    globals: {
+      localStorage,
+      fetch,
+      window,
+      setTimeout(callback) {
+        queueMicrotask(callback)
+        return 1
+      },
+      clearTimeout() {},
+    },
+  })
+
+  const initialization = module.initializeNewApiImagePlaygroundSync()
+  await firstSyncStarted
+  pendingDeletions.push({ kind: 'task', key: 'deleted-during-sync' })
+  listeners.get('new-api-image-playground-storage-changed')()
+  await Promise.resolve()
+  resolveFirstSync()
+  await initialization
+
+  const taskMutations = syncBodies
+    .flatMap((body) => body.mutations)
+    .filter((mutation) => mutation.kind === 'task')
+  assert.deepEqual(taskMutations.map(({ base_revision, deleted }) => ({ base_revision, deleted })), [
+    { base_revision: 4, deleted: true },
+  ])
+  assert.equal(syncBodies.length, 2)
+  assert.deepEqual(restoredTasks, [])
+  assert.deepEqual(pendingDeletions, [])
 })
 
 

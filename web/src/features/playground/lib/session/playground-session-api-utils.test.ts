@@ -61,7 +61,10 @@ describe('playground session api utils', () => {
     assert.equal(message.imageGeneration?.status, 'retryable')
     assert.equal(message.imageGeneration?.error, undefined)
     assert.match(message.versions[0].content, /Image generation did not finish/)
-    assert.doesNotMatch(message.versions[0].content, /524|Request error occurred/)
+    assert.doesNotMatch(
+      message.versions[0].content,
+      /524|Request error occurred/
+    )
   })
 
   test('normalizes legacy server 524 errors without image mode', () => {
@@ -90,7 +93,10 @@ describe('playground session api utils', () => {
     assert.equal(message.status, MESSAGE_STATUS.COMPLETE)
     assert.equal(message.imageGeneration?.status, 'retryable')
     assert.match(message.versions[0].content, /Image generation did not finish/)
-    assert.doesNotMatch(message.versions[0].content, /524|Request error occurred/)
+    assert.doesNotMatch(
+      message.versions[0].content,
+      /524|Request error occurred/
+    )
   })
 
   test('normalizes legacy server 524 errors with missing role', () => {
@@ -119,6 +125,9 @@ describe('playground session api utils', () => {
     assert.equal(message.status, MESSAGE_STATUS.COMPLETE)
     assert.equal(message.imageGeneration?.status, 'retryable')
     assert.match(message.versions[0].content, /Image generation did not finish/)
-    assert.doesNotMatch(message.versions[0].content, /524|Request error occurred/)
+    assert.doesNotMatch(
+      message.versions[0].content,
+      /524|Request error occurred/
+    )
   })
 })

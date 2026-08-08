@@ -65,8 +65,35 @@ import type {
   UpstreamModel,
   UpstreamModelPricing,
   UpstreamSnapshot,
+  UpstreamTestEndpoint,
 } from '../types'
 import { UpstreamKeysTable } from './upstream-keys-table'
+
+type DefaultTestEndpointOptionValue = 'auto' | Exclude<UpstreamTestEndpoint, ''>
+
+const defaultTestEndpointOptions: Array<{
+  value: DefaultTestEndpointOptionValue
+  label: string
+}> = [
+  { value: 'auto', label: 'Auto detect (default)' },
+  { value: 'openai', label: 'OpenAI (/v1/chat/completions)' },
+  { value: 'openai-response', label: 'OpenAI Responses (/v1/responses)' },
+  {
+    value: 'openai-response-compact',
+    label: 'OpenAI Response Compaction (/v1/responses/compact)',
+  },
+  { value: 'anthropic', label: 'Anthropic (/v1/messages)' },
+  {
+    value: 'gemini',
+    label: 'Gemini (/v1beta/models/{model}:generateContent)',
+  },
+  { value: 'jina-rerank', label: 'Jina Rerank (/v1/rerank)' },
+  {
+    value: 'image-generation',
+    label: 'Image Generation (/v1/images/generations)',
+  },
+  { value: 'embeddings', label: 'Embeddings (/v1/embeddings)' },
+]
 
 interface UpstreamChannelCardProps {
   channel: UpstreamChannel
@@ -77,6 +104,7 @@ interface UpstreamChannelCardProps {
   pinning: boolean
   selectingGroup: boolean
   savingDefaultTestModel: boolean
+  savingDefaultTestEndpoint: boolean
   deleting: boolean
   onConfigure: (channel: UpstreamChannel) => void
   onConfigureAccessToken: (channel: UpstreamChannel) => void
@@ -94,6 +122,10 @@ interface UpstreamChannelCardProps {
     channel: UpstreamChannel,
     defaultTestModel: string
   ) => Promise<boolean>
+  onSaveDefaultTestEndpoint: (
+    channel: UpstreamChannel,
+    defaultTestEndpoint: UpstreamTestEndpoint
+  ) => Promise<boolean>
   onSelectGroup: (
     channel: UpstreamChannel,
     selectedGroup: string
@@ -110,6 +142,7 @@ export function UpstreamChannelCard({
   pinning,
   selectingGroup,
   savingDefaultTestModel,
+  savingDefaultTestEndpoint,
   deleting,
   onConfigure,
   onConfigureAccessToken,
@@ -121,6 +154,7 @@ export function UpstreamChannelCard({
   onToggleAutoRefresh,
   onSaveNote,
   onSaveDefaultTestModel,
+  onSaveDefaultTestEndpoint,
   onSelectGroup,
   onDataChanged,
 }: UpstreamChannelCardProps) {
@@ -133,6 +167,8 @@ export function UpstreamChannelCard({
   const [defaultTestModelDraft, setDefaultTestModelDraft] = useState(
     channel.default_test_model || ''
   )
+  const [defaultTestEndpointDraft, setDefaultTestEndpointDraft] =
+    useState<UpstreamTestEndpoint>(channel.default_test_endpoint || '')
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(
     channel.auto_refresh_interval > 0
   )
@@ -196,6 +232,12 @@ export function UpstreamChannelCard({
   }, [channel.default_test_model, savingDefaultTestModel])
 
   useEffect(() => {
+    if (!savingDefaultTestEndpoint) {
+      setDefaultTestEndpointDraft(channel.default_test_endpoint || '')
+    }
+  }, [channel.default_test_endpoint, savingDefaultTestEndpoint])
+
+  useEffect(() => {
     setAutoRefreshEnabled(channel.auto_refresh_interval > 0)
   }, [channel.auto_refresh_interval])
 
@@ -220,6 +262,16 @@ export function UpstreamChannelCard({
     if (!saved) setDefaultTestModelDraft(previousDefaultTestModel)
   }
 
+  async function saveDefaultTestEndpoint(
+    defaultTestEndpoint: UpstreamTestEndpoint
+  ) {
+    const previousDefaultTestEndpoint = channel.default_test_endpoint || ''
+    setDefaultTestEndpointDraft(defaultTestEndpoint)
+    if (editingNote) await saveNote()
+    const saved = await onSaveDefaultTestEndpoint(channel, defaultTestEndpoint)
+    if (!saved) setDefaultTestEndpointDraft(previousDefaultTestEndpoint)
+  }
+
   async function toggleAutoRefresh(enabled: boolean) {
     const previousEnabled = autoRefreshEnabled
     setAutoRefreshEnabled(enabled)
@@ -237,13 +289,16 @@ export function UpstreamChannelCard({
       editingNote={editingNote}
       noteDraft={noteDraft}
       defaultTestModel={defaultTestModelDraft}
+      defaultTestEndpoint={defaultTestEndpointDraft}
       onEditNote={() => setEditingNote(true)}
       onChangeNote={setNoteDraft}
       onBlurNote={(event) => {
         const nextTarget = event.relatedTarget
         if (
           nextTarget instanceof HTMLElement &&
-          nextTarget.closest('[data-default-test-model-select="true"]')
+          nextTarget.closest(
+            '[data-default-test-model-select="true"], [data-default-test-endpoint-select="true"]'
+          )
         ) {
           return
         }
@@ -252,7 +307,11 @@ export function UpstreamChannelCard({
       onSaveDefaultTestModel={(defaultTestModel) =>
         void saveDefaultTestModel(defaultTestModel)
       }
+      onSaveDefaultTestEndpoint={(defaultTestEndpoint) =>
+        void saveDefaultTestEndpoint(defaultTestEndpoint)
+      }
       savingDefaultTestModel={savingDefaultTestModel}
+      savingDefaultTestEndpoint={savingDefaultTestEndpoint}
       deleting={deleting}
       onCancelNote={cancelNoteEditing}
       onDelete={() => onDelete(channel)}
@@ -762,13 +821,16 @@ interface AccountPanelProps {
   editingNote: boolean
   noteDraft: string
   defaultTestModel: string
+  defaultTestEndpoint: UpstreamTestEndpoint
   savingDefaultTestModel: boolean
+  savingDefaultTestEndpoint: boolean
   deleting: boolean
   onEditNote: () => void
   onChangeNote: (value: string) => void
   onBlurNote: (event: FocusEvent<HTMLTextAreaElement>) => void
   onCancelNote: () => void
   onSaveDefaultTestModel: (defaultTestModel: string) => void
+  onSaveDefaultTestEndpoint: (defaultTestEndpoint: UpstreamTestEndpoint) => void
   onDelete: () => void
 }
 
@@ -778,13 +840,16 @@ function AccountPanel({
   editingNote,
   noteDraft,
   defaultTestModel,
+  defaultTestEndpoint,
   savingDefaultTestModel,
+  savingDefaultTestEndpoint,
   deleting,
   onEditNote,
   onChangeNote,
   onBlurNote,
   onCancelNote,
   onSaveDefaultTestModel,
+  onSaveDefaultTestEndpoint,
   onDelete,
 }: AccountPanelProps) {
   const { t } = useTranslation()
@@ -892,6 +957,42 @@ function AccountPanel({
               {t('Refresh groups, multipliers, models and pricing first')}
             </p>
           )}
+        </div>
+        <div className='w-full shrink-0 space-y-1 sm:w-72'>
+          <div className='flex items-center justify-between gap-2'>
+            <label
+              className='text-muted-foreground text-xs'
+              htmlFor={`upstream-default-test-endpoint-${channel.id}`}
+            >
+              {t('Default test endpoint')}
+            </label>
+            {savingDefaultTestEndpoint && (
+              <LoaderCircle className='text-muted-foreground size-3.5 animate-spin' />
+            )}
+          </div>
+          <NativeSelect
+            id={`upstream-default-test-endpoint-${channel.id}`}
+            className='w-full'
+            size='sm'
+            value={defaultTestEndpoint || 'auto'}
+            disabled={savingDefaultTestEndpoint}
+            data-default-test-endpoint-select='true'
+            aria-label={t('Default test endpoint')}
+            onChange={(event) => {
+              const nextEndpoint = event.target.value
+              onSaveDefaultTestEndpoint(
+                nextEndpoint === 'auto'
+                  ? ''
+                  : (nextEndpoint as UpstreamTestEndpoint)
+              )
+            }}
+          >
+            {defaultTestEndpointOptions.map((option) => (
+              <NativeSelectOption key={option.value} value={option.value}>
+                {t(option.label)}
+              </NativeSelectOption>
+            ))}
+          </NativeSelect>
         </div>
         <Button
           type='button'

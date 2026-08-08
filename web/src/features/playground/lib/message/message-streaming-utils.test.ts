@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { ERROR_MESSAGES, MESSAGE_ROLES, MESSAGE_STATUS } from '../../constants.ts'
+import {
+  ERROR_MESSAGES,
+  MESSAGE_ROLES,
+  MESSAGE_STATUS,
+} from '../../constants.ts'
 import type { Message } from '../../types.ts'
 import { sanitizeMessagesOnLoad } from './message-streaming-utils.ts'
 

@@ -2,6 +2,8 @@ package controller
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
@@ -27,7 +30,7 @@ func setupUpstreamChannelControllerTest(t *testing.T) (*gin.Engine, *model.Upstr
 	originalCryptoSecret := common.CryptoSecret
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "upstream-controller.db")), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}))
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}, &model.Log{}))
 	model.DB = db
 	model.LOG_DB = db
 	common.CryptoSecret = "upstream-controller-test-secret"
@@ -48,6 +51,7 @@ func setupUpstreamChannelControllerTest(t *testing.T) (*gin.Engine, *model.Upstr
 
 	engine := gin.New()
 	engine.GET("/api/upstream-channels/", GetUpstreamChannels)
+	engine.GET("/api/upstream-channels/statistics", GetUpstreamChannelStatistics)
 	engine.POST("/api/upstream-channels/", CreateUpstreamChannel)
 	engine.PUT("/api/upstream-channels/:id", UpdateUpstreamChannelConfig)
 	engine.POST("/api/upstream-channels/:id/pin", PinUpstreamChannel)
@@ -55,11 +59,86 @@ func setupUpstreamChannelControllerTest(t *testing.T) (*gin.Engine, *model.Upstr
 	engine.PATCH("/api/upstream-channels/:id/note", UpdateUpstreamChannelNote)
 	engine.PATCH("/api/upstream-channels/:id/selected-group", UpdateUpstreamChannelSelectedGroup)
 	engine.PATCH("/api/upstream-channels/:id/default-test-model", UpdateUpstreamChannelDefaultTestModel)
+	engine.PATCH("/api/upstream-channels/:id/default-test-endpoint", UpdateUpstreamChannelDefaultTestEndpoint)
 	engine.POST("/api/upstream-channels/:id/keys/link", LinkUpstreamChannelKeys)
 	engine.PATCH("/api/upstream-channels/:id/keys/:key_id/group", UpdateUpstreamChannelKeyGroup)
 	engine.POST("/api/upstream-channels/:id/keys/import", ImportUpstreamChannelKeys)
 	engine.POST("/api/upstream-channels/:id/keys/models", FetchUpstreamChannelKeyModels)
+	engine.POST("/api/upstream-channels/:id/keys/:key_id/test", TestUpstreamChannelKey)
 	return engine, row
+}
+
+func TestGetUpstreamChannelStatisticsRejectsInvalidTimeRange(t *testing.T) {
+	engine, _ := setupUpstreamChannelControllerTest(t)
+	tests := []struct {
+		name    string
+		query   string
+		message string
+	}{
+		{name: "missing start", query: "end_timestamp=200", message: "invalid start_timestamp"},
+		{name: "invalid start", query: "start_timestamp=bad&end_timestamp=200", message: "invalid start_timestamp"},
+		{name: "zero end", query: "start_timestamp=100&end_timestamp=0", message: "invalid end_timestamp"},
+		{name: "reversed range", query: "start_timestamp=200&end_timestamp=100", message: "invalid time range"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/api/upstream-channels/statistics?"+tt.query, nil)
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, request)
+
+			require.Equal(t, http.StatusOK, recorder.Code)
+			var response struct {
+				Success bool   `json:"success"`
+				Message string `json:"message"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+			assert.False(t, response.Success)
+			assert.Equal(t, tt.message, response.Message)
+		})
+	}
+}
+
+func TestGetUpstreamChannelStatisticsReturnsTopLevelAnalytics(t *testing.T) {
+	engine, managed := setupUpstreamChannelControllerTest(t)
+	baseURL := "https://upstream.example/v1"
+	source := &model.Channel{Name: "source", Key: "key", BaseURL: &baseURL}
+	require.NoError(t, model.DB.Create(source).Error)
+	require.NoError(t, model.LOG_DB.Create(&[]model.Log{
+		{ChannelId: source.Id, Type: model.LogTypeConsume, CreatedAt: 100, Quota: 10, PromptTokens: 2, CompletionTokens: 3},
+		{ChannelId: source.Id, Type: model.LogTypeConsume, CreatedAt: 200, Quota: 20, PromptTokens: 4, CompletionTokens: 6},
+	}).Error)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/upstream-channels/statistics?start_timestamp=100&end_timestamp=200", nil)
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool `json:"success"`
+		Data    []struct {
+			ChannelID  int   `json:"channel_id"`
+			Quota      int64 `json:"quota"`
+			TokenUsed  int64 `json:"token_used"`
+			Count      int64 `json:"count"`
+			LastUsedAt int64 `json:"last_used_at"`
+		} `json:"data"`
+		Summary service.UpstreamChannelStatisticsSummary     `json:"summary"`
+		Trend   []service.UpstreamChannelStatisticsTrendItem `json:"trend"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	require.Len(t, response.Data, 1)
+	assert.Equal(t, managed.Id, response.Data[0].ChannelID)
+	assert.Equal(t, int64(30), response.Data[0].Quota)
+	assert.Equal(t, int64(15), response.Data[0].TokenUsed)
+	assert.Equal(t, int64(2), response.Data[0].Count)
+	assert.Equal(t, int64(200), response.Data[0].LastUsedAt)
+	assert.Equal(t, service.UpstreamChannelStatisticsSummary{Quota: 30, TokenUsed: 15, Count: 2}, response.Summary)
+	require.Len(t, response.Trend, 1)
+	assert.Equal(t, int64(0), response.Trend[0].CreatedAt)
+	assert.Equal(t, int64(30), response.Trend[0].Quota)
+	assert.Equal(t, int64(15), response.Trend[0].TokenUsed)
+	assert.Equal(t, int64(2), response.Trend[0].Count)
 }
 
 func TestUpdateUpstreamChannelKeyGroupRejectsUnsupportedProvider(t *testing.T) {
@@ -352,6 +431,140 @@ func TestUpdateUpstreamChannelDefaultTestModelCanClearSelection(t *testing.T) {
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	require.True(t, response.Success)
 	assert.Empty(t, response.Data.DefaultTestModel)
+}
+
+func TestUpdateUpstreamChannelDefaultTestEndpointPersistsSupportedEndpoint(t *testing.T) {
+	engine, row := setupUpstreamChannelControllerTest(t)
+
+	request := httptest.NewRequest(http.MethodPatch, "/api/upstream-channels/"+strconv.Itoa(row.Id)+"/default-test-endpoint", bytes.NewBufferString(`{"default_test_endpoint":"  embeddings  "}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			DefaultTestEndpoint string `json:"default_test_endpoint"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	assert.Equal(t, "embeddings", response.Data.DefaultTestEndpoint)
+
+	updated, err := model.GetUpstreamChannelByID(row.Id)
+	require.NoError(t, err)
+	assert.Equal(t, "embeddings", updated.DefaultTestEndpoint)
+}
+
+func TestUpdateUpstreamChannelDefaultTestEndpointCanClearSelection(t *testing.T) {
+	engine, row := setupUpstreamChannelControllerTest(t)
+	row.DefaultTestEndpoint = "openai-response"
+	require.NoError(t, model.DB.Save(row).Error)
+
+	request := httptest.NewRequest(http.MethodPatch, "/api/upstream-channels/"+strconv.Itoa(row.Id)+"/default-test-endpoint", bytes.NewBufferString(`{"default_test_endpoint":""}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			DefaultTestEndpoint string `json:"default_test_endpoint"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	assert.Empty(t, response.Data.DefaultTestEndpoint)
+}
+
+func TestUpdateUpstreamChannelDefaultTestEndpointRejectsUnsupportedEndpoint(t *testing.T) {
+	engine, row := setupUpstreamChannelControllerTest(t)
+
+	request := httptest.NewRequest(http.MethodPatch, "/api/upstream-channels/"+strconv.Itoa(row.Id)+"/default-test-endpoint", bytes.NewBufferString(`{"default_test_endpoint":"unsupported"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.False(t, response.Success)
+	assert.Equal(t, errInvalidUpstreamDefaultTestEndpoint.Error(), response.Message)
+}
+
+func TestRunUpstreamChannelKeyTestUsesSelectedKeyAndConfiguredDefaults(t *testing.T) {
+	row := &model.UpstreamChannel{
+		Name:                "Upstream account",
+		BaseURL:             "https://upstream.example/v1",
+		DefaultTestModel:    "gpt-4o-mini",
+		DefaultTestEndpoint: "openai-response",
+		SnapshotJSON:        `{"models":[{"id":"gpt-4o-mini"},{"id":"text-embedding-3-small"}]}`,
+	}
+	ctx := context.Background()
+	called := false
+	runner := func(actualCtx context.Context, channel *model.Channel, userID int, testModel string, endpointType string, isStream bool) testResult {
+		called = true
+		assert.Equal(t, ctx, actualCtx)
+		assert.Equal(t, "Upstream account", channel.Name)
+		assert.Equal(t, constant.ChannelTypeOpenAI, channel.Type)
+		assert.Equal(t, "sk-selected-key", channel.Key)
+		assert.Equal(t, "https://upstream.example/v1", channel.GetBaseURL())
+		assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
+		assert.Equal(t, "gpt-4o-mini,text-embedding-3-small", channel.Models)
+		require.NotNil(t, channel.TestModel)
+		assert.Equal(t, "gpt-4o-mini", *channel.TestModel)
+		assert.Equal(t, 23, userID)
+		assert.Equal(t, "gpt-4o-mini", testModel)
+		assert.Equal(t, "openai-response", endpointType)
+		assert.False(t, isStream)
+		return testResult{}
+	}
+
+	result := runUpstreamChannelKeyTest(ctx, row, "sk-selected-key", 23, runner)
+
+	assert.True(t, called)
+	assert.NoError(t, result.localErr)
+	assert.Nil(t, result.newAPIError)
+}
+
+func TestRunUpstreamChannelKeyTestUsesSnapshotModelsWhenDefaultModelIsEmpty(t *testing.T) {
+	row := &model.UpstreamChannel{
+		Name:         "Upstream account",
+		BaseURL:      "https://upstream.example/v1",
+		SnapshotJSON: `{"models":[{"id":"  gpt-4.1  "},{"id":"text-embedding-3-small"},{"id":""}]}`,
+	}
+	runner := func(_ context.Context, channel *model.Channel, _ int, testModel string, _ string, _ bool) testResult {
+		assert.Equal(t, "gpt-4.1,text-embedding-3-small", channel.Models)
+		assert.Nil(t, channel.TestModel)
+		assert.Empty(t, testModel)
+		return testResult{}
+	}
+
+	result := runUpstreamChannelKeyTest(context.Background(), row, "sk-selected-key", 23, runner)
+
+	assert.NoError(t, result.localErr)
+}
+
+func TestRunUpstreamChannelKeyTestRedactsSelectedKeyFromErrors(t *testing.T) {
+	const selectedKey = "sk-selected-key"
+	row := &model.UpstreamChannel{
+		Name:    "Upstream account",
+		BaseURL: "https://upstream.example/v1",
+	}
+	runner := func(_ context.Context, _ *model.Channel, _ int, _ string, _ string, _ bool) testResult {
+		return testResult{localErr: errors.New("upstream rejected key " + selectedKey)}
+	}
+
+	result := runUpstreamChannelKeyTest(context.Background(), row, selectedKey, 23, runner)
+
+	require.Error(t, result.localErr)
+	assert.NotContains(t, result.localErr.Error(), selectedKey)
+	assert.Contains(t, result.localErr.Error(), "[REDACTED]")
 }
 
 func TestUpdateUpstreamChannelDefaultTestModelRejectsOversizedValue(t *testing.T) {
@@ -888,4 +1101,32 @@ func TestPinUpstreamChannelRaisesPriority(t *testing.T) {
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	require.True(t, response.Success)
 	assert.Equal(t, int64(9), response.Data.Priority)
+}
+
+func TestCreateUpstreamChannelStoresAndMasksProxyCredentials(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "persistent-session-secret")
+	engine, _ := setupUpstreamChannelControllerTest(t)
+	payload := `{"base_url":"https://proxy-upstream.example","provider":"other","username":"root","password":"secret","proxy":"socks5://proxy-user:proxy-password@127.0.0.1:7891","balance_threshold":0,"auto_refresh_interval":300}`
+	request := httptest.NewRequest(http.MethodPost, "/api/upstream-channels/", strings.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.NotContains(t, recorder.Body.String(), "proxy-password")
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			ID       int    `json:"id"`
+			Proxy    string `json:"proxy"`
+			HasProxy bool   `json:"has_proxy"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	assert.Equal(t, "socks5://proxy-user:********@127.0.0.1:7891", response.Data.Proxy)
+	assert.True(t, response.Data.HasProxy)
+	created, err := model.GetUpstreamChannelByID(response.Data.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "socks5://proxy-user:proxy-password@127.0.0.1:7891", created.Proxy)
 }

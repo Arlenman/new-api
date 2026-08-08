@@ -634,6 +634,20 @@ func buildChannelErrorLogOther(c *gin.Context, err *types.NewAPIError, autoDisab
 	other["channel_id"] = c.GetInt("channel_id")
 	other["channel_name"] = c.GetString("channel_name")
 	other["channel_type"] = c.GetInt("channel_type")
+	if taskID := strings.TrimSpace(common.GetContextKeyString(c, constant.ContextKeyPlaygroundImageTaskID)); taskID != "" {
+		other["task_id"] = taskID
+	}
+	if metadata, ok := common.GetContextKeyType[relaycommon.ImageFailureMetadata](c, constant.ContextKeyImageFailureMetadata); ok {
+		other["stage"] = metadata.Stage
+		other["upstream_status_code"] = metadata.StatusCode
+		other["content_type"] = metadata.ContentType
+		other["image_count"] = metadata.ImageCount
+		other["has_url"] = metadata.HasURL
+		other["has_b64_json"] = metadata.HasB64JSON
+		if metadata.ErrorSummary != "" {
+			other["error_summary"] = metadata.ErrorSummary
+		}
+	}
 
 	adminInfo := make(map[string]interface{})
 	adminInfo["use_channel"] = c.GetStringSlice("use_channel")
@@ -675,6 +689,7 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		}
 		useTimeSeconds := int(time.Since(startTime).Seconds())
 		model.RecordErrorLog(c, userId, channelId, modelName, tokenName, err.MaskSensitiveErrorWithStatusCode(), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
+		common.SetContextKey(c, constant.ContextKeyChannelErrorLogRecorded, true)
 	}
 
 }

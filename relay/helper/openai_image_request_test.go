@@ -105,7 +105,7 @@ func TestGetAndValidOpenAIImageRequestDefaultsPlaygroundGPTImageStream(t *testin
 					require.NoError(t, err)
 					require.NotNil(t, req.Stream)
 					require.Equal(t, tt.wantStream, *req.Stream)
-					require.Equal(t, tt.wantStream, req.IsStream(c))
+					require.Equal(t, tt.wantStream, req.IsStream(c.Request))
 				})
 			}
 		})

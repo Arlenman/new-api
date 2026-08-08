@@ -96,16 +96,17 @@ func UserAuth() func(c *gin.Context) {
 	}
 }
 
-// PlaygroundAuth prefers an explicitly supplied API token so embedded tools can
-// use the selected token's group and limits, while preserving session auth for
-// the dashboard playground.
+// PlaygroundAuth accepts both dashboard access JWTs and relay API credentials.
+// TokenOrUserAuth performs the credential classification so recognized internal
+// JWTs never fall back to relay token validation. Preserve UserAuth for requests
+// without Authorization because its existing error contract differs from TokenAuth.
 func PlaygroundAuth() func(c *gin.Context) {
 	return func(c *gin.Context) {
-		if strings.TrimSpace(c.GetHeader("Authorization")) != "" {
-			TokenAuth()(c)
+		if strings.TrimSpace(c.GetHeader("Authorization")) == "" {
+			UserAuth()(c)
 			return
 		}
-		UserAuth()(c)
+		TokenOrUserAuth()(c)
 	}
 }
 
@@ -283,6 +284,44 @@ func TokenOrUserAuth() func(c *gin.Context) {
 		}
 		// Opaque credentials are relay API keys here, never dashboard PATs.
 		TokenAuth()(c)
+	}
+}
+
+// UserToolAssetAuth preserves explicit Authorization support while allowing an
+// embedded same-origin iframe to authenticate its asset navigation with the
+// short-lived, HttpOnly dashboard-session cookie issued for that tool.
+func UserToolAssetAuth(tool string) func(c *gin.Context) {
+	return func(c *gin.Context) {
+		if strings.TrimSpace(c.GetHeader("Authorization")) != "" {
+			TokenOrUserAuth()(c)
+			return
+		}
+		cookiePath, ok := service.UserToolAccessPath(tool)
+		if !ok || !strings.HasPrefix(c.Request.URL.Path, cookiePath) {
+			writeDashboardAuthError(c, service.ErrAuthTokenInvalid)
+			return
+		}
+		raw, err := c.Cookie(service.UserToolAccessCookieName)
+		if err != nil || strings.TrimSpace(raw) == "" {
+			writeDashboardAuthError(c, service.ErrAuthTokenInvalid)
+			return
+		}
+		identity, internal, err := service.ParseDashboardAccessToken(raw)
+		if !internal {
+			writeDashboardAuthError(c, service.ErrAuthTokenInvalid)
+			return
+		}
+		if err != nil {
+			writeDashboardAuthError(c, err)
+			return
+		}
+		_, user, err := service.ValidateLoginSession(identity)
+		if err != nil {
+			writeDashboardAuthError(c, err)
+			return
+		}
+		setDashboardAuthContext(c, user, identity, false)
+		c.Next()
 	}
 }
 
@@ -533,6 +572,19 @@ func TokenAuth() func(c *gin.Context) {
 }
 
 func userToolRuntimeRequestAllowed(tool, method, path string) bool {
+	if tool == model.UserToolImagePlayground && method == http.MethodGet {
+		const imageTaskPrefix = "/pg/image-tasks/"
+		if strings.HasPrefix(path, imageTaskPrefix) {
+			taskID := strings.TrimPrefix(path, imageTaskPrefix)
+			return taskID != "" && !strings.Contains(taskID, "/")
+		}
+		const imageFilePrefix = "/pg/image-files/"
+		const imageFileSuffix = "/content"
+		if strings.HasPrefix(path, imageFilePrefix) && strings.HasSuffix(path, imageFileSuffix) {
+			fileID := strings.TrimSuffix(strings.TrimPrefix(path, imageFilePrefix), imageFileSuffix)
+			return fileID != "" && !strings.Contains(fileID, "/")
+		}
+	}
 	if method == http.MethodPost {
 		switch tool {
 		case model.UserToolImagePlayground:

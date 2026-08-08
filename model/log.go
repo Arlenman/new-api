@@ -88,6 +88,15 @@ type ChannelLogMetric struct {
 	FirstTokenLatencySampleCount int64   `gorm:"column:first_token_latency_sample_count"`
 }
 
+type UpstreamChannelLogStatistic struct {
+	ChannelID  int   `gorm:"column:channel_id"`
+	CreatedAt  int64 `gorm:"column:created_at"`
+	Quota      int64 `gorm:"column:quota"`
+	TokenUsed  int64 `gorm:"column:token_used"`
+	Count      int64 `gorm:"column:count"`
+	LastUsedAt int64 `gorm:"column:last_used_at"`
+}
+
 // don't use iota, avoid change log type value
 const (
 	LogTypeUnknown   = 0
@@ -148,6 +157,39 @@ func GetChannelLogMetricsSince(channelIDs []int, startTimestamp int64) (map[int]
 		metrics[row.ChannelID] = row
 	}
 	return metrics, nil
+}
+
+func GetUpstreamChannelLogStatistics(channelIDs []int, startTimestamp int64, endTimestamp int64) ([]UpstreamChannelLogStatistic, []UpstreamChannelLogStatistic, error) {
+	totals := make([]UpstreamChannelLogStatistic, 0)
+	trend := make([]UpstreamChannelLogStatistic, 0)
+	if len(channelIDs) == 0 {
+		return totals, trend, nil
+	}
+
+	logDB := LOG_DB
+	if logDB == nil {
+		logDB = DB
+	}
+	query := logDB.Model(&Log{}).
+		Where("type = ?", LogTypeConsume).
+		Where("created_at >= ? AND created_at <= ?", startTimestamp, endTimestamp).
+		Where("channel_id IN ?", channelIDs)
+	if err := query.
+		Select("channel_id, COALESCE(SUM(quota), 0) AS quota, COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS token_used, COUNT(*) AS count, MAX(created_at) AS last_used_at").
+		Group("channel_id").
+		Order("channel_id ASC").
+		Scan(&totals).Error; err != nil {
+		return nil, nil, err
+	}
+	const hourBucketExpression = "created_at - (created_at % 3600)"
+	if err := query.
+		Select("channel_id, " + hourBucketExpression + " AS created_at, COALESCE(SUM(quota), 0) AS quota, COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS token_used, COUNT(*) AS count").
+		Group("channel_id, " + hourBucketExpression).
+		Order(hourBucketExpression + " ASC, channel_id ASC").
+		Scan(&trend).Error; err != nil {
+		return nil, nil, err
+	}
+	return totals, trend, nil
 }
 
 func ensureLogRequestId(log *Log) {

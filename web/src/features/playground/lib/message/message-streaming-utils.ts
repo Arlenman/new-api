@@ -18,7 +18,11 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { t } from 'i18next'
 
-import { ERROR_MESSAGES, MESSAGE_ROLES, MESSAGE_STATUS } from '../../constants.ts'
+import {
+  ERROR_MESSAGES,
+  MESSAGE_ROLES,
+  MESSAGE_STATUS,
+} from '../../constants.ts'
 import type { ChatCompletionResponse, Message } from '../../types.ts'
 import { parseThinkTags } from './message-reasoning-utils.ts'
 import {
@@ -249,7 +253,8 @@ export function sanitizeMessagesOnLoad(messages: Message[]): Message[] {
                   ...finalized.imageGeneration,
                   status: 'complete',
                   completedAt:
-                    finalized.completedAt ?? finalized.imageGeneration.completedAt,
+                    finalized.completedAt ??
+                    finalized.imageGeneration.completedAt,
                 }
               : finalized.imageGeneration,
         })
@@ -262,25 +267,21 @@ export function sanitizeMessagesOnLoad(messages: Message[]): Message[] {
                   ERROR_MESSAGES.INTERRUPTED
                 )}`
           ),
-          status:
-            isImageMessage
-              ? MESSAGE_STATUS.COMPLETE
-              : MESSAGE_STATUS.ERROR,
+          status: isImageMessage
+            ? MESSAGE_STATUS.COMPLETE
+            : MESSAGE_STATUS.ERROR,
           isReasoningStreaming: false,
           imageGeneration:
             finalized.imageGeneration?.status === 'pending'
               ? {
                   ...finalized.imageGeneration,
-                  status:
-                    isImageMessage
-                      ? 'retryable'
-                      : 'error',
+                  status: isImageMessage ? 'retryable' : 'error',
                   completedAt:
-                    finalized.completedAt ?? finalized.imageGeneration.completedAt,
-                  error:
-                    isImageMessage
-                      ? undefined
-                      : ERROR_MESSAGES.INTERRUPTED,
+                    finalized.completedAt ??
+                    finalized.imageGeneration.completedAt,
+                  error: isImageMessage
+                    ? undefined
+                    : ERROR_MESSAGES.INTERRUPTED,
                 }
               : finalized.imageGeneration,
         })

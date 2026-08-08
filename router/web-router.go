@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-contrib/static"
 	"github.com/gin-gonic/gin"
@@ -38,10 +39,10 @@ func SetWebRouter(router *gin.Engine, assets WebAssets) {
 				Commit:    tool.buildInfo.Commit,
 				BuiltAt:   tool.buildInfo.BuiltAt,
 			})
-			router.GET(imagePlaygroundRoute, middleware.DisableCache(), middleware.TokenOrUserAuth(), func(c *gin.Context) {
+			router.GET(imagePlaygroundRoute, middleware.DisableCache(), middleware.UserToolAssetAuth(model.UserToolImagePlayground), func(c *gin.Context) {
 				c.Redirect(http.StatusTemporaryRedirect, imagePlaygroundRoute+"/")
 			})
-			router.GET(imagePlaygroundRoute+"/*filepath", middleware.DisableCache(), middleware.TokenOrUserAuth(), tool.serve)
+			router.GET(imagePlaygroundRoute+"/*filepath", middleware.DisableCache(), middleware.UserToolAssetAuth(model.UserToolImagePlayground), tool.serve)
 		}
 	}
 
@@ -57,10 +58,10 @@ func SetWebRouter(router *gin.Engine, assets WebAssets) {
 				Commit:    tool.buildInfo.Commit,
 				BuiltAt:   tool.buildInfo.BuiltAt,
 			})
-			router.GET(infiniteCanvasRoute, middleware.DisableCache(), middleware.TokenOrUserAuth(), func(c *gin.Context) {
+			router.GET(infiniteCanvasRoute, middleware.DisableCache(), middleware.UserToolAssetAuth(model.UserToolInfiniteCanvas), func(c *gin.Context) {
 				c.Redirect(http.StatusTemporaryRedirect, infiniteCanvasRoute+"/")
 			})
-			router.GET(infiniteCanvasRoute+"/*filepath", middleware.DisableCache(), middleware.TokenOrUserAuth(), tool.serve)
+			router.GET(infiniteCanvasRoute+"/*filepath", middleware.DisableCache(), middleware.UserToolAssetAuth(model.UserToolInfiniteCanvas), tool.serve)
 		}
 	}
 

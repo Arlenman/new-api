@@ -88,7 +88,7 @@ func GetAllTokenTagQuotaDates(c *gin.Context) {
 	includeUntagged, _ := strconv.ParseBool(c.Query("include_untagged"))
 	excludeUntagged, _ := strconv.ParseBool(c.Query("exclude_untagged"))
 	role := c.GetInt("role")
-	dates, summary, err := model.GetTokenTagQuotaAnalytics(startTimestamp, endTimestamp, username, 0, role, model.TokenTagQuotaFilters{
+	result, err := model.GetTokenTagQuotaAnalyticsWithTrend(startTimestamp, endTimestamp, username, 0, role, model.TokenTagQuotaFilters{
 		IncludedTags:    c.QueryArray("token_tag"),
 		ExcludedTags:    c.QueryArray("exclude_token_tag"),
 		IncludeUntagged: includeUntagged,
@@ -99,9 +99,9 @@ func GetAllTokenTagQuotaDates(c *gin.Context) {
 		return
 	}
 	if role == common.RoleRootUser {
-		tokenIds := make([]int, 0, len(dates))
-		seenTokenIds := make(map[int]struct{}, len(dates))
-		for _, row := range dates {
+		tokenIds := make([]int, 0, len(result.Data))
+		seenTokenIds := make(map[int]struct{}, len(result.Data))
+		for _, row := range result.Data {
 			if row.TokenID <= 0 {
 				continue
 			}
@@ -116,15 +116,16 @@ func GetAllTokenTagQuotaDates(c *gin.Context) {
 			common.ApiError(c, loadErr)
 			return
 		}
-		for _, row := range dates {
+		for _, row := range result.Data {
 			row.IPs = model.BuildTokenIPViews(tokenIPs[row.TokenID])
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    dates,
-		"summary": summary,
+		"data":    result.Data,
+		"summary": result.Summary,
+		"trend":   result.Trend,
 	})
 }
 
@@ -136,7 +137,7 @@ func GetUserTokenTagQuotaDates(c *gin.Context) {
 	}
 	includeUntagged, _ := strconv.ParseBool(c.Query("include_untagged"))
 	excludeUntagged, _ := strconv.ParseBool(c.Query("exclude_untagged"))
-	dates, summary, err := model.GetTokenTagQuotaAnalytics(startTimestamp, endTimestamp, "", userId, common.RoleCommonUser, model.TokenTagQuotaFilters{
+	result, err := model.GetTokenTagQuotaAnalyticsWithTrend(startTimestamp, endTimestamp, "", userId, common.RoleCommonUser, model.TokenTagQuotaFilters{
 		IncludedTags:    c.QueryArray("token_tag"),
 		ExcludedTags:    c.QueryArray("exclude_token_tag"),
 		IncludeUntagged: includeUntagged,
@@ -149,8 +150,9 @@ func GetUserTokenTagQuotaDates(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    dates,
-		"summary": summary,
+		"data":    result.Data,
+		"summary": result.Summary,
+		"trend":   result.Trend,
 	})
 }
 

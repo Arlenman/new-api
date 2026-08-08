@@ -10,11 +10,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
@@ -29,8 +32,11 @@ type upstreamChannelView struct {
 	Priority                 int64                     `json:"priority"`
 	SelectedGroup            string                    `json:"selected_group"`
 	Username                 string                    `json:"username"`
+	Proxy                    string                    `json:"proxy"`
+	HasProxy                 bool                      `json:"has_proxy"`
 	Note                     string                    `json:"note"`
 	DefaultTestModel         string                    `json:"default_test_model"`
+	DefaultTestEndpoint      string                    `json:"default_test_endpoint"`
 	HasPassword              bool                      `json:"has_password"`
 	SourceChannelCount       int                       `json:"source_channel_count"`
 	ActiveSourceChannelCount int                       `json:"active_source_channel_count"`
@@ -63,6 +69,7 @@ type createUpstreamChannelRequest struct {
 	Priority            *int64   `json:"priority"`
 	Username            string   `json:"username"`
 	Password            string   `json:"password"`
+	Proxy               string   `json:"proxy"`
 	BalanceThreshold    float64  `json:"balance_threshold"`
 	Multiplier          *float64 `json:"multiplier"`
 	AutoRefreshInterval int      `json:"auto_refresh_interval"`
@@ -75,6 +82,7 @@ type updateUpstreamChannelRequest struct {
 	Priority            *int64   `json:"priority"`
 	Username            string   `json:"username"`
 	Password            string   `json:"password"`
+	Proxy               *string  `json:"proxy"`
 	BalanceThreshold    float64  `json:"balance_threshold"`
 	Multiplier          *float64 `json:"multiplier"`
 	AutoRefreshInterval int      `json:"auto_refresh_interval"`
@@ -90,6 +98,10 @@ type updateUpstreamChannelSelectedGroupRequest struct {
 
 type updateUpstreamChannelDefaultTestModelRequest struct {
 	DefaultTestModel string `json:"default_test_model"`
+}
+
+type updateUpstreamChannelDefaultTestEndpointRequest struct {
+	DefaultTestEndpoint string `json:"default_test_endpoint"`
 }
 
 type updateUpstreamPriorityScheduleRequest struct {
@@ -201,6 +213,11 @@ func CreateUpstreamChannel(c *gin.Context) {
 		common.ApiError(c, errInvalidUpstreamRefreshInterval)
 		return
 	}
+	proxy, err := service.NormalizeUpstreamProxyURL(request.Proxy)
+	if err != nil {
+		common.ApiError(c, errInvalidUpstreamProxy)
+		return
+	}
 	passwordCiphertext := ""
 	if request.Password != "" {
 		if !common.HasPersistentCryptoSecret() {
@@ -220,6 +237,7 @@ func CreateUpstreamChannel(c *gin.Context) {
 		AuthType:            authType,
 		Priority:            priority,
 		Username:            username,
+		Proxy:               proxy,
 		PasswordCiphertext:  passwordCiphertext,
 		BalanceThreshold:    request.BalanceThreshold,
 		Multiplier:          multiplier,
@@ -257,6 +275,25 @@ func GetUpstreamChannels(c *gin.Context) {
 		views = append(views, view)
 	}
 	common.ApiSuccess(c, views)
+}
+
+func GetUpstreamChannelStatistics(c *gin.Context) {
+	startTimestamp, endTimestamp, ok := parseFlowQuotaTimeRange(c)
+	if !ok {
+		return
+	}
+	result, err := service.GetUpstreamChannelStatistics(startTimestamp, endTimestamp)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    result.Data,
+		"summary": result.Summary,
+		"trend":   result.Trend,
+	})
 }
 
 func DeleteUpstreamChannel(c *gin.Context) {
@@ -361,7 +398,18 @@ func UpdateUpstreamChannelConfig(c *gin.Context) {
 		}
 		passwordCiphertext = &encrypted
 	}
-	if err = model.UpdateUpstreamChannelConfig(id, name, request.Provider, authType, request.Username, passwordCiphertext, request.BalanceThreshold, multiplier, request.AutoRefreshInterval, priority); err != nil {
+	var proxy *string
+	if request.Proxy != nil {
+		normalized, normalizeErr := service.NormalizeUpstreamProxyURL(*request.Proxy)
+		if normalizeErr != nil {
+			common.ApiError(c, errInvalidUpstreamProxy)
+			return
+		}
+		if normalized != service.MaskUpstreamProxyURL(row.Proxy) {
+			proxy = &normalized
+		}
+	}
+	if err = model.UpdateUpstreamChannelConfig(id, name, request.Provider, authType, request.Username, passwordCiphertext, proxy, request.BalanceThreshold, multiplier, request.AutoRefreshInterval, priority); err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -414,6 +462,32 @@ func UpdateUpstreamChannelDefaultTestModel(c *gin.Context) {
 		return
 	}
 	row, err := service.UpdateUpstreamChannelDefaultTestModel(id, request.DefaultTestModel)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, buildUpstreamChannelView(row, 0, 0, upstreamChannelInUseKeyCount(row)))
+}
+
+func UpdateUpstreamChannelDefaultTestEndpoint(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		common.ApiError(c, errInvalidUpstreamChannelID)
+		return
+	}
+	var request updateUpstreamChannelDefaultTestEndpointRequest
+	if err = c.ShouldBindJSON(&request); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	request.DefaultTestEndpoint = strings.TrimSpace(request.DefaultTestEndpoint)
+	if request.DefaultTestEndpoint != "" {
+		if _, ok := common.GetDefaultEndpointInfo(constant.EndpointType(request.DefaultTestEndpoint)); !ok {
+			common.ApiError(c, errInvalidUpstreamDefaultTestEndpoint)
+			return
+		}
+	}
+	row, err := service.UpdateUpstreamChannelDefaultTestEndpoint(id, request.DefaultTestEndpoint)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -777,6 +851,93 @@ func RefreshAllUpstreamChannels(c *gin.Context) {
 	})
 }
 
+type upstreamChannelKeyTestRunner func(context.Context, *model.Channel, int, string, string, bool) testResult
+
+func runUpstreamChannelKeyTest(ctx context.Context, row *model.UpstreamChannel, key string, testUserID int, runner upstreamChannelKeyTestRunner) testResult {
+	baseURL := row.BaseURL
+	testModel := strings.TrimSpace(row.DefaultTestModel)
+	models := testModel
+	if strings.TrimSpace(row.SnapshotJSON) != "" {
+		var snapshot service.UpstreamSnapshot
+		if common.UnmarshalJsonStr(row.SnapshotJSON, &snapshot) == nil {
+			modelNames := make([]string, 0, len(snapshot.Models))
+			for _, upstreamModel := range snapshot.Models {
+				modelName := strings.TrimSpace(upstreamModel.ID)
+				if modelName != "" {
+					modelNames = append(modelNames, modelName)
+				}
+			}
+			if len(modelNames) > 0 {
+				models = strings.Join(modelNames, ",")
+			}
+		}
+	}
+	temporaryChannel := &model.Channel{
+		Name:    row.Name,
+		Type:    constant.ChannelTypeOpenAI,
+		Key:     key,
+		BaseURL: &baseURL,
+		Status:  common.ChannelStatusEnabled,
+		Models:  models,
+	}
+	temporaryChannel.SetSetting(dto.ChannelSettings{Proxy: row.Proxy})
+	if testModel != "" {
+		temporaryChannel.TestModel = &testModel
+	}
+	result := runner(ctx, temporaryChannel, testUserID, testModel, row.DefaultTestEndpoint, false)
+	if result.localErr != nil && key != "" {
+		message := strings.ReplaceAll(result.localErr.Error(), key, "[REDACTED]")
+		if message != result.localErr.Error() {
+			result.localErr = errors.New(message)
+		}
+	}
+	return result
+}
+
+func TestUpstreamChannelKey(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		common.ApiError(c, errInvalidUpstreamChannelID)
+		return
+	}
+	keyID, err := strconv.ParseInt(c.Param("key_id"), 10, 64)
+	if err != nil || keyID <= 0 {
+		common.ApiError(c, errInvalidUpstreamKeyID)
+		return
+	}
+	row, key, err := service.GetUpstreamChannelKeyTestTarget(c.Request.Context(), id, keyID)
+	if err != nil {
+		respondUpstreamChannelError(c, err, nil)
+		return
+	}
+	testUserID, err := resolveChannelTestUserID(c)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	startedAt := time.Now()
+	result := runUpstreamChannelKeyTest(c.Request.Context(), row, key, testUserID, testChannel)
+	if result.localErr != nil {
+		response := gin.H{
+			"success": false,
+			"message": result.localErr.Error(),
+			"time":    0.0,
+		}
+		if result.newAPIError != nil {
+			response["error_code"] = result.newAPIError.GetErrorCode()
+		}
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"time":    float64(time.Since(startedAt).Milliseconds()) / 1000.0,
+	})
+}
+
 func RevealUpstreamChannelKey(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil || id <= 0 {
@@ -869,8 +1030,11 @@ func buildUpstreamChannelView(row *model.UpstreamChannel, sourceChannelCount int
 		Priority:                 row.Priority,
 		SelectedGroup:            row.SelectedGroup,
 		Username:                 row.Username,
+		Proxy:                    service.MaskUpstreamProxyURL(row.Proxy),
+		HasProxy:                 strings.TrimSpace(row.Proxy) != "",
 		Note:                     row.Note,
 		DefaultTestModel:         row.DefaultTestModel,
+		DefaultTestEndpoint:      row.DefaultTestEndpoint,
 		HasPassword:              row.HasPassword(),
 		SourceChannelCount:       sourceChannelCount,
 		ActiveSourceChannelCount: activeSourceChannelCount,

@@ -20,7 +20,8 @@ describe('message error utilities', () => {
       versions: [
         {
           id: 'version-1',
-          content: 'Request error occurred: Request failed with status code 524',
+          content:
+            'Request error occurred: Request failed with status code 524',
         },
       ],
     }
@@ -36,7 +37,8 @@ describe('message error utilities', () => {
       versions: [
         {
           id: 'version-1',
-          content: 'Request error occurred: Request failed with status code 524',
+          content:
+            'Request error occurred: Request failed with status code 524',
         },
       ],
     }
@@ -51,7 +53,8 @@ describe('message error utilities', () => {
       versions: [
         {
           id: 'version-1',
-          content: 'Request error occurred: Request failed with status code 524',
+          content:
+            'Request error occurred: Request failed with status code 524',
         },
       ],
     } as Message

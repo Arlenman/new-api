@@ -25,6 +25,7 @@ import {
   Link2,
   LoaderCircle,
   RefreshCw,
+  TestTube,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -55,6 +56,7 @@ import {
   importManagedUpstreamKeys,
   linkManagedUpstreamKeys,
   revealManagedUpstreamKey,
+  testManagedUpstreamKey,
   updateManagedUpstreamKeyGroup,
 } from '../api'
 import {
@@ -120,6 +122,16 @@ function getKeyGroupValue(
   return key.group?.trim() || ''
 }
 
+function formatKeyTestDuration(time?: number): string | undefined {
+  if (typeof time !== 'number' || !Number.isFinite(time) || time < 0) {
+    return undefined
+  }
+
+  const responseTime = Math.round(time * 1000)
+  if (responseTime >= 1000) return `${(responseTime / 1000).toFixed(2)} s`
+  return `${responseTime} ms`
+}
+
 export function UpstreamKeysTable({
   channel,
   snapshot,
@@ -134,6 +146,7 @@ export function UpstreamKeysTable({
   const [importDialogOpen, setImportDialogOpen] = useState(false)
   const [importing, setImporting] = useState(false)
   const [linking, setLinking] = useState(false)
+  const [testingKeyIds, setTestingKeyIds] = useState<Set<number>>(new Set())
   const [updatingGroupKeyIds, setUpdatingGroupKeyIds] = useState<Set<number>>(
     new Set()
   )
@@ -317,6 +330,44 @@ export function UpstreamKeysTable({
     }
   }
 
+  async function testKey(keyId: number) {
+    if (testingKeyIds.has(keyId)) return
+    setTestingKeyIds((current) => new Set(current).add(keyId))
+    try {
+      const response = await testManagedUpstreamKey(channel.id, keyId)
+      if (response.success) {
+        const duration = formatKeyTestDuration(response.time)
+        toast.success(
+          t('Upstream key test succeeded'),
+          duration
+            ? {
+                description: t('Response time: {{duration}}', { duration }),
+              }
+            : undefined
+        )
+        return
+      }
+
+      const message = response.message || t('Request failed')
+      toast.error(t('Upstream key test failed'), {
+        description: response.error_code
+          ? `${message} (${response.error_code})`
+          : message,
+      })
+    } catch (error) {
+      toast.error(t('Upstream key test failed'), {
+        description:
+          error instanceof Error ? error.message : t('Request failed'),
+      })
+    } finally {
+      setTestingKeyIds((current) => {
+        const next = new Set(current)
+        next.delete(keyId)
+        return next
+      })
+    }
+  }
+
   function toggleKey(keyId: number, checked: boolean) {
     setSelectedKeyIds((current) => {
       const next = new Set(current)
@@ -459,6 +510,7 @@ export function UpstreamKeysTable({
               <TableBody className='[&>tr]:h-11'>
                 {keys.map((key) => {
                   const revealed = revealedKeys[key.id]
+                  const testing = testingKeyIds.has(key.id)
                   const keyAccessibleName =
                     key.name || key.masked_key || String(key.id)
                   const currentGroupValue = getKeyGroupValue(
@@ -612,6 +664,22 @@ export function UpstreamKeysTable({
                       </TableCell>
                       <TableCell className='py-1'>
                         <div className='flex justify-end gap-1'>
+                          <Button
+                            variant='ghost'
+                            size='icon-sm'
+                            aria-label={t('Test upstream key {{name}}', {
+                              name: keyAccessibleName,
+                            })}
+                            aria-busy={testing}
+                            onClick={() => void testKey(key.id)}
+                            disabled={testing}
+                          >
+                            {testing ? (
+                              <LoaderCircle className='animate-spin' />
+                            ) : (
+                              <TestTube />
+                            )}
+                          </Button>
                           <Button
                             variant='ghost'
                             size='icon-sm'

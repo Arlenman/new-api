@@ -24,6 +24,7 @@ import type {
   TokenTagOptionItem,
   TokenTagQuotaDataItem,
   TokenTagQuotaSummary,
+  TokenTagQuotaTrendItem,
   UptimeGroupResult,
 } from './types'
 
@@ -100,6 +101,7 @@ export async function getTokenTagQuotaDates(
     success: boolean
     data?: TokenTagQuotaDataItem[]
     summary?: TokenTagQuotaSummary
+    trend?: TokenTagQuotaTrendItem[]
     message?: string
   }>(endpoint, { params })
   return res.data

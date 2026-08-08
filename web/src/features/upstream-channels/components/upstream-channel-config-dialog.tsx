@@ -38,6 +38,7 @@ import {
   getUpstreamAccessTokenRecommendation,
   getUpstreamChannelDefaultName,
   hasUsableUpstreamCredentials,
+  isValidUpstreamProxy,
 } from '../lib'
 import type {
   CreateUpstreamChannelConfig,
@@ -70,6 +71,8 @@ export function UpstreamChannelConfigDialog({
   const [authType, setAuthType] = useState<UpstreamAuthType>('password')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [proxy, setProxy] = useState('')
+  const [proxyError, setProxyError] = useState('')
   const [balanceThreshold, setBalanceThreshold] = useState('0')
   const [multiplier, setMultiplier] = useState('1')
   const [autoRefreshInterval, setAutoRefreshInterval] = useState('300')
@@ -122,6 +125,8 @@ export function UpstreamChannelConfigDialog({
     )
     setUsername(accessTokenRecommendation?.username ?? channel?.username ?? '')
     setPassword('')
+    setProxy(channel?.proxy || '')
+    setProxyError('')
     setBalanceThreshold(String(channel?.balance_threshold ?? 0))
     setMultiplier(String(channel?.multiplier ?? 1))
     setAutoRefreshInterval(String(channel?.auto_refresh_interval ?? 300))
@@ -130,9 +135,16 @@ export function UpstreamChannelConfigDialog({
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    const trimmedProxy = proxy.trim()
+    if (!isValidUpstreamProxy(trimmedProxy)) {
+      setProxyError(t('Invalid upstream proxy address'))
+      return
+    }
+    setProxyError('')
     onSave({
       base_url: baseURL.trim(),
       name: name.trim(),
+      proxy: trimmedProxy,
       provider,
       auth_type: authType,
       username: username.trim(),
@@ -202,6 +214,44 @@ export function UpstreamChannelConfigDialog({
                 onChange={(event) => setName(event.target.value)}
                 placeholder={getUpstreamChannelDefaultName(baseURL)}
               />
+            </div>
+            <div className='space-y-1.5'>
+              <Label htmlFor='upstream-proxy'>{t('Proxy Address')}</Label>
+              <Input
+                id='upstream-proxy'
+                type='text'
+                maxLength={2048}
+                value={proxy}
+                onChange={(event) => {
+                  setProxy(event.target.value)
+                  setProxyError('')
+                }}
+                placeholder='socks5h://user:password@127.0.0.1:7891'
+                aria-invalid={proxyError !== ''}
+                aria-describedby={
+                  proxyError
+                    ? 'upstream-proxy-help upstream-proxy-error'
+                    : 'upstream-proxy-help'
+                }
+              />
+              <div
+                id='upstream-proxy-help'
+                className='text-muted-foreground space-y-0.5 text-xs'
+              >
+                <p>{t('Leave blank to connect directly')}</p>
+                <p>{t('Supports HTTP, HTTPS, SOCKS5, and SOCKS5H proxies')}</p>
+                {channel?.has_proxy && (
+                  <p>{t('Leave unchanged to keep the saved proxy')}</p>
+                )}
+              </div>
+              {proxyError && (
+                <p
+                  id='upstream-proxy-error'
+                  className='text-destructive text-xs'
+                >
+                  {proxyError}
+                </p>
+              )}
             </div>
             <div className='space-y-1.5'>
               <Label htmlFor='upstream-provider'>{t('Provider type')}</Label>

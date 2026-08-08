@@ -44,13 +44,13 @@ export function parseRequestErrorDetails(error: unknown): RequestErrorDetails {
     requestError?.response?.data?.message
   const status = requestError?.response?.status
   const errorMessage =
-    responseMessage ||
-    requestError?.message ||
-    ERROR_MESSAGES.API_REQUEST_ERROR
+    responseMessage || requestError?.message || ERROR_MESSAGES.API_REQUEST_ERROR
 
   return {
     errorCode: requestError?.response?.data?.error?.code || undefined,
     errorMessage:
-      status && responseMessage ? `HTTP ${status}: ${responseMessage}` : errorMessage,
+      status && responseMessage
+        ? `HTTP ${status}: ${responseMessage}`
+        : errorMessage,
   }
 }

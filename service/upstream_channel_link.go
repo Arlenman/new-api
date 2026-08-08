@@ -38,7 +38,10 @@ func LinkUpstreamChannelKeys(ctx context.Context, upstreamChannelID int) (*model
 	if err != nil {
 		return row, UpstreamSnapshot{}, UpstreamKeyLinkSummary{}, err
 	}
-	linkCtx, cancel, client := refreshUpstreamClient(ctx)
+	linkCtx, cancel, client, err := refreshUpstreamClient(ctx, row)
+	if err != nil {
+		return row, UpstreamSnapshot{}, UpstreamKeyLinkSummary{}, err
+	}
 	defer cancel()
 
 	localSources, err := listMatchingChannelKeySources(row.BaseURL)

@@ -31,8 +31,5 @@ export function shouldKeepImagePlaygroundMounted(
   currentUserId: number | null | undefined,
   active: boolean
 ): boolean {
-  return Boolean(
-    currentUserId &&
-      (active || mountedUserId === currentUserId)
-  )
+  return Boolean(currentUserId && (active || mountedUserId === currentUserId))
 }

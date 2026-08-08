@@ -258,7 +258,7 @@ const webdavDomainKeys: AppSyncDomainKey[] = ["canvas", "assets", "image-workben
             "prompt storage import",
         ],
         [
-            'const PROMPT_SOURCE_STORE_KEY = "infinite-canvas:prompt_source_store";',
+            'const PROMPT_SOURCE_STORE_KEY = "infinite-canvas:prompt_source_store_v2";',
             'const PROMPT_SOURCE_STORE_KEY = namespacedStorageKey("infinite-canvas:prompt_source_store");',
             "prompt storage key",
         ],
@@ -309,6 +309,217 @@ const webdavDomainKeys: AppSyncDomainKey[] = ["canvas", "assets", "image-workben
             'const CANVAS_STORE_KEY = "infinite-canvas:canvas_store";',
             'const CANVAS_STORE_KEY = namespacedStorageKey("infinite-canvas:canvas_store");',
             "canvas storage key",
+        ],
+    ]);
+    await patchFile(path.join(sourceRoot, "stores/canvas/use-canvas-ui-store.ts"), [
+        [
+            'import { create } from "zustand";\n',
+            'import { create } from "zustand";\n\nexport type CanvasProjectViewMode = "grid" | "list";\n',
+            "canvas project view mode type",
+        ],
+        [
+            '    selectedProjectIds: string[];\n',
+            '    selectedProjectIds: string[];\n    projectViewMode: CanvasProjectViewMode;\n',
+            "canvas project view mode state type",
+        ],
+        [
+            '    toggleSelectedProjectId: (id: string, selected: boolean) => void;\n',
+            '    toggleSelectedProjectId: (id: string, selected: boolean) => void;\n    setSelectedProjectIds: (ids: string[]) => void;\n    setProjectViewMode: (mode: CanvasProjectViewMode) => void;\n',
+            "canvas selection and view setter types",
+        ],
+        [
+            '    selectedProjectIds: [],\n',
+            '    selectedProjectIds: [],\n    projectViewMode: "grid",\n',
+            "canvas project default view mode",
+        ],
+        [
+            '    toggleSelectedProjectId: (id, selected) => set((state) => ({ selectedProjectIds: selected ? [...new Set([...state.selectedProjectIds, id])] : state.selectedProjectIds.filter((item) => item !== id) })),\n',
+            '    toggleSelectedProjectId: (id, selected) => set((state) => ({ selectedProjectIds: selected ? [...new Set([...state.selectedProjectIds, id])] : state.selectedProjectIds.filter((item) => item !== id) })),\n    setSelectedProjectIds: (selectedProjectIds) => set({ selectedProjectIds: [...new Set(selectedProjectIds)] }),\n    setProjectViewMode: (projectViewMode) => set({ projectViewMode }),\n',
+            "canvas selection and view setters",
+        ],
+    ]);
+    await patchFile(path.join(sourceRoot, "pages/canvas/index.tsx"), [
+        [
+            'import { Download, FileUp, Plus } from "lucide-react";\n',
+            'import { Download, FileUp, LayoutGrid, List, Plus } from "lucide-react";\n',
+            "canvas project view icons",
+        ],
+        [
+            '    const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);\n    const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);\n',
+            `    const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);
+    const setSelectedIds = useCanvasUiStore((state) => state.setSelectedProjectIds);
+    const viewMode = useCanvasUiStore((state) => state.projectViewMode);
+    const setViewMode = useCanvasUiStore((state) => state.setProjectViewMode);
+    const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);
+    const projectIds = projects.map((project) => project.id);
+    const selectedProjects = projects.filter((project) => selectedIds.includes(project.id));
+    const allSelected = projectIds.length > 0 && projectIds.every((id) => selectedIds.includes(id));
+`,
+            "canvas project selection state",
+        ],
+        [
+            `    const mode = searchParams.get("mode");
+    const agentMode = mode === "new" || mode === "recent" || mode === "choose";
+    const agentQuery = agentMode ? \`?\${searchParams.toString()}\` : "";
+    const enterProject = (id: string) => {
+        navigate(\`/canvas/\${id}\${agentQuery}\`);
+    };
+    const createAndEnter = () => enterProject(createProject(\`无限画布 \${projects.length + 1}\`));`,
+            `    const mode = searchParams.get("mode");
+    const launchId = searchParams.get("launchId");
+    const validLaunchId = launchId && /^[A-Za-z0-9_-]{1,128}$/.test(launchId) ? launchId : null;
+    const launchStorageKey = validLaunchId ? \`infinite-canvas:launch:\${validLaunchId}\` : null;
+    const projectSearchParams = new URLSearchParams(searchParams);
+    projectSearchParams.delete("mode");
+    projectSearchParams.delete("launchId");
+    const projectQuery = projectSearchParams.toString() ? \`?\${projectSearchParams.toString()}\` : "";
+    const enterProject = (id: string, replace = false) => {
+        navigate(\`/canvas/\${id}\${projectQuery}\`, { replace });
+    };
+    const createAndEnter = () => enterProject(createProject(\`无限画布 \${projects.length + 1}\`));`,
+            "canvas one-shot launch parameters",
+        ],
+        [
+            `    useEffect(() => {
+        if (!hydrated || autoOpenRef.current || (mode !== "new" && mode !== "recent")) return;
+        autoOpenRef.current = true;
+        enterProject(mode === "new" ? createProject(\`无限画布 \${projects.length + 1}\`) : projects[0]?.id || createProject(\`无限画布 \${projects.length + 1}\`));
+    }, [createProject, hydrated, mode, projects]);`,
+            `    useEffect(() => {
+        if (!hydrated || autoOpenRef.current || (mode !== "new" && mode !== "recent")) return;
+        autoOpenRef.current = true;
+
+        if (mode === "recent") {
+            const projectId = projects[0]?.id || createProject(\`无限画布 \${projects.length + 1}\`);
+            enterProject(projectId, true);
+            return;
+        }
+
+        if (launchStorageKey) {
+            const launchedProjectId = sessionStorage.getItem(launchStorageKey);
+            if (launchedProjectId && projects.some((project) => project.id === launchedProjectId)) {
+                enterProject(launchedProjectId, true);
+                return;
+            }
+        }
+
+        const projectId = createProject(\`无限画布 \${projects.length + 1}\`);
+        if (launchStorageKey) sessionStorage.setItem(launchStorageKey, projectId);
+        enterProject(projectId, true);
+    }, [createProject, hydrated, launchStorageKey, mode, projects]);`,
+            "canvas one-shot launch effect",
+        ],
+        [
+            '                    <div className="flex items-center gap-2">\n                        {selectedIds.length ? (',
+            '                    <div className="flex flex-wrap items-center gap-2">\n                        {projects.length ? (\n                            <>\n                                <div role="group" aria-label="画布视图" className="flex items-center rounded-lg border border-stone-200 p-0.5 dark:border-stone-800">\n                                    <Button type={viewMode === "grid" ? "primary" : "text"} size="small" icon={<LayoutGrid className="size-4" />} aria-pressed={viewMode === "grid"} onClick={() => setViewMode("grid")}>\n                                        画册\n                                    </Button>\n                                    <Button type={viewMode === "list" ? "primary" : "text"} size="small" icon={<List className="size-4" />} aria-pressed={viewMode === "list"} onClick={() => setViewMode("list")}>\n                                        列表\n                                    </Button>\n                                </div>\n                                <Button disabled={!hydrated} onClick={() => setSelectedIds(allSelected ? [] : projectIds)}>\n                                    {allSelected ? "全不选" : "全选"}\n                                </Button>\n                            </>\n                        ) : null}\n                        {selectedProjects.length ? (',
+            "canvas select all controls",
+        ],
+        [
+            'onClick={() => void exportCanvasProjects(projects.filter((project) => selectedIds.includes(project.id)), `无限画布-${selectedIds.length}个项目`)}',
+            'onClick={() => void exportCanvasProjects(selectedProjects, `无限画布-${selectedProjects.length}个项目`)}',
+            "canvas selected export projects",
+        ],
+        [
+            'onClick={() => setDeleteIds(selectedIds)}',
+            'onClick={() => setDeleteIds(selectedProjects.map((project) => project.id))}',
+            "canvas selected delete projects",
+        ],
+        [
+            '                    <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">',
+            '                    <div className={viewMode === "grid" ? "grid gap-5 sm:grid-cols-2 xl:grid-cols-3" : "overflow-hidden rounded-xl border border-stone-200 divide-y divide-stone-200 dark:border-stone-800 dark:divide-stone-800"}>',
+            "canvas project view layout",
+        ],
+        [
+            '                            <CanvasProjectCard key={project.id} project={project} />',
+            '                            <CanvasProjectCard key={project.id} project={project} viewMode={viewMode} />',
+            "canvas project view mode prop",
+        ],
+    ]);
+    await patchFile(path.join(sourceRoot, "components/canvas/canvas-project-card.tsx"), [
+        [
+            'import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";\n',
+            'import { useCanvasUiStore, type CanvasProjectViewMode } from "@/stores/canvas/use-canvas-ui-store";\n',
+            "canvas project view mode import",
+        ],
+        [
+            'export function CanvasProjectCard({ project }: { project: CanvasProject }) {',
+            'export function CanvasProjectCard({ project, viewMode }: { project: CanvasProject; viewMode: CanvasProjectViewMode }) {',
+            "canvas project view mode prop",
+        ],
+        [
+            '        <article className="group flex min-h-44 cursor-pointer flex-col justify-between rounded-2xl bg-[#f1eee8] p-5 transition hover:bg-[#ebe6dc] dark:bg-white/5 dark:hover:bg-white/10" onClick={() => !editing && open()}>',
+            `        <article
+            className={
+                viewMode === "grid"
+                    ? "group flex min-h-44 cursor-pointer flex-col justify-between rounded-2xl bg-[#f1eee8] p-5 transition hover:bg-[#ebe6dc] dark:bg-white/5 dark:hover:bg-white/10"
+                    : "group grid min-h-12 cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 px-4 py-2 transition hover:bg-stone-50 dark:hover:bg-white/5"
+            }
+            onClick={() => !editing && open()}
+        >`,
+            "canvas project responsive view",
+        ],
+        [
+            '            <div className="flex items-start gap-3">',
+            '            <div className={viewMode === "grid" ? "flex items-start gap-3" : "contents"}>',
+            "canvas project view main layout",
+        ],
+        [
+            '                    className="mt-1 size-4 accent-stone-950 dark:accent-stone-100"',
+            '                    className={viewMode === "grid" ? "mt-1 size-4 accent-stone-950 dark:accent-stone-100" : "size-4 accent-stone-950 dark:accent-stone-100"}',
+            "canvas project view checkbox alignment",
+        ],
+        [
+            '                        className="min-w-0 cursor-pointer text-left"',
+            '                        className={viewMode === "grid" ? "min-w-0 cursor-pointer text-left" : "flex min-w-0 cursor-pointer items-center gap-3 text-left"}',
+            "canvas project view title layout",
+        ],
+        [
+            '                        <h2 className="truncate text-xl font-semibold">{project.title}</h2>',
+            '                        <h2 className={viewMode === "grid" ? "truncate text-xl font-semibold" : "min-w-0 flex-1 truncate text-sm font-medium"}>{project.title}</h2>',
+            "canvas project view title style",
+        ],
+        [
+            '                        <p className="mt-3 text-sm leading-6 text-stone-600 dark:text-stone-400">',
+            '                        <p className={viewMode === "grid" ? "mt-3 text-sm leading-6 text-stone-600 dark:text-stone-400" : "hidden shrink-0 whitespace-nowrap text-xs text-stone-500 sm:block"}>',
+            "canvas project view statistics",
+        ],
+        [
+            '            <div className="mt-8 flex items-end justify-between gap-3">',
+            '            <div className={viewMode === "grid" ? "mt-8 flex items-end justify-between gap-3" : "contents"}>',
+            "canvas project view metadata layout",
+        ],
+        [
+            '                <p className="text-xs text-stone-500">更新于 {new Date(project.updatedAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</p>',
+            `                <p className={viewMode === "grid" ? "text-xs text-stone-500" : "hidden whitespace-nowrap text-xs text-stone-500 md:block"}>
+                    更新于 {new Date(project.updatedAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                </p>`,
+            "canvas project view update time",
+        ],
+    ]);
+    await patchFile(path.join(root, "plugins/infinite-canvas/skills/open-canvas/SKILL.md"), [
+        [
+            'https://canvas.best/canvas?mode=new&agentUrl=<Local URL>&agentToken=<Connect token>',
+            'https://canvas.best/canvas?mode=recent&agentUrl=<Local URL>&agentToken=<Connect token>',
+            "canvas online default open URL",
+        ],
+        [
+            '<Vite Local 地址>/canvas?mode=new&agentUrl=<Local URL>&agentToken=<Connect token>',
+            '<Vite Local 地址>/canvas?mode=recent&agentUrl=<Local URL>&agentToken=<Connect token>',
+            "canvas local default open URL",
+        ],
+        [
+            `用户没有明确指定打开方式时，始终使用 \`mode=new\` 新建画布。只有用户明确要求时才替换为：
+
+- 最近画布：\`mode=recent\`
+- 自己选择：\`mode=choose\``,
+            `用户没有明确指定打开方式时，默认使用 \`mode=recent\` 恢复最近画布。只有用户明确要求新建画布时，才使用 \`mode=new\`，并为这一次打开生成稳定的 \`launchId\`：
+
+- 最近画布：\`mode=recent\`
+- 新建画布：\`mode=new&launchId=<唯一启动 ID>\`
+- 自己选择：\`mode=choose\`
+
+同一次打开动作发生重试、重新导航或页面重挂载时，必须复用同一个 \`launchId\`，避免重复创建画布。`,
+            "canvas default open mode",
         ],
     ]);
     await patchFile(path.join(sourceRoot, "stores/use-agent-store.ts"), [

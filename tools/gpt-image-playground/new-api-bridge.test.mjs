@@ -5,7 +5,7 @@ import test from 'node:test'
 import vm from 'node:vm'
 
 const require = createRequire(import.meta.url)
-const ts = require('../../web/default/node_modules/typescript/lib/typescript.js')
+const ts = require('../../web/node_modules/typescript/lib/typescript.js')
 const source = await readFile(new URL('./new-api-bridge.ts', import.meta.url), 'utf8')
 
 function createStorage() {
@@ -38,6 +38,7 @@ function createDefaultProfile() {
     codexCli: false,
     apiProxy: false,
     streamImages: false,
+    timeout: 600,
   }
 }
 
@@ -119,6 +120,7 @@ function loadBridge() {
         createDefaultOpenAIProfile(options = {}) {
           return { ...createDefaultProfile(), ...options }
         },
+        DEFAULT_API_TIMEOUT: 600,
         DEFAULT_IMAGES_MODEL: 'gpt-image-1',
         DEFAULT_RESPONSES_MODEL: 'gpt-5.4',
       }
@@ -185,6 +187,8 @@ function assertManagedNewApiSettings(settings, streamImages = true) {
     apiMode: imageProfile.apiMode,
     apiKey: imageProfile.apiKey,
     streamImages: imageProfile.streamImages,
+    timeout: imageProfile.timeout,
+    managedAsyncImages: imageProfile.managedAsyncImages,
   }, {
     name: 'New API · test2',
     provider: 'openai',
@@ -192,6 +196,8 @@ function assertManagedNewApiSettings(settings, streamImages = true) {
     apiMode: 'images',
     apiKey: 'utrs_runtime-session',
     streamImages,
+    timeout: 600,
+    managedAsyncImages: true,
   })
   assert.deepEqual(agentProfile && {
     name: agentProfile.name,
@@ -200,6 +206,7 @@ function assertManagedNewApiSettings(settings, streamImages = true) {
     apiMode: agentProfile.apiMode,
     apiKey: agentProfile.apiKey,
     streamImages: agentProfile.streamImages,
+    timeout: agentProfile.timeout,
   }, {
     name: 'New API · test2 · Agent',
     provider: 'openai',
@@ -207,6 +214,7 @@ function assertManagedNewApiSettings(settings, streamImages = true) {
     apiMode: 'responses',
     apiKey: 'utrs_runtime-session',
     streamImages,
+    timeout: 600,
   })
 }
 
@@ -253,6 +261,22 @@ test('repairs managed settings overwritten by another store refresh while New AP
   harness.dispatch(newApiConfiguration())
 
   harness.replaceSettings(createDefaultSettings())
+
+  assertManagedNewApiSettings(harness.getSettings())
+})
+
+test('repairs legacy managed profile timeouts instead of retaining an old 55 second value', () => {
+  const harness = loadBridge()
+  harness.bridge.installNewApiBridge()
+  harness.dispatch(newApiConfiguration())
+
+  const settingsWithLegacyTimeout = structuredClone(harness.getSettings())
+  settingsWithLegacyTimeout.profiles
+    .filter((profile) => profile.id.startsWith('new-api-managed'))
+    .forEach((profile) => {
+      profile.timeout = 55
+    })
+  harness.replaceSettings(settingsWithLegacyTimeout)
 
   assertManagedNewApiSettings(harness.getSettings())
 })

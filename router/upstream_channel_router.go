@@ -11,6 +11,7 @@ func registerUpstreamChannelRoutes(apiRouter *gin.RouterGroup) {
 	upstreamRoute.Use(middleware.RootAuth())
 	{
 		upstreamRoute.GET("/", controller.GetUpstreamChannels)
+		upstreamRoute.GET("/statistics", controller.GetUpstreamChannelStatistics)
 		upstreamRoute.POST("/", controller.CreateUpstreamChannel)
 		upstreamRoute.POST("/refresh", controller.RefreshAllUpstreamChannels)
 		upstreamRoute.GET("/priority-schedule", controller.GetUpstreamPrioritySchedule)
@@ -24,6 +25,7 @@ func registerUpstreamChannelRoutes(apiRouter *gin.RouterGroup) {
 		upstreamRoute.PATCH("/:id/note", controller.UpdateUpstreamChannelNote)
 		upstreamRoute.PATCH("/:id/selected-group", controller.UpdateUpstreamChannelSelectedGroup)
 		upstreamRoute.PATCH("/:id/default-test-model", controller.UpdateUpstreamChannelDefaultTestModel)
+		upstreamRoute.PATCH("/:id/default-test-endpoint", controller.UpdateUpstreamChannelDefaultTestEndpoint)
 		upstreamRoute.POST("/:id/refresh", controller.RefreshUpstreamChannel)
 		upstreamRoute.POST("/:id/refresh-balance", controller.RefreshUpstreamChannelBalance)
 		upstreamRoute.POST("/:id/refresh-keys", controller.RefreshUpstreamChannelKeys)
@@ -32,6 +34,7 @@ func registerUpstreamChannelRoutes(apiRouter *gin.RouterGroup) {
 		upstreamRoute.PATCH("/:id/keys/:key_id/group", controller.UpdateUpstreamChannelKeyGroup)
 		upstreamRoute.POST("/:id/keys/import", controller.ImportUpstreamChannelKeys)
 		upstreamRoute.POST("/:id/keys/models", controller.FetchUpstreamChannelKeyModels)
+		upstreamRoute.POST("/:id/keys/:key_id/test", controller.TestUpstreamChannelKey)
 		upstreamRoute.POST("/:id/keys/:key_id", controller.RevealUpstreamChannelKey)
 	}
 }

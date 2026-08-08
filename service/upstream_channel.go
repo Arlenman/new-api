@@ -39,6 +39,73 @@ type UpstreamChannelLogMetrics struct {
 	AverageFirstTokenLatencyMs *float64
 }
 
+type UpstreamChannelStatisticsItem struct {
+	ChannelID   int    `json:"channel_id"`
+	ChannelName string `json:"channel_name"`
+	BaseURL     string `json:"base_url"`
+	Provider    string `json:"provider"`
+	Quota       int64  `json:"quota"`
+	TokenUsed   int64  `json:"token_used"`
+	Count       int64  `json:"count"`
+	LastUsedAt  int64  `json:"last_used_at"`
+}
+
+type UpstreamChannelStatisticsSummary struct {
+	Quota     int64 `json:"quota"`
+	TokenUsed int64 `json:"token_used"`
+	Count     int64 `json:"count"`
+}
+
+type UpstreamChannelStatisticsTrendItem struct {
+	ChannelID   int    `json:"channel_id"`
+	ChannelName string `json:"channel_name"`
+	BaseURL     string `json:"base_url"`
+	Provider    string `json:"provider"`
+	CreatedAt   int64  `json:"created_at"`
+	Quota       int64  `json:"quota"`
+	TokenUsed   int64  `json:"token_used"`
+	Count       int64  `json:"count"`
+}
+
+type UpstreamChannelStatisticsResult struct {
+	Data    []*UpstreamChannelStatisticsItem
+	Summary UpstreamChannelStatisticsSummary
+	Trend   []*UpstreamChannelStatisticsTrendItem
+}
+
+func NormalizeUpstreamProxyURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	if len(raw) > 2048 {
+		return "", errors.New("invalid upstream proxy address")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "", errors.New("invalid upstream proxy address")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	switch parsed.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return "", errors.New("invalid upstream proxy address")
+	}
+	return parsed.String(), nil
+}
+
+func MaskUpstreamProxyURL(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.User == nil {
+		return strings.TrimSpace(raw)
+	}
+	if _, hasPassword := parsed.User.Password(); !hasPassword {
+		return parsed.String()
+	}
+	maskedUser := url.User(parsed.User.Username()).String() + ":********@"
+	return strings.Replace(parsed.String(), parsed.User.String()+"@", maskedUser, 1)
+}
+
 func NormalizeUpstreamBaseURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -150,6 +217,120 @@ func GetUpstreamChannelLogMetricsSince(startTimestamp int64) (map[string]Upstrea
 	return result, nil
 }
 
+func GetUpstreamChannelStatistics(startTimestamp int64, endTimestamp int64) (UpstreamChannelStatisticsResult, error) {
+	result := UpstreamChannelStatisticsResult{
+		Data:  make([]*UpstreamChannelStatisticsItem, 0),
+		Trend: make([]*UpstreamChannelStatisticsTrendItem, 0),
+	}
+	managedChannels, err := model.ListUpstreamChannels()
+	if err != nil {
+		return result, err
+	}
+
+	managedIndexByBaseURL := make(map[string]int, len(managedChannels))
+	for _, channel := range managedChannels {
+		item := &UpstreamChannelStatisticsItem{
+			ChannelID:   channel.Id,
+			ChannelName: channel.Name,
+			BaseURL:     channel.BaseURL,
+			Provider:    channel.Provider,
+		}
+		result.Data = append(result.Data, item)
+		normalizedBaseURL, normalizeErr := NormalizeUpstreamBaseURL(channel.BaseURL)
+		if normalizeErr == nil {
+			currentIndex := len(result.Data) - 1
+			existingIndex, exists := managedIndexByBaseURL[normalizedBaseURL]
+			if !exists || channel.Id < result.Data[existingIndex].ChannelID {
+				managedIndexByBaseURL[normalizedBaseURL] = currentIndex
+			}
+		}
+	}
+
+	sources, err := model.ListExplicitChannelSources()
+	if err != nil {
+		return result, err
+	}
+	managedIndexBySourceChannelID := make(map[int]int)
+	sourceChannelIDs := make([]int, 0, len(sources))
+	for _, source := range sources {
+		normalizedBaseURL, normalizeErr := NormalizeUpstreamBaseURL(source.BaseURL)
+		if normalizeErr != nil {
+			continue
+		}
+		managedIndex, exists := managedIndexByBaseURL[normalizedBaseURL]
+		if !exists {
+			continue
+		}
+		managedIndexBySourceChannelID[source.ID] = managedIndex
+		sourceChannelIDs = append(sourceChannelIDs, source.ID)
+	}
+
+	totals, trend, err := model.GetUpstreamChannelLogStatistics(sourceChannelIDs, startTimestamp, endTimestamp)
+	if err != nil {
+		return result, err
+	}
+	for _, total := range totals {
+		managedIndex, exists := managedIndexBySourceChannelID[total.ChannelID]
+		if !exists {
+			continue
+		}
+		item := result.Data[managedIndex]
+		item.Quota += total.Quota
+		item.TokenUsed += total.TokenUsed
+		item.Count += total.Count
+		if total.LastUsedAt > item.LastUsedAt {
+			item.LastUsedAt = total.LastUsedAt
+		}
+	}
+	for _, item := range result.Data {
+		result.Summary.Quota += item.Quota
+		result.Summary.TokenUsed += item.TokenUsed
+		result.Summary.Count += item.Count
+	}
+
+	type trendKey struct {
+		ManagedIndex int
+		CreatedAt    int64
+	}
+	aggregatedTrend := make(map[trendKey]*UpstreamChannelStatisticsTrendItem)
+	for _, point := range trend {
+		managedIndex, exists := managedIndexBySourceChannelID[point.ChannelID]
+		if !exists {
+			continue
+		}
+		key := trendKey{ManagedIndex: managedIndex, CreatedAt: point.CreatedAt}
+		item, exists := aggregatedTrend[key]
+		if !exists {
+			channel := result.Data[managedIndex]
+			item = &UpstreamChannelStatisticsTrendItem{
+				ChannelID:   channel.ChannelID,
+				ChannelName: channel.ChannelName,
+				BaseURL:     channel.BaseURL,
+				Provider:    channel.Provider,
+				CreatedAt:   point.CreatedAt,
+			}
+			aggregatedTrend[key] = item
+		}
+		item.Quota += point.Quota
+		item.TokenUsed += point.TokenUsed
+		item.Count += point.Count
+	}
+	trendKeys := make([]trendKey, 0, len(aggregatedTrend))
+	for key := range aggregatedTrend {
+		trendKeys = append(trendKeys, key)
+	}
+	sort.Slice(trendKeys, func(i int, j int) bool {
+		if trendKeys[i].CreatedAt == trendKeys[j].CreatedAt {
+			return result.Data[trendKeys[i].ManagedIndex].ChannelID < result.Data[trendKeys[j].ManagedIndex].ChannelID
+		}
+		return trendKeys[i].CreatedAt < trendKeys[j].CreatedAt
+	})
+	for _, key := range trendKeys {
+		result.Trend = append(result.Trend, aggregatedTrend[key])
+	}
+	return result, nil
+}
+
 func DeleteUpstreamChannel(id int) error {
 	return model.DeleteUpstreamChannel(id)
 }
@@ -215,6 +396,14 @@ func UpdateUpstreamChannelDefaultTestModel(id int, defaultTestModel string) (*mo
 		}
 	}
 	if err = model.UpdateUpstreamChannelDefaultTestModel(id, defaultTestModel); err != nil {
+		return nil, err
+	}
+	return model.GetUpstreamChannelByID(id)
+}
+
+func UpdateUpstreamChannelDefaultTestEndpoint(id int, defaultTestEndpoint string) (*model.UpstreamChannel, error) {
+	defaultTestEndpoint = strings.TrimSpace(defaultTestEndpoint)
+	if err := model.UpdateUpstreamChannelDefaultTestEndpoint(id, defaultTestEndpoint); err != nil {
 		return nil, err
 	}
 	return model.GetUpstreamChannelByID(id)

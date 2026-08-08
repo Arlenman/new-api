@@ -1,6 +1,8 @@
 package service
 
 import (
+	"errors"
+	"fmt"
 	"math"
 	"net/http/httptest"
 	"testing"
@@ -759,6 +761,46 @@ func TestCalculateTextQuotaSummaryFixedPriceAppliesImageCountOnceAndAllowsOverri
 	relayInfo.PriceData.AddOtherRatio("n", 2)
 	summary = calculateTextQuotaSummary(ctx, relayInfo, usage)
 	require.Equal(t, 120000, summary.Quota)
+}
+
+type failingCheckedBillingSettler struct {
+	err error
+}
+
+func (s *failingCheckedBillingSettler) Settle(int) error         { return s.err }
+func (s *failingCheckedBillingSettler) Refund(*gin.Context)      {}
+func (s *failingCheckedBillingSettler) NeedsRefund() bool        { return true }
+func (s *failingCheckedBillingSettler) GetPreConsumedQuota() int { return 1 }
+func (s *failingCheckedBillingSettler) GetChargedQuota() int     { return 1 }
+func (s *failingCheckedBillingSettler) Reserve(int) error        { return nil }
+
+func TestPostTextConsumeQuotaCheckedDoesNotObserveUsageBeforeSettlement(t *testing.T) {
+	ruleName := fmt.Sprintf("checked_settlement_%d", time.Now().UnixNano())
+	usingGroup := "default"
+	keyFP := fmt.Sprintf("fp_%d", time.Now().UnixNano())
+	ctx := buildChannelAffinityStatsContextForTest(ruleName, usingGroup, keyFP)
+	settleErr := errors.New("settlement unavailable")
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName:         "gpt-image-2",
+		RelayFormat:             types.RelayFormatOpenAIImage,
+		FinalRequestRelayFormat: types.RelayFormatOpenAIImage,
+		StartTime:               time.Now(),
+		Billing:                 &failingCheckedBillingSettler{err: settleErr},
+		PriceData: hosttypes.PriceData{
+			ModelRatio:      1,
+			CompletionRatio: 1,
+			GroupRatioInfo: hosttypes.GroupRatioInfo{
+				GroupRatio: 1,
+			},
+		},
+	}
+	usage := &dto.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30}
+
+	err := PostTextConsumeQuotaChecked(ctx, relayInfo, usage, nil)
+	assert.ErrorIs(t, err, settleErr)
+	stats := GetChannelAffinityUsageCacheStats(ruleName, usingGroup, keyFP)
+	assert.Zero(t, stats.Total)
+	assert.Zero(t, stats.TotalTokens)
 }
 
 func TestCalculateTextToolCallSurchargeGeneralizedBuiltInTools(t *testing.T) {

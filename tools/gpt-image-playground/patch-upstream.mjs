@@ -3,9 +3,11 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const IMPORT_MARKER = "import App from './App'\n"
+const BRIDGE_IMPORT = "import { installNewApiBridge } from './lib/newApiBridge'\n"
 const INSTALL_MARKER = 'installMobileViewportGuards()\n'
+const BRIDGE_INSTALL = 'installNewApiBridge()\n'
 const DB_IMPORT_MARKER = "import type { AgentConversation, TaskRecord, StoredImage, StoredImageThumbnail } from '../types'\n"
-const DB_IMPORT_REPLACEMENT = `${DB_IMPORT_MARKER}import {\n  ensureLegacyImagePlaygroundIndexedDBMigration,\n  getNewApiImagePlaygroundDatabaseName,\n  notifyNewApiImagePlaygroundStorageChanged,\n} from './newApiStorage'\n`
+const DB_IMPORT_REPLACEMENT = `${DB_IMPORT_MARKER}import {\n  ensureLegacyImagePlaygroundIndexedDBMigration,\n  getNewApiImagePlaygroundDatabaseName,\n  notifyNewApiImagePlaygroundStorageChanged,\n  recordNewApiImagePlaygroundDeletion,\n} from './newApiStorage'\n`
 const DB_NAME_MARKER = "const DB_NAME = 'gpt-image-playground'\n"
 const DB_NAME_REPLACEMENT = 'const DB_NAME = getNewApiImagePlaygroundDatabaseName()\n'
 const DB_OPEN_MARKER = `function openDB(): Promise<IDBDatabase> {
@@ -65,6 +67,16 @@ const DB_TRANSACTION_REPLACEMENT = `function dbTransaction<T>(
   )
 }
 `
+const DB_TASK_DELETE_MARKER = `export function deleteTask(id: string): Promise<undefined> {
+  return dbTransaction(STORE_TASKS, 'readwrite', (s) => s.delete(id))
+}
+`
+const DB_TASK_DELETE_REPLACEMENT = `export async function deleteTask(id: string): Promise<undefined> {
+  await dbTransaction(STORE_TASKS, 'readwrite', (s) => s.delete(id))
+  recordNewApiImagePlaygroundDeletion('task', id)
+  return undefined
+}
+`
 const DB_AGENT_DELETE_MARKER = `export function putAgentConversation(conversation: AgentConversation): Promise<IDBValidKey> {
   return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.put(conversation))
 }
@@ -92,11 +104,28 @@ export function deleteImageThumbnail(id: string): Promise<undefined> {
   return dbTransaction(STORE_THUMBNAILS, 'readwrite', (s) => s.delete(id))
 }
 `
-const DB_REPLACE_AGENT_COMPLETE_MARKER = `        tx.oncomplete = () => resolve(undefined)
+const DB_COMMIT_TASK_DELETION_COMPLETE_MARKER = `        for (const conversation of updatedConversations) conversationStore.put(conversation)
+        tx.oncomplete = () => resolve(undefined)
         tx.onerror = () => reject(tx.error)
         tx.onabort = () => reject(tx.error)
 `
-const DB_REPLACE_AGENT_COMPLETE_REPLACEMENT = `        tx.oncomplete = () => {
+const DB_COMMIT_TASK_DELETION_COMPLETE_REPLACEMENT = `        for (const conversation of updatedConversations) conversationStore.put(conversation)
+        tx.oncomplete = () => {
+          notifyNewApiImagePlaygroundStorageChanged()
+          resolve(undefined)
+        }
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+`
+const DB_REPLACE_AGENT_COMPLETE_MARKER = `        store.clear()
+        for (const conversation of conversations) store.put(conversation)
+        tx.oncomplete = () => resolve(undefined)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+`
+const DB_REPLACE_AGENT_COMPLETE_REPLACEMENT = `        store.clear()
+        for (const conversation of conversations) store.put(conversation)
+        tx.oncomplete = () => {
           notifyNewApiImagePlaygroundStorageChanged()
           resolve(undefined)
         }
@@ -132,12 +161,15 @@ const DB_CLEAR_IMAGE_COMPLETE_REPLACEMENT = `        tx.objectStore(STORE_IMAGES
 const STORE_IMPORT_MARKER = `import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 `
-const STORE_IMPORT_REPLACEMENT = `${STORE_IMPORT_MARKER}import { getNewApiImagePlaygroundStorageKey } from './lib/newApiStorage'
+const STORE_IMPORT_REPLACEMENT = `import { create } from 'zustand'
+import { createJSONStorage, persist } from 'zustand/middleware'
+import { createNewApiImagePlaygroundPersistStorage, getNewApiImagePlaygroundStorageKey } from './lib/newApiStorage'
 import { initializeNewApiImagePlaygroundSync, type ImagePlaygroundSyncResult } from './lib/newApiSync'
 `
 const STORE_PERSIST_NAME_MARKER = `      name: 'gpt-image-playground',
 `
 const STORE_PERSIST_NAME_REPLACEMENT = `      name: getNewApiImagePlaygroundStorageKey(),
+      storage: createJSONStorage(createNewApiImagePlaygroundPersistStorage),
 `
 const STORE_INIT_MARKER = `export async function initStore() {
   const legacyAgentConversations = normalizeAgentConversations(useStore.getState().agentConversations)
@@ -157,8 +189,7 @@ const STORE_REFRESH_REPLACEMENT = `async function refreshNewApiImagePlaygroundSt
     ? currentActiveConversationId
     : conversations[0]?.id ?? null
   lastStoredAgentConversations = conversations
-  imageCache.clear()
-  thumbnailCache.clear()
+  clearImageCaches()
   useStore.setState((state) => {
     const agentInputDrafts = cleanStaleAgentInputDrafts(
       normalizeAgentInputDrafts(state.agentInputDrafts, conversations),
@@ -194,6 +225,26 @@ const SERVICE_WORKER_MARKER = `if ('serviceWorker' in navigator) {
   }
 }
 `
+const SERVICE_WORKER_CLEANUP_SOURCE = `const CACHE_PREFIX = 'gpt-image-playground-'
+
+self.addEventListener('install', () => {
+  self.skipWaiting()
+})
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    Promise.all([
+      caches.keys().then((keys) => Promise.all(
+        keys
+          .filter((key) => key.startsWith(CACHE_PREFIX))
+          .map((key) => caches.delete(key)),
+      )),
+      self.registration.unregister(),
+    ]),
+  )
+})
+`
+
 const SERVICE_WORKER_REPLACEMENT = `if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     const scope = new URL(import.meta.env.BASE_URL, window.location.href).href
@@ -213,28 +264,32 @@ const SERVICE_WORKER_REPLACEMENT = `if ('serviceWorker' in navigator) {
   })
 }
 `
+const INPUT_BAR_LAYOUT_IMPORT_MARKER = `import { getContentEditableCursor, getContentEditablePlainText, getContentEditableSelection, getMentionTagHtml, setContentEditableCursor, setContentEditableSelection, syncMentionTagSelection } from '../lib/contentEditableMentions'
+`
+const INPUT_BAR_LAYOUT_IMPORT_REPLACEMENT = `import { clampRightPanelWidth, DEFAULT_RIGHT_PANEL_WIDTH, getContentEditableCursor, getContentEditablePlainText, getContentEditableSelection, getMentionTagHtml, IMAGE_PLAYGROUND_LAYOUT_STORAGE_KEY, IMAGE_PLAYGROUND_LAYOUT_VERSION, MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH, readPlaygroundLayout, RIGHT_LAYOUT_MIN_VIEWPORT_WIDTH, setContentEditableCursor, setContentEditableSelection, syncMentionTagSelection, type PlaygroundEditorPosition, type PlaygroundLayoutConfig } from '../lib/contentEditableMentions'
+`
 const INPUT_BAR_LAYOUT_HELPERS_MARKER = `function getMentionTagTextLength(el: Element) {
 `
-const INPUT_BAR_LAYOUT_HELPERS_REPLACEMENT = `const IMAGE_PLAYGROUND_LAYOUT_STORAGE_KEY = 'gpt-image-playground:layout'
-const IMAGE_PLAYGROUND_LAYOUT_VERSION = 1
-const MIN_RIGHT_PANEL_WIDTH = 320
-const MAX_RIGHT_PANEL_WIDTH = 640
-const DEFAULT_RIGHT_PANEL_WIDTH = 400
-const RIGHT_LAYOUT_MIN_VIEWPORT_WIDTH = 900
+const INPUT_BAR_LAYOUT_HELPERS_REPLACEMENT = `export const IMAGE_PLAYGROUND_LAYOUT_STORAGE_KEY = 'gpt-image-playground:layout'
+export const IMAGE_PLAYGROUND_LAYOUT_VERSION = 1
+export const MIN_RIGHT_PANEL_WIDTH = 320
+export const MAX_RIGHT_PANEL_WIDTH = 640
+export const DEFAULT_RIGHT_PANEL_WIDTH = 400
+export const RIGHT_LAYOUT_MIN_VIEWPORT_WIDTH = 900
 
-type PlaygroundEditorPosition = 'bottom' | 'right'
+export type PlaygroundEditorPosition = 'bottom' | 'right'
 
-type PlaygroundLayoutConfig = {
+export type PlaygroundLayoutConfig = {
   version: 1
   editorPosition: PlaygroundEditorPosition
   rightPanelWidth: number
 }
 
-function clampRightPanelWidth(width: number) {
+export function clampRightPanelWidth(width: number) {
   return Math.min(MAX_RIGHT_PANEL_WIDTH, Math.max(MIN_RIGHT_PANEL_WIDTH, Math.round(width)))
 }
 
-function readPlaygroundLayout(): PlaygroundLayoutConfig {
+export function readPlaygroundLayout(): PlaygroundLayoutConfig {
   const fallback: PlaygroundLayoutConfig = {
     version: IMAGE_PLAYGROUND_LAYOUT_VERSION,
     editorPosition: 'bottom',
@@ -495,7 +550,8 @@ const AGENT_SCROLL_STYLE_REPLACEMENT = `          style={{
           aria-label="滚动到底部"
 `
 const PERSISTENCE_MARKER = `export function getPersistedState(state: AppState) {
-  const settings = normalizeSettings(state.settings)
+  return createPersistedState(state, agentConversationMigrationPending && !agentConversationPersistenceReady)
+}
 `
 const RESPONSE_OUTPUT_MERGE_MARKER = `function mergeResponseOutputItems(previous: ResponsesOutputItem[], next: ResponsesOutputItem[]) {
   const merged = [...previous]
@@ -524,6 +580,7 @@ const RESPONSE_OUTPUT_MERGE_REPLACEMENT = `function mergeResponseOutputItems(pre
 const AGENT_IMAGE_FUNCTION_CALL_MARKER = `      if (imageFunctionCalls.length > 0) {
         for (const fc of imageFunctionCalls) {
           const output = await executeSingleImageFunctionCall(fc)
+          if (output == null) continue
           functionCallOutputs.push({
             type: 'function_call_output',
             call_id: fc.call_id,
@@ -542,6 +599,7 @@ const AGENT_IMAGE_FUNCTION_CALL_MARKER = `      if (imageFunctionCalls.length > 
           })
         }
       }
+
 `
 const AGENT_IMAGE_FUNCTION_CALL_REPLACEMENT = `      const customImageFunctionCalls: ResponsesOutputItem[] = []
       const customImageFunctionCallIndexById = new Map<string, number>()
@@ -562,43 +620,43 @@ const AGENT_IMAGE_FUNCTION_CALL_REPLACEMENT = `      const customImageFunctionCa
       }
 
       const imageFunctionCallOutputs = await Promise.all(
-        customImageFunctionCalls.map(async (fc) => ({
-          type: 'function_call_output',
-          call_id: fc.call_id,
-          output: fc.name === 'generate_image_batch'
+        customImageFunctionCalls.map(async (fc) => {
+          const output = fc.name === 'generate_image_batch'
             ? await executeBatchFunctionCall(fc)
-            : await executeSingleImageFunctionCall(fc),
-        } satisfies ResponsesOutputItem)),
+            : await executeSingleImageFunctionCall(fc)
+          if (output == null) return null
+          return {
+            type: 'function_call_output',
+            call_id: fc.call_id,
+            output,
+          } satisfies ResponsesOutputItem
+        }),
       )
-      functionCallOutputs.push(...imageFunctionCallOutputs)
+      for (const output of imageFunctionCallOutputs) {
+        if (output) functionCallOutputs.push(output)
+      }
 `
 
 const AGENT_IMAGE_TASK_DURABLE_COMPLETION_MARKER = `      updateTaskInStore(taskId, {
-        prompt: image.revisedPrompt ?? latestTask?.prompt ?? '',
+        prompt: image.revisedPrompt ?? latestBeforeUpdate.prompt,
         outputImages: [stored.id],
         actualParams,
         actualParamsByImage: { [stored.id]: actualParams },
         revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
         rawResponsePayload,
-        status: 'done',
-        error: null,
-        finishedAt: Date.now(),
-        elapsed: Date.now() - (latestTask?.createdAt ?? startedAt),
+        ...createTaskDonePatch(latestBeforeUpdate, Date.now()),
         agentToolAction: image.action,
       })
       useStore.getState().setTaskStreamPreview(taskId)
 `
 const AGENT_IMAGE_TASK_DURABLE_COMPLETION_REPLACEMENT = `      updateTaskInStore(taskId, {
-        prompt: image.revisedPrompt ?? latestTask?.prompt ?? '',
+        prompt: image.revisedPrompt ?? latestBeforeUpdate.prompt,
         outputImages: [stored.id],
         actualParams,
         actualParamsByImage: { [stored.id]: actualParams },
         revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
         rawResponsePayload,
-        status: 'done',
-        error: null,
-        finishedAt: Date.now(),
-        elapsed: Date.now() - (latestTask?.createdAt ?? startedAt),
+        ...createTaskDonePatch(latestBeforeUpdate, Date.now()),
         agentToolAction: image.action,
       })
       const completedTask = useStore.getState().tasks.find((task) => task.id === taskId)
@@ -607,16 +665,11 @@ const AGENT_IMAGE_TASK_DURABLE_COMPLETION_REPLACEMENT = `      updateTaskInStore
 `
 
 const HYBRID_BATCH_TASK_COMPLETION_MARKER = `        // If not streaming and we have an image, complete the pre-created task.
-        if (batchResult.image && !shouldStreamAssistantMessage) {
-          await completeAgentImageTask({ ...batchResult.image, toolCallId: batchToolCallId }, batchResult.rawResponsePayload)
-        }
-`
-const HYBRID_BATCH_TASK_COMPLETION_REPLACEMENT = `        // Hybrid image requests do not emit Agent image-tool completion callbacks,
-        // so always complete their pre-created task card from the returned image.
         if (batchResult.image && (requestSettings.agentApiConfigMode === 'hybrid' || !shouldStreamAssistantMessage)) {
-          await completeAgentImageTask({ ...batchResult.image, toolCallId: batchToolCallId }, batchResult.rawResponsePayload)
+          committed = (await completeAgentImageTask({ ...batchResult.image, toolCallId: batchToolCallId }, batchResult.rawResponsePayload)).committed
         }
 `
+const HYBRID_BATCH_TASK_COMPLETION_REPLACEMENT = HYBRID_BATCH_TASK_COMPLETION_MARKER
 
 const IN_PLACE_TASK_RETRY_MARKER = `/** 重试失败的任务：创建新任务并执行 */
 export async function retryTask(task: TaskRecord) {
@@ -780,8 +833,12 @@ const PERSISTENCE_REPLACEMENT = `export function getPersistedState(state: AppSta
         ? normalizedSettings.agentImageProfileId
         : activeProfileId),
   })
+  return createPersistedState(
+    { ...state, settings },
+    agentConversationMigrationPending && !agentConversationPersistenceReady,
+  )
+}
 `
-
 const SETTINGS_MANAGED_STATE_MARKER = `  const activeProfile = draft.profiles.find((profile) => profile.id === draft.activeProfileId) ?? draft.profiles[0] ?? getActiveApiProfile(draft)
 `
 const SETTINGS_MANAGED_STATE_REPLACEMENT = `${SETTINGS_MANAGED_STATE_MARKER}  const managedProfileIds = new Set([
@@ -952,6 +1009,53 @@ const SETTINGS_MANAGED_COPY_GUARD_REPLACEMENT = `  const confirmCopyProfileImpor
     if (managedProfileIds.has(profile.id)) return
     setShowProfileMenu(false)
 `
+const MANAGED_ASYNC_TYPES_MARKER = "  streamImages?: boolean\n  streamPartialImages?: number\n  providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'model' | 'apiMode' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages'>>>>\n"
+const MANAGED_ASYNC_TYPES_REPLACEMENT = "  streamImages?: boolean\n  /** New API managed profile: submit JSON image generations as durable server tasks. */\n  managedAsyncImages?: boolean\n  streamPartialImages?: number\n  providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'model' | 'apiMode' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages'>>>>\n"
+const MANAGED_ASYNC_CALL_OPTIONS_MARKER = "  inputImageDataUrls: string[]\n  maskDataUrl?: string\n  onFalRequestEnqueued?: (request: { requestId: string; endpoint: string }) => void\n"
+const MANAGED_ASYNC_CALL_OPTIONS_REPLACEMENT = "  inputImageDataUrls: string[]\n  maskDataUrl?: string\n  clientTaskId?: string\n  onFalRequestEnqueued?: (request: { requestId: string; endpoint: string }) => void\n"
+const MANAGED_IMAGE_FETCH_SIGNATURE_MARKER = "export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, signal?: AbortSignal): Promise<string> {\n"
+const MANAGED_IMAGE_FETCH_SIGNATURE_REPLACEMENT = "export async function fetchImageUrlAsDataUrl(\n  url: string,\n  fallbackMime: string,\n  signal?: AbortSignal,\n  headers?: HeadersInit,\n): Promise<string> {\n"
+const MANAGED_IMAGE_FETCH_REQUEST_MARKER = "    response = await fetch(url, {\n      cache: 'no-store',\n      signal,\n    })\n"
+const MANAGED_IMAGE_FETCH_REQUEST_REPLACEMENT = "    response = await fetch(url, {\n      headers,\n      cache: 'no-store',\n      signal,\n    })\n"
+const MANAGED_IMAGE_RESPONSE_SIGNATURE_MARKER = "async function parseImagesApiResponse(payload: ImageApiResponse, mime: string, signal?: AbortSignal): Promise<CallApiResult> {\n"
+const MANAGED_IMAGE_RESPONSE_SIGNATURE_REPLACEMENT = "async function parseImagesApiResponse(\n  payload: ImageApiResponse,\n  mime: string,\n  signal?: AbortSignal,\n  imageRequestHeaders?: (url: string) => HeadersInit | undefined,\n): Promise<CallApiResult> {\n"
+const MANAGED_IMAGE_RESPONSE_FETCH_MARKER = "        images.push(await fetchImageUrlAsDataUrl(item.url, mime, signal))\n"
+const MANAGED_IMAGE_RESPONSE_FETCH_REPLACEMENT = "        images.push(await fetchImageUrlAsDataUrl(item.url, mime, signal, imageRequestHeaders?.(item.url)))\n"
+const MANAGED_ASYNC_PROFILE_NORMALIZATION_MARKER = "    responseFormatB64Json: record.responseFormatB64Json === true ? true : undefined,\n    streamImages,\n    streamPartialImages: normalizeStreamPartialImages(record.streamPartialImages, defaults.streamPartialImages),\n"
+const MANAGED_ASYNC_PROFILE_NORMALIZATION_REPLACEMENT = "    responseFormatB64Json: record.responseFormatB64Json === true ? true : undefined,\n    streamImages,\n    managedAsyncImages: record.managedAsyncImages === true ? true : undefined,\n    streamPartialImages: normalizeStreamPartialImages(record.streamPartialImages, defaults.streamPartialImages),\n"
+const MANAGED_ASYNC_OPENAI_SETUP_MARKER = "const PROMPT_REWRITE_GUARD_PREFIX = 'Use the following text as the complete prompt. Do not rewrite it:'\n\nfunction getStreamPartialImages(profile: ApiProfile): number {\n  return profile.streamPartialImages ?? DEFAULT_STREAM_PARTIAL_IMAGES\n}\n\n"
+const MANAGED_ASYNC_OPENAI_SETUP_REPLACEMENT = "const PROMPT_REWRITE_GUARD_PREFIX = 'Use the following text as the complete prompt. Do not rewrite it:'\nconst MANAGED_TASK_POLL_MS = 1000\nconst MANAGED_TASK_REQUEST_TIMEOUT_MS = 10_000\n\nfunction getStreamPartialImages(profile: ApiProfile): number {\n  return profile.streamPartialImages ?? DEFAULT_STREAM_PARTIAL_IMAGES\n}\n\nfunction shouldUseManagedAsyncImages(opts: CallApiOptions, profile: ApiProfile): boolean {\n  return profile.managedAsyncImages === true &&\n    profile.apiMode === 'images' &&\n    Boolean(opts.clientTaskId?.trim())\n}\n\n"
+const MANAGED_ASYNC_OPENAI_REQUEST_MODE_MARKER = "    let response: Response\n\n    if (isEdit) {\n"
+const MANAGED_ASYNC_OPENAI_REQUEST_MODE_REPLACEMENT = "    let response: Response\n    const managedAsync = shouldUseManagedAsyncImages(opts, profile)\n\n    if (isEdit) {\n"
+const MANAGED_ASYNC_OPENAI_EDIT_STREAM_MARKER = "      if (profile.streamImages) {\n        formData.append('stream', 'true')\n        formData.append('partial_images', String(getStreamPartialImages(profile)))\n      }\n"
+const MANAGED_ASYNC_OPENAI_EDIT_STREAM_REPLACEMENT = "      if (profile.streamImages && !managedAsync) {\n        formData.append('stream', 'true')\n        formData.append('partial_images', String(getStreamPartialImages(profile)))\n      }\n"
+const MANAGED_ASYNC_OPENAI_EDIT_REQUEST_MARKER = "      response = await fetch(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {\n        method: 'POST',\n        headers: requestHeaders,\n        cache: 'no-store',\n        body: formData,\n        signal: controller.signal,\n      })\n"
+const MANAGED_ASYNC_OPENAI_EDIT_REQUEST_REPLACEMENT = "      response = await fetch(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {\n        method: 'POST',\n        headers: {\n          ...requestHeaders,\n          ...(managedAsync ? {\n            'X-Playground-Async': 'true',\n            'X-Playground-Client-Task-Id': opts.clientTaskId!.trim(),\n          } : {}),\n        },\n        cache: 'no-store',\n        body: formData,\n        signal: controller.signal,\n      })\n"
+const MANAGED_ASYNC_OPENAI_POLLING_MARKER = "function eventToImageResponseItem(event: Record<string, unknown>): ImageResponseItem {\n"
+const MANAGED_ASYNC_OPENAI_POLLING_REPLACEMENT = "function getManagedApiBaseUrl(profile: ApiProfile): URL {\n  const fallbackOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost'\n  return new URL(`${profile.baseUrl.replace(/\\/+$/, '')}/`, fallbackOrigin)\n}\n\nfunction getManagedTaskStatusUrl(profile: ApiProfile, taskId: string): string {\n  return new URL(`image-tasks/${encodeURIComponent(taskId)}`, getManagedApiBaseUrl(profile)).toString()\n}\n\nfunction validateManagedTaskStatusUrl(profile: ApiProfile, value: unknown): string {\n  if (typeof value !== 'string' || !value.trim()) throw new Error('托管图片任务响应缺少 status_url')\n  const baseUrl = getManagedApiBaseUrl(profile)\n  const statusUrl = new URL(value, `${baseUrl.origin}/`)\n  if (statusUrl.origin !== baseUrl.origin) throw new Error('托管图片任务 status_url 不是同源地址')\n  return statusUrl.toString()\n}\n\nfunction normalizeManagedImageResult(profile: ApiProfile, value: unknown): ImageApiResponse {\n  if (!isRecordValue(value)) throw new Error('托管图片任务完成但缺少 result')\n  const payload = normalizeImageApiPayload(value)\n  const baseUrl = getManagedApiBaseUrl(profile)\n  const data = Array.isArray(payload.data)\n    ? payload.data.map((item) => {\n        if (typeof item.url !== 'string' || !item.url.trim() || isDataUrl(item.url)) return item\n        return { ...item, url: new URL(item.url, `${baseUrl.origin}/`).toString() }\n      })\n    : []\n  return { ...payload, data }\n}\n\nfunction getManagedImageRequestHeaders(profile: ApiProfile, url: string): HeadersInit | undefined {\n  const baseUrl = getManagedApiBaseUrl(profile)\n  const imageUrl = new URL(url, `${baseUrl.origin}/`)\n  if (imageUrl.origin !== baseUrl.origin || imageUrl.search || imageUrl.hash) return undefined\n  if (!/^\\/pg\\/image-files\\/[^/]+\\/content$/.test(imageUrl.pathname)) return undefined\n  return createRequestHeaders(profile)\n}\n\nfunction getManagedTaskFailure(payload: Record<string, unknown>): Error {\n  const error = isRecordValue(payload.error) ? payload.error : {}\n  const message = getStringValue(error, 'message') || (typeof payload.error === 'string' ? payload.error : '') || '托管图片任务失败'\n  const stage = getStringValue(error, 'stage')\n  const code = getStringValue(error, 'code')\n  const details = [stage ? `stage=${stage}` : '', code ? `code=${code}` : ''].filter(Boolean)\n  return new Error(details.length ? `${message} (${details.join(', ')})` : message)\n}\n\nasync function pollManagedPlaygroundImageResult(\n  profile: ApiProfile,\n  taskId: string,\n  params: TaskParams,\n  initialStatusUrl?: string,\n): Promise<CallApiResult> {\n  const deadlineController = new AbortController()\n  const timeoutId = setTimeout(() => deadlineController.abort(), profile.timeout * 1000)\n  const statusUrl = initialStatusUrl ?? getManagedTaskStatusUrl(profile, taskId)\n\n  try {\n    while (true) {\n      const requestController = new AbortController()\n      let requestTimedOut = false\n      const abortRequest = () => requestController.abort(deadlineController.signal.reason)\n      if (deadlineController.signal.aborted) abortRequest()\n      else deadlineController.signal.addEventListener('abort', abortRequest, { once: true })\n      const requestTimeoutId = setTimeout(() => {\n        requestTimedOut = true\n        requestController.abort(new DOMException('Managed task status request timed out', 'TimeoutError'))\n      }, MANAGED_TASK_REQUEST_TIMEOUT_MS)\n\n      let payload: unknown\n      let shouldRetry = false\n      try {\n        const response = await fetch(statusUrl, {\n          headers: createRequestHeaders(profile),\n          cache: 'no-store',\n          signal: requestController.signal,\n        })\n        if (response.status === 401 || response.status === 403 || response.status === 404) {\n          throw new Error(`托管图片任务状态查询失败：HTTP ${response.status}`)\n        }\n        if (!response.ok) throw new Error(await getApiErrorMessage(response))\n        payload = await response.json() as unknown\n      } catch (err) {\n        if (deadlineController.signal.aborted) {\n          const reason = deadlineController.signal.reason\n          throw reason instanceof Error ? reason : new DOMException('Aborted', 'AbortError')\n        }\n        if (!requestTimedOut) throw err\n        shouldRetry = true\n      } finally {\n        clearTimeout(requestTimeoutId)\n        deadlineController.signal.removeEventListener('abort', abortRequest)\n      }\n\n      if (shouldRetry) {\n        await sleep(MANAGED_TASK_POLL_MS, deadlineController.signal)\n        continue\n      }\n      if (!isRecordValue(payload)) throw new Error('托管图片任务状态响应格式无效')\n      const status = getStringValue(payload, 'status')\n      if (status === 'failed') throw getManagedTaskFailure(payload)\n      if (status === 'completed') {\n        const result = await parseImagesApiResponse(\n          normalizeManagedImageResult(profile, payload.result),\n          MIME_MAP[params.output_format] || 'image/png',\n          deadlineController.signal,\n          (url) => getManagedImageRequestHeaders(profile, url),\n        )\n        return {\n          ...result,\n          actualParams: result.actualParams ?? {},\n          actualParamsList: result.actualParamsList?.map((item) => item ?? {}),\n        }\n      }\n      if (status !== 'pending' && status !== 'running') throw new Error('托管图片任务状态无效')\n      await sleep(MANAGED_TASK_POLL_MS, deadlineController.signal)\n    }\n  } finally {\n    clearTimeout(timeoutId)\n  }\n}\n\nexport async function getManagedPlaygroundImageResult(\n  profile: ApiProfile,\n  taskId: string,\n  params: TaskParams,\n): Promise<CallApiResult> {\n  if (!taskId.trim()) throw new Error('托管图片任务 ID 为空')\n  return pollManagedPlaygroundImageResult(profile, taskId, params)\n}\n\nfunction eventToImageResponseItem(event: Record<string, unknown>): ImageResponseItem {\n"
+const MANAGED_ASYNC_OPENAI_CONCURRENCY_MARKER = "  if ((profile.codexCli || (profile.streamImages && n > 1)) && n > 1) {\n"
+const MANAGED_ASYNC_OPENAI_CONCURRENCY_REPLACEMENT = "  if (!shouldUseManagedAsyncImages(opts, profile) && (profile.codexCli || (profile.streamImages && n > 1)) && n > 1) {\n"
+const MANAGED_ASYNC_OPENAI_REQUEST_MARKER = "      if (profile.streamImages) {\n        body.stream = true\n        body.partial_images = getStreamPartialImages(profile)\n      }\n\n      response = await fetch(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {\n        method: 'POST',\n        headers: {\n          ...requestHeaders,\n          'Content-Type': 'application/json',\n        },\n        cache: 'no-store',\n"
+const MANAGED_ASYNC_OPENAI_REQUEST_REPLACEMENT = "      if (profile.streamImages && !managedAsync) {\n        body.stream = true\n        body.partial_images = getStreamPartialImages(profile)\n      }\n\n      response = await fetch(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {\n        method: 'POST',\n        headers: {\n          ...requestHeaders,\n          'Content-Type': 'application/json',\n          ...(managedAsync ? {\n            'X-Playground-Async': 'true',\n            'X-Playground-Client-Task-Id': opts.clientTaskId!.trim(),\n          } : {}),\n        },\n        cache: 'no-store',\n"
+const MANAGED_ASYNC_OPENAI_RESPONSE_MARKER = "    if (profile.streamImages && isEventStreamResponse(response)) {\n      return parseImagesApiStreamResponse(response, mime, opts.onPartialImage)\n"
+const MANAGED_ASYNC_OPENAI_RESPONSE_REPLACEMENT = "    if (response.status === 202 && shouldUseManagedAsyncImages(opts, profile)) {\n      const payload = await response.json() as unknown\n      if (!isRecordValue(payload)) throw new Error('托管图片任务提交响应格式无效')\n      const taskId = getStringValue(payload, 'id')\n      const status = getStringValue(payload, 'status')\n      if (!taskId || (status !== 'pending' && status !== 'running')) throw new Error('托管图片任务提交响应缺少有效 id 或 status')\n      const statusUrl = validateManagedTaskStatusUrl(profile, payload.status_url)\n      opts.onCustomTaskEnqueued?.({ taskId })\n      clearTimeout(timeoutId)\n      return pollManagedPlaygroundImageResult(profile, taskId, params, statusUrl)\n    }\n\n    if (profile.streamImages && isEventStreamResponse(response)) {\n      return parseImagesApiStreamResponse(response, mime, opts.onPartialImage)\n"
+const MANAGED_ASYNC_STORE_IMPORT_MARKER = "import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'\n"
+const MANAGED_ASYNC_STORE_IMPORT_REPLACEMENT = "import { getCustomQueuedImageResult, getManagedPlaygroundImageResult } from './lib/openaiCompatibleImageApi'\n"
+const MANAGED_ASYNC_STORE_RECOVERY_STATE_MARKER = "const customRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()\n"
+const MANAGED_ASYNC_STORE_RECOVERY_STATE_REPLACEMENT = "const customRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()\nconst customRecoveryInFlight = new Set<string>()\n"
+const MANAGED_ASYNC_STORE_RECOVERY_SCHEDULE_MARKER = "function scheduleCustomRecovery(taskId: string, delayMs = CUSTOM_RECOVERY_POLL_MS) {\n  if (customRecoveryTimers.has(taskId)) return\n  if (!useStore.getState().tasks.some((task) => task.id === taskId)) return\n  const timer = setTimeout(() => {\n    customRecoveryTimers.delete(taskId)\n    recoverCustomTask(taskId)\n  }, delayMs)\n  customRecoveryTimers.set(taskId, timer)\n}\n"
+const MANAGED_ASYNC_STORE_RECOVERY_SCHEDULE_REPLACEMENT = "function isCustomTaskRecoverable(task: TaskRecord | undefined): task is TaskRecord & { customTaskId: string } {\n  return Boolean(\n    task?.customTaskId &&\n    task.status !== 'done' &&\n    (task.status === 'running' || task.customRecoverable),\n  )\n}\n\nfunction scheduleCustomRecovery(taskId: string, delayMs = CUSTOM_RECOVERY_POLL_MS) {\n  if (customRecoveryTimers.has(taskId) || customRecoveryInFlight.has(taskId)) return\n  const task = useStore.getState().tasks.find((item) => item.id === taskId)\n  if (!isCustomTaskRecoverable(task)) {\n    clearCustomRecoveryTimer(taskId)\n    return\n  }\n  const timer = setTimeout(() => {\n    customRecoveryTimers.delete(taskId)\n    void recoverCustomTask(taskId)\n  }, delayMs)\n  customRecoveryTimers.set(taskId, timer)\n}\n"
+const MANAGED_ASYNC_STORE_RECOVERY_PROFILE_MARKER = "function getCustomRecoveryProfile(settings: AppSettings, task: TaskRecord) {\n"
+const MANAGED_ASYNC_STORE_RECOVERY_PROFILE_REPLACEMENT = "function getManagedRecoveryProfile(settings: AppSettings, task: TaskRecord) {\n  const taskProfile = getTaskApiProfile(settings, task)\n  if (\n    taskProfile?.provider === 'openai' &&\n    taskProfile.apiMode === 'images' &&\n    taskProfile.managedAsyncImages === true\n  ) {\n    return taskProfile\n  }\n  return null\n}\n\nfunction getCustomRecoveryProfile(settings: AppSettings, task: TaskRecord) {\n"
+const MANAGED_ASYNC_STORE_AGENT_TASK_ID_MARKER = "        inputImageDataUrls: opts.referenceImageDataUrls,\n        onPartialImage: opts.onPartialImage\n"
+const MANAGED_ASYNC_STORE_AGENT_TASK_ID_REPLACEMENT = "        inputImageDataUrls: opts.referenceImageDataUrls,\n        clientTaskId: opts.taskId,\n        onPartialImage: opts.onPartialImage\n"
+const MANAGED_ASYNC_STORE_GALLERY_TASK_ID_MARKER = "      inputImageDataUrls: inputDataUrls,\n      maskDataUrl,\n      onFalRequestEnqueued: (request) => {\n"
+const MANAGED_ASYNC_STORE_GALLERY_TASK_ID_REPLACEMENT = "      inputImageDataUrls: inputDataUrls,\n      maskDataUrl,\n      clientTaskId: taskId,\n      onFalRequestEnqueued: (request) => {\n"
+const MANAGED_ASYNC_STORE_WATCHDOG_MARKER = "  if (\n    taskProvider !== 'fal' &&\n    !isAsyncCustomProviderTask(requestSettings, taskProvider, task.inputImageIds.length > 0) &&\n    !usesConcurrentOpenAIImageRequests(activeProfile, task.params)\n  ) {\n    scheduleOpenAIWatchdog(taskId, activeProfile.timeout, activeProfile)\n  }\n"
+const MANAGED_ASYNC_STORE_WATCHDOG_REPLACEMENT = "  if (\n    taskProvider !== 'fal' &&\n    activeProfile.managedAsyncImages !== true &&\n    !isAsyncCustomProviderTask(requestSettings, taskProvider, task.inputImageIds.length > 0) &&\n    !usesConcurrentOpenAIImageRequests(activeProfile, task.params)\n  ) {\n    scheduleOpenAIWatchdog(taskId, activeProfile.timeout, activeProfile)\n  }\n"
+const MANAGED_ASYNC_STORE_RECOVERY_MARKER = "async function recoverCustomTask(taskId: string) {\n  const { settings, tasks } = useStore.getState()\n  const task = tasks.find((item) => item.id === taskId)\n  if (!task || !task.customTaskId || task.status === 'done') return\n\n  const profile = getCustomRecoveryProfile(settings, task)\n  const customProvider = task.apiProvider ? getCustomProviderDefinition(settings, task.apiProvider) : null\n  if (!profile || !customProvider?.poll) {\n    scheduleCustomRecovery(taskId)\n    return\n  }\n\n  try {\n    const result = await getCustomQueuedImageResult(profile, customProvider, task.customTaskId, task.params)\n    clearCustomRecoveryTimer(taskId)\n    await completeRecoveredCustomTask(task, result)\n  } catch (err) {\n    clearCustomRecoveryTimer(taskId)\n    if (!useStore.getState().tasks.some((item) => item.id === taskId)) return\n    updateTaskInStore(taskId, {\n      ...createTaskErrorPatch(task, err instanceof Error ? err.message : String(err), Date.now()),\n      ...getRawErrorPayload(err),\n      customRecoverable: false,\n    })\n    if (isAgentTask(task)) void continueRecoveredAgentRound(taskId)\n  }\n}\n\n"
+const MANAGED_ASYNC_STORE_RECOVERY_REPLACEMENT = "async function recoverCustomTask(taskId: string) {\n  if (customRecoveryInFlight.has(taskId)) return\n  const { settings, tasks } = useStore.getState()\n  const task = tasks.find((item) => item.id === taskId)\n  if (!isCustomTaskRecoverable(task)) {\n    clearCustomRecoveryTimer(taskId)\n    return\n  }\n  customRecoveryInFlight.add(taskId)\n\n  const managedProfile = getManagedRecoveryProfile(settings, task)\n  const customProfile = getCustomRecoveryProfile(settings, task)\n  const customProvider = task.apiProvider ? getCustomProviderDefinition(settings, task.apiProvider) : null\n  let shouldRetry = !managedProfile && (!customProfile || !customProvider?.poll)\n\n  try {\n    if (shouldRetry) return\n    const result = managedProfile\n      ? await getManagedPlaygroundImageResult(managedProfile, task.customTaskId, task.params)\n      : await getCustomQueuedImageResult(customProfile!, customProvider!, task.customTaskId, task.params)\n    clearCustomRecoveryTimer(taskId)\n    await completeRecoveredCustomTask(task, result)\n  } catch (err) {\n    clearCustomRecoveryTimer(taskId)\n    if (!useStore.getState().tasks.some((item) => item.id === taskId)) return\n    if (managedProfile && isNetworkRecoverableError(err)) {\n      updateTaskInStore(taskId, {\n        ...createTaskErrorPatch(task, '与托管图片任务的连接已断开，之后会继续查询任务结果。', Date.now()),\n        customRecoverable: true,\n      })\n      shouldRetry = true\n      return\n    }\n    updateTaskInStore(taskId, {\n      ...createTaskErrorPatch(task, err instanceof Error ? err.message : String(err), Date.now()),\n      ...getRawErrorPayload(err),\n      customRecoverable: false,\n    })\n    if (isAgentTask(task)) void continueRecoveredAgentRound(taskId)\n  } finally {\n    customRecoveryInFlight.delete(taskId)\n    const latest = useStore.getState().tasks.find((item) => item.id === taskId)\n    if (shouldRetry && isCustomTaskRecoverable(latest)) scheduleCustomRecovery(taskId)\n    else if (!isCustomTaskRecoverable(latest)) clearCustomRecoveryTimer(taskId)\n  }\n}\n\n"
+
 function replaceExactlyOnce(source, marker, replacement, markerName = 'entry') {
   const firstIndex = source.indexOf(marker)
   const lastIndex = source.lastIndexOf(marker)
@@ -961,13 +1065,42 @@ function replaceExactlyOnce(source, marker, replacement, markerName = 'entry') {
   return `${source.slice(0, firstIndex)}${replacement}${source.slice(firstIndex + marker.length)}`
 }
 
+
+function patchBridgeBootstrap(source) {
+  const importCount = source.split(BRIDGE_IMPORT).length - 1
+  if (importCount > 1) throw new Error('upstream bridge import appears more than once')
+  let patchedSource = importCount === 0
+    ? replaceExactlyOnce(source, IMPORT_MARKER, `${IMPORT_MARKER}${BRIDGE_IMPORT}`, 'bridge import')
+    : source
+
+  const installCount = patchedSource.split(BRIDGE_INSTALL).length - 1
+  if (installCount > 1) throw new Error('upstream bridge install call appears more than once')
+  if (installCount === 0) {
+    patchedSource = replaceExactlyOnce(
+      patchedSource,
+      INSTALL_MARKER,
+      `${BRIDGE_INSTALL}
+${INSTALL_MARKER}`,
+      'bridge install call',
+    )
+  }
+  return patchedSource
+}
+
 export async function applyUpstreamPatch(upstreamRoot, options = {}) {
   const mainPath = path.join(upstreamRoot, 'src', 'main.tsx')
   const bridgePath = path.join(upstreamRoot, 'src', 'lib', 'newApiBridge.ts')
+  const serviceWorkerPath = path.join(upstreamRoot, 'public', 'sw.js')
   const storagePath = path.join(upstreamRoot, 'src', 'lib', 'newApiStorage.ts')
   const syncPath = path.join(upstreamRoot, 'src', 'lib', 'newApiSync.ts')
   const dbPath = path.join(upstreamRoot, 'src', 'lib', 'db.ts')
+  const typesPath = path.join(upstreamRoot, 'src', 'types.ts')
+  const imageApiSharedPath = path.join(upstreamRoot, 'src', 'lib', 'imageApiShared.ts')
+  const apiProfilesPath = path.join(upstreamRoot, 'src', 'lib', 'apiProfiles.ts')
+  const openaiCompatibleImageApiPath = path.join(upstreamRoot, 'src', 'lib', 'openaiCompatibleImageApi.ts')
   const storePath = path.join(upstreamRoot, 'src', 'store.ts')
+  const agentResponseStatePath = path.join(upstreamRoot, 'src', 'lib', 'agentResponseState.ts')
+  const contentEditableMentionsPath = path.join(upstreamRoot, 'src', 'lib', 'contentEditableMentions.ts')
   const appPath = path.join(upstreamRoot, 'src', 'App.tsx')
   const inputBarPath = path.join(upstreamRoot, 'src', 'components', 'InputBar.tsx')
   const agentWorkspacePath = path.join(upstreamRoot, 'src', 'components', 'AgentWorkspace.tsx')
@@ -978,28 +1111,28 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
   const defaultStoragePath = path.join(toolRoot, 'new-api-storage.ts')
   const defaultSyncPath = path.join(toolRoot, 'new-api-sync.ts')
   const bridgeSource = options.bridgeSource ?? await readFile(defaultBridgePath, 'utf8')
+  const mainSource = await readFile(mainPath, 'utf8')
+  const mainWithBridge = patchBridgeBootstrap(mainSource)
+  await writeFile(mainPath, mainWithBridge)
+  await writeFile(bridgePath, bridgeSource)
+
   const storageSource = options.storageSource ?? await readFile(defaultStoragePath, 'utf8')
   const syncSource = options.syncSource ?? await readFile(defaultSyncPath, 'utf8')
-  const mainSource = await readFile(mainPath, 'utf8')
   const dbSource = await readFile(dbPath, 'utf8')
+  const typesSource = await readFile(typesPath, 'utf8')
+  const imageApiSharedSource = await readFile(imageApiSharedPath, 'utf8')
+  const apiProfilesSource = await readFile(apiProfilesPath, 'utf8')
+  const openaiCompatibleImageApiSource = await readFile(openaiCompatibleImageApiPath, 'utf8')
   const storeSource = await readFile(storePath, 'utf8')
+  const agentResponseStateSource = await readFile(agentResponseStatePath, 'utf8')
+  const contentEditableMentionsSource = await readFile(contentEditableMentionsPath, 'utf8')
   const appSource = await readFile(appPath, 'utf8')
   const inputBarSource = await readFile(inputBarPath, 'utf8')
   const agentWorkspaceSource = await readFile(agentWorkspacePath, 'utf8')
   const settingsModalSource = await readFile(settingsModalPath, 'utf8')
   const agentSettingsSource = await readFile(agentSettingsPath, 'utf8')
-  const withImport = replaceExactlyOnce(
-    mainSource,
-    IMPORT_MARKER,
-    `${IMPORT_MARKER}import { installNewApiBridge } from './lib/newApiBridge'\n`,
-  )
-  const withBridge = replaceExactlyOnce(
-    withImport,
-    INSTALL_MARKER,
-    `installNewApiBridge()\n\n${INSTALL_MARKER}`,
-  )
   const patchedSource = replaceExactlyOnce(
-    withBridge,
+    mainWithBridge,
     SERVICE_WORKER_MARKER,
     SERVICE_WORKER_REPLACEMENT,
     'service worker',
@@ -1028,8 +1161,14 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
     DB_TRANSACTION_REPLACEMENT,
     'database transaction',
   )
-  const dbWithAgentDelete = replaceExactlyOnce(
+  const dbWithTaskDelete = replaceExactlyOnce(
     dbWithTransaction,
+    DB_TASK_DELETE_MARKER,
+    DB_TASK_DELETE_REPLACEMENT,
+    'task delete',
+  )
+  const dbWithAgentDelete = replaceExactlyOnce(
+    dbWithTaskDelete,
     DB_AGENT_DELETE_MARKER,
     DB_AGENT_DELETE_REPLACEMENT,
     'Agent conversation delete',
@@ -1046,8 +1185,14 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
     DB_THUMBNAIL_DELETE_REPLACEMENT,
     'thumbnail delete',
   )
-  const dbWithAgentNotification = replaceExactlyOnce(
+  const dbWithTaskDeletionNotification = replaceExactlyOnce(
     dbWithThumbnailDelete,
+    DB_COMMIT_TASK_DELETION_COMPLETE_MARKER,
+    DB_COMMIT_TASK_DELETION_COMPLETE_REPLACEMENT,
+    'task deletion completion',
+  )
+  const dbWithAgentNotification = replaceExactlyOnce(
+    dbWithTaskDeletionNotification,
     DB_REPLACE_AGENT_COMPLETE_MARKER,
     DB_REPLACE_AGENT_COMPLETE_REPLACEMENT,
     'Agent conversation replacement completion',
@@ -1063,6 +1208,96 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
     DB_CLEAR_IMAGE_COMPLETE_MARKER,
     DB_CLEAR_IMAGE_COMPLETE_REPLACEMENT,
     'image clear completion',
+  )
+  const patchedTypesSource = replaceExactlyOnce(
+    typesSource,
+    MANAGED_ASYNC_TYPES_MARKER,
+    MANAGED_ASYNC_TYPES_REPLACEMENT,
+    'managed async profile type',
+  )
+  const imageApiSharedWithManagedCallOptions = replaceExactlyOnce(
+    imageApiSharedSource,
+    MANAGED_ASYNC_CALL_OPTIONS_MARKER,
+    MANAGED_ASYNC_CALL_OPTIONS_REPLACEMENT,
+    'managed async call options',
+  )
+  const imageApiSharedWithManagedFetchSignature = replaceExactlyOnce(
+    imageApiSharedWithManagedCallOptions,
+    MANAGED_IMAGE_FETCH_SIGNATURE_MARKER,
+    MANAGED_IMAGE_FETCH_SIGNATURE_REPLACEMENT,
+    'managed image fetch signature',
+  )
+  const patchedImageApiSharedSource = replaceExactlyOnce(
+    imageApiSharedWithManagedFetchSignature,
+    MANAGED_IMAGE_FETCH_REQUEST_MARKER,
+    MANAGED_IMAGE_FETCH_REQUEST_REPLACEMENT,
+    'managed image fetch request headers',
+  )
+  const patchedApiProfilesSource = replaceExactlyOnce(
+    apiProfilesSource,
+    MANAGED_ASYNC_PROFILE_NORMALIZATION_MARKER,
+    MANAGED_ASYNC_PROFILE_NORMALIZATION_REPLACEMENT,
+    'managed async profile normalization',
+  )
+  const openaiWithManagedSetup = replaceExactlyOnce(
+    openaiCompatibleImageApiSource,
+    MANAGED_ASYNC_OPENAI_SETUP_MARKER,
+    MANAGED_ASYNC_OPENAI_SETUP_REPLACEMENT,
+    'managed async OpenAI setup',
+  )
+  const openaiWithManagedResponseSignature = replaceExactlyOnce(
+    openaiWithManagedSetup,
+    MANAGED_IMAGE_RESPONSE_SIGNATURE_MARKER,
+    MANAGED_IMAGE_RESPONSE_SIGNATURE_REPLACEMENT,
+    'managed image response signature',
+  )
+  const openaiWithManagedResponseFetch = replaceExactlyOnce(
+    openaiWithManagedResponseSignature,
+    MANAGED_IMAGE_RESPONSE_FETCH_MARKER,
+    MANAGED_IMAGE_RESPONSE_FETCH_REPLACEMENT,
+    'managed image response fetch headers',
+  )
+  const openaiWithManagedPolling = replaceExactlyOnce(
+    openaiWithManagedResponseFetch,
+    MANAGED_ASYNC_OPENAI_POLLING_MARKER,
+    MANAGED_ASYNC_OPENAI_POLLING_REPLACEMENT,
+    'managed async OpenAI polling',
+  )
+  const openaiWithManagedConcurrency = replaceExactlyOnce(
+    openaiWithManagedPolling,
+    MANAGED_ASYNC_OPENAI_CONCURRENCY_MARKER,
+    MANAGED_ASYNC_OPENAI_CONCURRENCY_REPLACEMENT,
+    'managed async OpenAI concurrency',
+  )
+  const openaiWithManagedRequestMode = replaceExactlyOnce(
+    openaiWithManagedConcurrency,
+    MANAGED_ASYNC_OPENAI_REQUEST_MODE_MARKER,
+    MANAGED_ASYNC_OPENAI_REQUEST_MODE_REPLACEMENT,
+    'managed async OpenAI request mode',
+  )
+  const openaiWithManagedEditStream = replaceExactlyOnce(
+    openaiWithManagedRequestMode,
+    MANAGED_ASYNC_OPENAI_EDIT_STREAM_MARKER,
+    MANAGED_ASYNC_OPENAI_EDIT_STREAM_REPLACEMENT,
+    'managed async OpenAI edit streaming',
+  )
+  const openaiWithManagedEditRequest = replaceExactlyOnce(
+    openaiWithManagedEditStream,
+    MANAGED_ASYNC_OPENAI_EDIT_REQUEST_MARKER,
+    MANAGED_ASYNC_OPENAI_EDIT_REQUEST_REPLACEMENT,
+    'managed async OpenAI edit request',
+  )
+  const openaiWithManagedRequest = replaceExactlyOnce(
+    openaiWithManagedEditRequest,
+    MANAGED_ASYNC_OPENAI_REQUEST_MARKER,
+    MANAGED_ASYNC_OPENAI_REQUEST_REPLACEMENT,
+    'managed async OpenAI request',
+  )
+  const patchedOpenaiCompatibleImageApiSource = replaceExactlyOnce(
+    openaiWithManagedRequest,
+    MANAGED_ASYNC_OPENAI_RESPONSE_MARKER,
+    MANAGED_ASYNC_OPENAI_RESPONSE_REPLACEMENT,
+    'managed async OpenAI response',
   )
   const storeWithImport = replaceExactlyOnce(
     storeSource,
@@ -1088,14 +1323,14 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
     PERSISTENCE_REPLACEMENT,
     'persistence',
   )
-  const storeWithMergedResponseOutput = replaceExactlyOnce(
-    storeWithPersistence,
+  const patchedAgentResponseStateSource = replaceExactlyOnce(
+    agentResponseStateSource,
     RESPONSE_OUTPUT_MERGE_MARKER,
     RESPONSE_OUTPUT_MERGE_REPLACEMENT,
     'Agent response output merge',
   )
   const storeWithAgentCalls = replaceExactlyOnce(
-    storeWithMergedResponseOutput,
+    storeWithPersistence,
     AGENT_IMAGE_FUNCTION_CALL_MARKER,
     AGENT_IMAGE_FUNCTION_CALL_REPLACEMENT,
     'Agent image function calls',
@@ -1112,20 +1347,74 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
     HYBRID_BATCH_TASK_COMPLETION_REPLACEMENT,
     'hybrid Agent batch task completion',
   )
-  const patchedStoreSource = replaceExactlyOnce(
+  const storeWithTaskRetry = replaceExactlyOnce(
     storeWithHybridBatchTaskCompletion,
     IN_PLACE_TASK_RETRY_MARKER,
     IN_PLACE_TASK_RETRY_REPLACEMENT,
     'task retry',
   )
-  const inputBarWithLayoutHelpers = replaceExactlyOnce(
-    inputBarSource,
+  const storeWithManagedImport = replaceExactlyOnce(
+    storeWithTaskRetry,
+    MANAGED_ASYNC_STORE_IMPORT_MARKER,
+    MANAGED_ASYNC_STORE_IMPORT_REPLACEMENT,
+    'managed async store import',
+  )
+  const storeWithManagedRecoveryState = replaceExactlyOnce(
+    storeWithManagedImport,
+    MANAGED_ASYNC_STORE_RECOVERY_STATE_MARKER,
+    MANAGED_ASYNC_STORE_RECOVERY_STATE_REPLACEMENT,
+    'managed async recovery state',
+  )
+  const storeWithManagedRecoverySchedule = replaceExactlyOnce(
+    storeWithManagedRecoveryState,
+    MANAGED_ASYNC_STORE_RECOVERY_SCHEDULE_MARKER,
+    MANAGED_ASYNC_STORE_RECOVERY_SCHEDULE_REPLACEMENT,
+    'managed async recovery schedule',
+  )
+  const storeWithManagedRecoveryProfile = replaceExactlyOnce(
+    storeWithManagedRecoverySchedule,
+    MANAGED_ASYNC_STORE_RECOVERY_PROFILE_MARKER,
+    MANAGED_ASYNC_STORE_RECOVERY_PROFILE_REPLACEMENT,
+    'managed async recovery profile',
+  )
+  const storeWithManagedAgentTaskId = replaceExactlyOnce(
+    storeWithManagedRecoveryProfile,
+    MANAGED_ASYNC_STORE_AGENT_TASK_ID_MARKER,
+    MANAGED_ASYNC_STORE_AGENT_TASK_ID_REPLACEMENT,
+    'managed async Agent task id',
+  )
+  const storeWithManagedGalleryTaskId = replaceExactlyOnce(
+    storeWithManagedAgentTaskId,
+    MANAGED_ASYNC_STORE_GALLERY_TASK_ID_MARKER,
+    MANAGED_ASYNC_STORE_GALLERY_TASK_ID_REPLACEMENT,
+    'managed async gallery task id',
+  )
+  const storeWithManagedWatchdog = replaceExactlyOnce(
+    storeWithManagedGalleryTaskId,
+    MANAGED_ASYNC_STORE_WATCHDOG_MARKER,
+    MANAGED_ASYNC_STORE_WATCHDOG_REPLACEMENT,
+    'managed async store watchdog',
+  )
+  const patchedStoreSource = replaceExactlyOnce(
+    storeWithManagedWatchdog,
+    MANAGED_ASYNC_STORE_RECOVERY_MARKER,
+    MANAGED_ASYNC_STORE_RECOVERY_REPLACEMENT,
+    'managed async task recovery',
+  )
+  const patchedContentEditableMentionsSource = replaceExactlyOnce(
+    contentEditableMentionsSource,
     INPUT_BAR_LAYOUT_HELPERS_MARKER,
     INPUT_BAR_LAYOUT_HELPERS_REPLACEMENT,
     'InputBar layout helpers',
   )
+  const inputBarWithLayoutImport = replaceExactlyOnce(
+    inputBarSource,
+    INPUT_BAR_LAYOUT_IMPORT_MARKER,
+    INPUT_BAR_LAYOUT_IMPORT_REPLACEMENT,
+    'InputBar layout import',
+  )
   const inputBarWithLayoutState = replaceExactlyOnce(
-    inputBarWithLayoutHelpers,
+    inputBarWithLayoutImport,
     INPUT_BAR_LAYOUT_STATE_MARKER,
     INPUT_BAR_LAYOUT_STATE_REPLACEMENT,
     'InputBar layout state',
@@ -1283,16 +1572,22 @@ export async function applyUpstreamPatch(upstreamRoot, options = {}) {
   )
 
   await writeFile(mainPath, patchedSource)
+  await writeFile(serviceWorkerPath, SERVICE_WORKER_CLEANUP_SOURCE)
   await writeFile(storagePath, storageSource)
   await writeFile(syncPath, syncSource)
   await writeFile(dbPath, patchedDbSource)
+  await writeFile(typesPath, patchedTypesSource)
+  await writeFile(imageApiSharedPath, patchedImageApiSharedSource)
+  await writeFile(apiProfilesPath, patchedApiProfilesSource)
+  await writeFile(openaiCompatibleImageApiPath, patchedOpenaiCompatibleImageApiSource)
+  await writeFile(agentResponseStatePath, patchedAgentResponseStateSource)
+  await writeFile(contentEditableMentionsPath, patchedContentEditableMentionsSource)
   await writeFile(storePath, patchedStoreSource)
   await writeFile(appPath, patchedAppSource)
   await writeFile(inputBarPath, patchedInputBarSource)
   await writeFile(agentWorkspacePath, patchedAgentWorkspaceSource)
   await writeFile(settingsModalPath, patchedSettingsModalSource)
   await writeFile(agentSettingsPath, patchedAgentSettingsSource)
-  await writeFile(bridgePath, bridgeSource)
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {

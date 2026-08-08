@@ -82,6 +82,87 @@ func TestRefreshUpstreamChannelPersistsTurnstileRecoveryState(t *testing.T) {
 	assert.NotZero(t, refreshed.LastSyncTime)
 }
 
+func TestRefreshUpstreamChannelUsesConfiguredProxyClient(t *testing.T) {
+	originalDB := model.DB
+	originalLogDB := model.LOG_DB
+	originalHTTPClient := httpClient
+	originalCryptoSecret := common.CryptoSecret
+	proxyClients.mutex.Lock()
+	originalProxyClientMap := proxyClients.clients
+	originalProxyAliasMap := proxyClients.aliases
+	proxyClients.clients = make(map[string]*http.Client)
+	proxyClients.aliases = make(map[string]string)
+	proxyClients.mutex.Unlock()
+
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "refresh-proxy.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UpstreamChannel{}, &model.AlertRule{}))
+	model.DB = db
+	model.LOG_DB = db
+	common.CryptoSecret = "refresh-proxy-test-secret"
+
+	directCalled := false
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		directCalled = true
+		return nil, errors.New("direct client must not be used")
+	})}
+	proxyURL := "socks5://proxy.test:7891"
+	proxyRequests := make([]string, 0, 4)
+	proxyClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		proxyRequests = append(proxyRequests, request.URL.Path)
+		switch request.URL.Path {
+		case "/api/status":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"quota_per_unit":500000}}`, nil), nil
+		case "/api/user/self":
+			require.Equal(t, "Bearer management-token", request.Header.Get("Authorization"))
+			require.Equal(t, "1", request.Header.Get("New-Api-User"))
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"id":1,"username":"root","role":10,"group":"default","quota":5000000}}`, nil), nil
+		case "/api/user/self/groups":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{}}`, nil), nil
+		case "/api/token":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"page":1,"page_size":100,"total":0,"items":[]}}`, nil), nil
+		default:
+			return nil, fmt.Errorf("unexpected proxy request path %s", request.URL.Path)
+		}
+	})}
+	normalizedProxyURL, err := NormalizeProxyURL(proxyURL)
+	require.NoError(t, err)
+	proxyClients.store(clientCacheKey(normalizedProxyURL, defaultHTTPTransportPolicy()), proxyClient)
+	t.Cleanup(func() {
+		model.DB = originalDB
+		model.LOG_DB = originalLogDB
+		httpClient = originalHTTPClient
+		common.CryptoSecret = originalCryptoSecret
+		proxyClients.mutex.Lock()
+		proxyClients.clients = originalProxyClientMap
+		proxyClients.aliases = originalProxyAliasMap
+		proxyClients.mutex.Unlock()
+	})
+
+	encryptedToken, err := common.EncryptSecret("upstream-channel-password", "management-token")
+	require.NoError(t, err)
+	row := &model.UpstreamChannel{
+		BaseURL:             "https://upstream.test",
+		BaseURLHash:         model.UpstreamBaseURLHash("https://upstream.test"),
+		Provider:            UpstreamProviderNewAPI,
+		AuthType:            model.UpstreamAuthTypeAccessToken,
+		Username:            "1",
+		PasswordCiphertext:  encryptedToken,
+		Proxy:               proxyURL,
+		AutoRefreshInterval: 300,
+		Status:              model.UpstreamChannelStatusUnconfigured,
+	}
+	require.NoError(t, db.Create(row).Error)
+
+	refreshed, snapshot, err := RefreshUpstreamChannel(context.Background(), row.Id)
+	require.NoError(t, err)
+	require.NotNil(t, refreshed)
+	assert.False(t, directCalled)
+	assert.Equal(t, []string{"/api/status", "/api/user/self", "/api/user/self/groups", "/api/token"}, proxyRequests)
+	assert.Equal(t, float64(10), snapshot.Balance)
+	assert.Equal(t, model.UpstreamChannelStatusReady, refreshed.Status)
+}
+
 func TestRefreshAllUpstreamChannelsRefreshesOnlyReadyChannels(t *testing.T) {
 	originalDB := model.DB
 	originalLogDB := model.LOG_DB
@@ -560,6 +641,7 @@ func TestImportUpstreamChannelKeysCreatesAndOverwritesChannels(t *testing.T) {
 		BaseURLHash:        model.UpstreamBaseURLHash(baseURL),
 		Provider:           UpstreamProviderNewAPI,
 		Username:           "root",
+		Proxy:              "socks5://proxy.test:7891",
 		PasswordCiphertext: passwordCiphertext,
 		SnapshotJSON:       string(snapshotJSON),
 		Status:             model.UpstreamChannelStatusReady,
@@ -607,6 +689,7 @@ func TestImportUpstreamChannelKeysCreatesAndOverwritesChannels(t *testing.T) {
 	require.NotNil(t, imported.Remark)
 	assert.Equal(t, "managed import", *imported.Remark)
 	assert.Equal(t, baseURL, imported.GetBaseURL())
+	assert.Equal(t, "socks5://proxy.test:7891", imported.GetSetting().Proxy)
 	encodedResult, err := common.Marshal(result)
 	require.NoError(t, err)
 	assert.NotContains(t, string(encodedResult), "sk-imported-key")
@@ -748,6 +831,66 @@ func TestImportUpstreamChannelKeysCreatesAndOverwritesChannels(t *testing.T) {
 	var remainingAbilities int64
 	require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ?", imported.Id).Count(&remainingAbilities).Error)
 	assert.Zero(t, remainingAbilities)
+}
+
+func TestFetchUpstreamChannelKeyRequiresSnapshotSelectionAndReturnsExactKey(t *testing.T) {
+	originalDB := model.DB
+	originalLogDB := model.LOG_DB
+	originalCryptoSecret := common.CryptoSecret
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "test-upstream-key.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.UpstreamChannel{}))
+	model.DB = db
+	model.LOG_DB = db
+	common.CryptoSecret = "test-upstream-key-secret"
+	t.Cleanup(func() {
+		model.DB = originalDB
+		model.LOG_DB = originalLogDB
+		common.CryptoSecret = originalCryptoSecret
+	})
+
+	requests := make([]string, 0, 2)
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests = append(requests, request.URL.Path)
+		switch request.URL.Path {
+		case "/api/user/login":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"id":42}}`, nil), nil
+		case "/api/token/7/key":
+			return jsonResponse(http.StatusOK, `{"success":true,"data":{"key":"sk-selected-secret"}}`, nil), nil
+		default:
+			return jsonResponse(http.StatusNotFound, `{}`, nil), nil
+		}
+	})}
+
+	passwordCiphertext, err := common.EncryptSecret("upstream-channel-password", "secret")
+	require.NoError(t, err)
+	snapshotJSON, err := common.Marshal(UpstreamSnapshot{
+		Provider: UpstreamProviderNewAPI,
+		Keys:     []UpstreamKey{{ID: 7, Name: "selected"}},
+	})
+	require.NoError(t, err)
+	row := &model.UpstreamChannel{
+		BaseURL:            "https://upstream.test",
+		BaseURLHash:        model.UpstreamBaseURLHash("https://upstream.test"),
+		Provider:           UpstreamProviderOther,
+		AuthType:           model.UpstreamAuthTypePassword,
+		Username:           "root",
+		PasswordCiphertext: passwordCiphertext,
+		SnapshotJSON:       string(snapshotJSON),
+		Status:             model.UpstreamChannelStatusReady,
+	}
+	require.NoError(t, db.Create(row).Error)
+
+	target, key, err := fetchUpstreamChannelKey(context.Background(), client, row.Id, 7, true)
+	require.NoError(t, err)
+	require.NotNil(t, target)
+	assert.Equal(t, row.Id, target.Id)
+	assert.Equal(t, "sk-selected-secret", key)
+	assert.Equal(t, []string{"/api/user/login", "/api/token/7/key"}, requests)
+
+	_, _, err = fetchUpstreamChannelKey(context.Background(), client, row.Id, 8, true)
+	require.EqualError(t, err, "upstream key 8 is not present in the latest snapshot")
+	assert.Equal(t, []string{"/api/user/login", "/api/token/7/key"}, requests)
 }
 
 func TestFetchUpstreamChannelKeyModelsMergesSelectedKeys(t *testing.T) {
@@ -1250,4 +1393,29 @@ func TestRefreshUpstreamChannelGroupsKeepsPreviousPricingWhenPricingEndpointFail
 	require.NoError(t, err)
 	assert.Empty(t, stored.LastError)
 	assert.Equal(t, "gpt-4o", stored.DefaultTestModel)
+}
+
+func TestNormalizeAndMaskUpstreamProxyURL(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+		ok    bool
+	}{
+		{"", "", true},
+		{" socks5h://user:secret@127.0.0.1:7891 ", "socks5h://user:secret@127.0.0.1:7891", true},
+		{"https://proxy.example:8443", "https://proxy.example:8443", true},
+		{"file:///tmp/socket", "", false},
+		{"socks5://", "", false},
+		{"proxy.example:7891", "", false},
+	}
+	for _, tt := range tests {
+		got, err := NormalizeUpstreamProxyURL(tt.input)
+		if tt.ok {
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		} else {
+			require.EqualError(t, err, "invalid upstream proxy address")
+		}
+	}
+	assert.Equal(t, "socks5://user:********@proxy.example:7891", MaskUpstreamProxyURL("socks5://user:secret@proxy.example:7891"))
 }

@@ -1,6 +1,7 @@
 import type { AgentApiConfigMode, ApiMode, ApiProfile, AppSettings } from '../types'
 import {
   createDefaultOpenAIProfile,
+  DEFAULT_API_TIMEOUT,
   DEFAULT_IMAGES_MODEL,
   DEFAULT_RESPONSES_MODEL,
 } from './apiProfiles'
@@ -108,9 +109,11 @@ function managedProfilesMatch(settings: AppSettings, message: ConfigureMessage) 
     imageProfile.apiKey !== configuration.apiKey ||
     imageProfile.apiMode !== 'images' ||
     !imageProfile.model ||
+    imageProfile.timeout !== DEFAULT_API_TIMEOUT ||
     imageProfile.codexCli ||
     imageProfile.apiProxy ||
-    imageProfile.streamImages !== configuration.streamImages
+    imageProfile.streamImages !== configuration.streamImages ||
+    imageProfile.managedAsyncImages !== true
   ) {
     return false
   }
@@ -133,6 +136,7 @@ function managedProfilesMatch(settings: AppSettings, message: ConfigureMessage) 
     agentProfile.apiKey !== configuration.apiKey ||
     agentProfile.apiMode !== 'responses' ||
     !agentProfile.model ||
+    agentProfile.timeout !== DEFAULT_API_TIMEOUT ||
     agentProfile.codexCli ||
     agentProfile.apiProxy ||
     agentProfile.streamImages !== configuration.streamImages
@@ -256,6 +260,10 @@ function applyManagedProfiles(message: ConfigureMessage) {
   }
 
   const existingImageProfile = state.settings.profiles.find((profile) => profile.id === MANAGED_IMAGE_PROFILE_ID)
+  // This only controls the embedded browser client's request deadline. Deployments
+  // must also allow long-running image requests through their reverse proxy,
+  // ingress, CDN, or load balancer; increasing this value cannot prevent an
+  // intermediary from closing a synchronous /pg/v1/images/* request earlier.
   const managedImageProfile: ApiProfile = {
     ...(existingImageProfile ?? createDefaultOpenAIProfile()),
     id: MANAGED_IMAGE_PROFILE_ID,
@@ -265,9 +273,11 @@ function applyManagedProfiles(message: ConfigureMessage) {
     apiKey: configuration.apiKey,
     model: existingImageProfile?.model || DEFAULT_IMAGES_MODEL,
     apiMode: 'images',
+    timeout: DEFAULT_API_TIMEOUT,
     codexCli: false,
     apiProxy: false,
     streamImages: configuration.streamImages,
+    managedAsyncImages: true,
   }
   const userProfiles = state.settings.profiles.filter((profile) => !isManagedProfile(profile))
 
@@ -302,6 +312,7 @@ function applyManagedProfiles(message: ConfigureMessage) {
     apiKey: configuration.apiKey,
     model: existingAgentProfile?.model || DEFAULT_RESPONSES_MODEL,
     apiMode: 'responses',
+    timeout: DEFAULT_API_TIMEOUT,
     codexCli: false,
     apiProxy: false,
     streamImages: configuration.streamImages,

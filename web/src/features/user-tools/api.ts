@@ -31,6 +31,10 @@ export interface UserToolPreference {
   updated_at: number
 }
 
+export interface UserToolBrowserSession {
+  expires_at: number
+}
+
 export interface UserToolRuntimeSession {
   credential: string
   expires_at: number
@@ -105,6 +109,13 @@ export async function updateUserToolPreference(
   const response = await api.put(`/api/user-tools/${tool}/preferences`, {
     selected_token_id: selectedTokenId,
   })
+  return response.data
+}
+
+export async function createUserToolBrowserSession(
+  tool: UserTool
+): Promise<ApiResponse<UserToolBrowserSession>> {
+  const response = await api.post(`/api/user-tools/${tool}/browser-session`)
   return response.data
 }
 

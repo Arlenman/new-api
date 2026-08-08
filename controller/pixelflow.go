@@ -9,7 +9,6 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
-	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 )
 
@@ -69,14 +68,10 @@ func normalizePixelFlowOrigin(value string) (string, bool) {
 	return parsed.Scheme + "://" + parsed.Host, true
 }
 
-func writePixelFlowSessionSyncMessage(c *gin.Context, origin string, payload pixelFlowSessionSyncPayload) {
-	messageBytes, err := common.Marshal(pixelFlowSessionSyncMessage{
-		Type:    "pixelflow:newapi-token-sync",
-		Origin:  origin,
-		Payload: payload,
-	})
-	if err != nil {
-		c.String(http.StatusInternalServerError, "生成 PixelFlow 授权数据失败")
+func PixelFlowSessionTokenSync(c *gin.Context) {
+	origin, ok := normalizePixelFlowOrigin(c.Query("origin"))
+	if !ok || !getAllowedPixelFlowOrigins()[origin] {
+		c.String(http.StatusForbidden, "不允许同步到该站点")
 		return
 	}
 	originBytes, err := common.Marshal(origin)
@@ -93,44 +88,69 @@ func writePixelFlowSessionSyncMessage(c *gin.Context, origin string, payload pix
   <title>PixelFlow 授权同步</title>
 </head>
 <body>
-  <p>正在同步 PixelFlow 密钥，请稍候。</p>
+  <p id="status">正在同步 PixelFlow 密钥，请稍候。</p>
   <script>
-    const message = %s;
-    if (window.opener) {
-      window.opener.postMessage(message, %s);
-      window.close();
+    const targetOrigin = %s;
+    async function syncPixelFlow() {
+      const refreshResponse = await fetch('/api/user/auth/refresh', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json' },
+      });
+      const refreshBody = await refreshResponse.json().catch(() => null);
+      const auth = refreshBody && refreshBody.data;
+      if (!refreshResponse.ok || refreshBody.success !== true || !auth || !auth.access_token) {
+        throw new Error('请先登录 NewAPI');
+      }
+
+      const headers = {
+        Accept: 'application/json',
+        Authorization: 'Bearer ' + auth.access_token,
+      };
+      if (auth.session && auth.session.sid) {
+        headers['X-Auth-Session'] = auth.session.sid;
+      }
+      const dataResponse = await fetch(
+        '/api/pixelflow/session-token-sync/data?origin=' + encodeURIComponent(targetOrigin),
+        { credentials: 'same-origin', headers },
+      );
+      const message = await dataResponse.json().catch(() => null);
+      if (!dataResponse.ok || !message) {
+        throw new Error('同步 PixelFlow 密钥失败');
+      }
+      if (window.opener) {
+        window.opener.postMessage(message, targetOrigin);
+        window.close();
+      }
     }
+
+    syncPixelFlow().catch((error) => {
+      document.getElementById('status').textContent = error.message || '同步 PixelFlow 密钥失败';
+    });
   </script>
 </body>
-</html>`, string(messageBytes), string(originBytes))
+</html>`, string(originBytes))
 }
 
-func PixelFlowSessionTokenSync(c *gin.Context) {
+func PixelFlowSessionTokenSyncData(c *gin.Context) {
 	origin, ok := normalizePixelFlowOrigin(c.Query("origin"))
 	if !ok || !getAllowedPixelFlowOrigins()[origin] {
-		c.String(http.StatusForbidden, "不允许同步到该站点")
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "不允许同步到该站点"})
 		return
 	}
 
-	session := sessions.Default(c)
-	userID, ok := session.Get("id").(int)
-	if !ok || userID <= 0 {
-		c.String(http.StatusUnauthorized, "请先登录 NewAPI")
+	userID := c.GetInt("id")
+	if userID <= 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "请先登录 NewAPI"})
 		return
 	}
-	status, ok := session.Get("status").(int)
-	if !ok || status != common.UserStatusEnabled {
-		c.String(http.StatusUnauthorized, "当前 NewAPI 用户不可用")
-		return
-	}
-
 	user, err := model.GetUserById(userID, false)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	if user.Status != common.UserStatusEnabled {
-		c.String(http.StatusUnauthorized, "当前 NewAPI 用户不可用")
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "当前 NewAPI 用户不可用"})
 		return
 	}
 
@@ -143,10 +163,7 @@ func PixelFlowSessionTokenSync(c *gin.Context) {
 	payload := pixelFlowSessionSyncPayload{
 		Tokens: make([]pixelFlowTokenPayload, 0, len(tokens)),
 	}
-	payload.Binding.BaseURL = c.Request.URL.Scheme
-	if payload.Binding.BaseURL == "" {
-		payload.Binding.BaseURL = "http"
-	}
+	payload.Binding.BaseURL = "http"
 	if c.Request.TLS != nil {
 		payload.Binding.BaseURL = "https"
 	}
@@ -169,5 +186,9 @@ func PixelFlowSessionTokenSync(c *gin.Context) {
 		})
 	}
 
-	writePixelFlowSessionSyncMessage(c, origin, payload)
+	c.JSON(http.StatusOK, pixelFlowSessionSyncMessage{
+		Type:    "pixelflow:newapi-token-sync",
+		Origin:  origin,
+		Payload: payload,
+	})
 }

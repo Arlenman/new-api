@@ -27,13 +27,13 @@ function createStorage(seed = {}) {
   };
 }
 
-async function loadStorageModule({ injectedUserId, localStorage, search = "" }) {
+async function loadStorageModule({ injectedUserId, localStorage, search = "", dispatchEvent = () => {} }) {
   const transformed = stripTypeScriptTypes(storageSource, { mode: "transform" });
   globalThis.window = {
     __NEW_API_USER_ID__: injectedUserId,
     location: { search },
     localStorage,
-    dispatchEvent() {},
+    dispatchEvent,
   };
   Object.defineProperty(globalThis, "indexedDB", {
     configurable: true,
@@ -118,4 +118,47 @@ test("missing or invalid server identity fails closed instead of trusting localS
   assert.equal(storage.getNewApiImagePlaygroundMetadataKey(), null);
   assert.equal(storage.getNewApiImagePlaygroundAssetCacheName(), null);
   assert.equal(localStorage.getItem("gpt-image-playground:new-api-user:202"), null);
+});
+
+test("persisted app-state changes notify account sync without waiting for a focus or interval tick", async (t) => {
+  restoreGlobals(t);
+  const localStorage = createStorage();
+  const events = [];
+  const storage = await loadStorageModule({
+    injectedUserId: 101,
+    localStorage,
+    dispatchEvent: (event) => events.push(event.type),
+  });
+  const persistedStorage = storage.createNewApiImagePlaygroundPersistStorage();
+  const key = storage.getNewApiImagePlaygroundStorageKey();
+
+  persistedStorage.setItem(key, '{"state":{"favoriteCollections":[]},"version":2}');
+  persistedStorage.setItem(key, '{"state":{"favoriteCollections":[]},"version":2}');
+  persistedStorage.setItem(key, '{"state":{"favoriteCollections":[{"id":"folder-1"}]},"version":2}');
+
+  assert.deepEqual(events, [
+    storage.NEW_API_IMAGE_PLAYGROUND_STORAGE_CHANGED_EVENT,
+    storage.NEW_API_IMAGE_PLAYGROUND_STORAGE_CHANGED_EVENT,
+  ]);
+});
+
+test("task deletion intent is durable and remote deletion application is suppressed", async (t) => {
+  restoreGlobals(t);
+  const localStorage = createStorage();
+  const storage = await loadStorageModule({ injectedUserId: 101, localStorage });
+
+  storage.recordNewApiImagePlaygroundDeletion("task", "task-1");
+  assert.deepEqual(storage.getNewApiImagePlaygroundPendingDeletions(), [
+    { kind: "task", key: "task-1" },
+  ]);
+
+  await storage.runWithoutNewApiImagePlaygroundSyncNotifications(async () => {
+    storage.recordNewApiImagePlaygroundDeletion("task", "remote-task");
+  });
+  assert.deepEqual(storage.getNewApiImagePlaygroundPendingDeletions(), [
+    { kind: "task", key: "task-1" },
+  ]);
+
+  storage.clearNewApiImagePlaygroundPendingDeletion("task", "task-1");
+  assert.deepEqual(storage.getNewApiImagePlaygroundPendingDeletions(), []);
 });

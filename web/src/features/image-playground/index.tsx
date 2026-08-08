@@ -43,6 +43,7 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import {
+  createUserToolBrowserSession,
   createUserToolRuntimeSession,
   getAllUserToolTokens,
   getUserToolPreference,
@@ -54,15 +55,15 @@ import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
 import {
-  isImagePlaygroundInitialLoadPending,
-  reconcileImagePlaygroundConfiguration,
-  type ImagePlaygroundAppliedConfiguration,
-} from './lib/configuration-state'
-import {
   createNewApiConfigureMessage,
   createProbeMessage,
   isTrustedImagePlaygroundMessage,
 } from './lib/bridge'
+import {
+  isImagePlaygroundInitialLoadPending,
+  reconcileImagePlaygroundConfiguration,
+  type ImagePlaygroundAppliedConfiguration,
+} from './lib/configuration-state'
 import {
   persistImagePlaygroundStreamImages,
   readImagePlaygroundStreamImages,
@@ -163,6 +164,13 @@ export function ImagePlayground({
       setKeysLoading(true)
       setErrorMessage(null)
       try {
+        const browserSession =
+          await createUserToolBrowserSession('image-playground')
+        if (!browserSession.success || !browserSession.data) {
+          throw new Error(
+            browserSession.message || t('Failed to start tool session')
+          )
+        }
         const response = await getAllUserToolTokens('image-playground')
         if (!response.success || !response.data) {
           throw new Error(response.message || 'Failed to load API keys')

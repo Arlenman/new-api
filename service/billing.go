@@ -1,10 +1,13 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
@@ -39,6 +42,36 @@ func PreConsumeBilling(c *gin.Context, preConsumedQuota int, relayInfo *relaycom
 		return apiErr
 	}
 	relayInfo.Billing = session
+	if err := RecordManagedPlaygroundImagePreConsume(c, relayInfo); err != nil {
+		taskID := playgroundImageTaskID(c)
+		requestID := relayInfo.RequestId
+		if requestID == "" {
+			requestID = c.GetString(common.RequestIdKey)
+		}
+		quota := int64(session.GetPreConsumedQuota())
+		refundErr := session.RefundSync(c)
+		var compensationErr error
+		if refundErr != nil {
+			compensationErr = model.MarkUserToolImageTaskPreConsumeRefundFailed(taskID, requestID, quota, 0)
+			err = errors.Join(
+				err,
+				fmt.Errorf("rollback managed playground image pre-consume: %w", refundErr),
+				compensationErr,
+			)
+		} else {
+			compensationErr = model.MarkUserToolImageTaskPreConsumeRefunded(taskID, requestID, quota, 0)
+			err = errors.Join(err, compensationErr)
+		}
+		logger.LogError(c, fmt.Sprintf(
+			"managed playground image billing audit failed request_id=%s task_id=%s stage=pre_consume refund_succeeded=%t compensation_audit_succeeded=%t error=%q",
+			requestID,
+			taskID,
+			refundErr == nil,
+			compensationErr == nil,
+			common.LocalLogPreview(err.Error()),
+		))
+		return types.NewError(err, types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
+	}
 	return nil
 }
 

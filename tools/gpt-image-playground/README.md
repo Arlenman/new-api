@@ -20,3 +20,11 @@ Set `GPT_IMAGE_PLAYGROUND_LATEST_REF` to another Fork branch when preparing an u
 `write-build-info.mjs` reads the committed `upstream.commit` marker rather than relying on the upstream checkout's `.git` metadata, so the generated `dist/build-info.json` remains deterministic in Docker build contexts without Git history.
 
 `patch-upstream.mjs` fails the build if the validated upstream entry, service-worker, persistence, Agent response-output merge, image-execution, or retry markers drift. The integration disables the upstream offline service worker so authenticated tool pages cannot be served from an application-shell cache, filters both runtime-managed New API image/Agent profiles before upstream settings are written to localStorage, deduplicates repeated streamed Agent tool items by `type + call_id`, and executes distinct image calls concurrently. The bridge restores the upstream tool's previous active and Agent profile selections, while third-party profiles remain owned and persisted by the upstream tool.
+
+## Deployment timeout notes
+
+Managed Playground image requests under `/pg` use a short-lived submission flow: the server returns `202 Accepted`, runs generation as a background task, and the browser polls the task status endpoint. These requests should not depend on one long-lived frontend connection.
+
+This does not change ordinary synchronous OpenAI Images API or image SSE traffic. Deployments must still verify end-to-end timeouts at every relevant layer, including `proxy_read_timeout`, `proxy_send_timeout`, Ingress request/read timeouts, CDN limits, and load-balancer idle timeouts. Those limits must cover the maximum supported relay duration for synchronous or streaming requests.
+
+The repository does not contain enough deployment-layer evidence to identify the reported approximately 55-second cutoff or the source of a `404 page not found` response. Confirm both against the actual reverse-proxy, Ingress, CDN, load-balancer, and upstream access/error logs; do not assume that the `404` was returned by the upstream image API.

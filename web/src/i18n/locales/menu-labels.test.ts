@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
-import { describe, test } from 'node:test'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const currentDir = dirname(fileURLToPath(import.meta.url))

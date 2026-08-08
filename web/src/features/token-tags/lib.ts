@@ -21,11 +21,13 @@ import dayjs from 'dayjs'
 import type {
   TokenTagOptionItem,
   TokenTagQuotaDataItem,
+  TokenTagQuotaTrendItem,
 } from '../dashboard/types'
 
 export type TokenTagSortKey = 'quota' | 'token_used' | 'count' | 'last_used_at'
 export type SortDirection = 'asc' | 'desc'
 export type TokenTagRankingMetric = 'quota' | 'token_used' | 'count'
+export type TokenTagTrendGranularity = 'day' | 'week' | 'month'
 
 export const TOKEN_TAGS_FIXED_CONTENT = false
 export const TOKEN_TAGS_CONTENT_CLASS = 'flex flex-col gap-4 pb-4'
@@ -73,16 +75,62 @@ export interface TokenTagChartData {
   models: string[]
 }
 
-function userKey(row: TokenTagQuotaDataItem): string {
+export interface TokenTagDistributionDatum extends TokenTagChartCategory {
+  value: number
+  share: number
+}
+
+export interface TokenTagDistributionData {
+  data: TokenTagDistributionDatum[]
+  total: number
+}
+
+export interface TokenTagTrendDatum {
+  period: string
+  periodLabel: string
+  seriesKey: string
+  seriesLabel: string
+  value: number
+  tagName: string
+  username: string
+}
+
+export interface TokenTagTrendSeries {
+  key: string
+  label: string
+  tagName: string
+  username: string
+}
+
+export interface TokenTagTrendData {
+  data: TokenTagTrendDatum[]
+  periods: string[]
+  series: TokenTagTrendSeries[]
+}
+
+interface TokenTagMetricItem {
+  quota?: number
+  token_used?: number
+  count?: number
+}
+
+interface TokenTagIdentityItem {
+  tag_id: number
+  tag_name: string
+  user_id?: number
+  username?: string
+}
+
+function userKey(row: TokenTagIdentityItem): string {
   return row.user_id ? `id:${row.user_id}` : `name:${row.username || ''}`
 }
 
-function tagKey(row: TokenTagQuotaDataItem): string {
+function tagKey(row: TokenTagIdentityItem): string {
   return row.tag_id ? `id:${row.tag_id}` : `name:${row.tag_name || ''}`
 }
 
 function metricValue(
-  row: TokenTagQuotaDataItem,
+  row: TokenTagMetricItem,
   metric: TokenTagRankingMetric
 ): number {
   return Number(row[metric] || 0)
@@ -375,6 +423,154 @@ export function buildKeyRankingChartData(
   }
 
   return finalizeChartData(categories, values, models)
+}
+
+export function buildDistributionChartData(
+  chart: TokenTagChartData
+): TokenTagDistributionData {
+  const categories = chart.categories
+    .filter((category) => category.total > 0)
+    .sort((a, b) => b.total - a.total || a.label.localeCompare(b.label))
+  const total = categories.reduce((sum, category) => sum + category.total, 0)
+  return {
+    total,
+    data: categories.map((category) => ({
+      ...category,
+      value: category.total,
+      share: total > 0 ? category.total / total : 0,
+    })),
+  }
+}
+
+function getTrendPeriodStart(
+  timestamp: number,
+  granularity: TokenTagTrendGranularity
+) {
+  const value = dayjs(timestamp * 1000)
+  if (granularity === 'month') {
+    return value.startOf('month')
+  }
+  if (granularity === 'week') {
+    const dayStart = value.startOf('day')
+    return dayStart.subtract((dayStart.day() + 6) % 7, 'day')
+  }
+  return value.startOf('day')
+}
+
+function getTrendPeriodKey(
+  timestamp: number,
+  granularity: TokenTagTrendGranularity
+): string {
+  const periodStart = getTrendPeriodStart(timestamp, granularity)
+  return periodStart.format(granularity === 'month' ? 'YYYY-MM' : 'YYYY-MM-DD')
+}
+
+function getTrendPeriodLabel(
+  timestamp: number,
+  granularity: TokenTagTrendGranularity
+): string {
+  const periodStart = getTrendPeriodStart(timestamp, granularity)
+  if (granularity === 'week') {
+    return `${periodStart.format('YYYY-MM-DD')} – ${periodStart
+      .add(6, 'day')
+      .format('YYYY-MM-DD')}`
+  }
+  return periodStart.format(granularity === 'month' ? 'YYYY-MM' : 'YYYY-MM-DD')
+}
+
+export function buildTagTrendChartData(
+  rows: TokenTagQuotaTrendItem[],
+  metric: TokenTagRankingMetric,
+  granularity: TokenTagTrendGranularity,
+  options: TokenTagChartOptions,
+  range: { startTimestamp: number; endTimestamp: number }
+): TokenTagTrendData {
+  const seriesMetadata = new Map<
+    string,
+    { label: string; tagName: string; username: string }
+  >()
+  const values = new Map<string, number>()
+
+  for (const row of rows) {
+    const seriesKey = `${userKey(row)}\u001f${tagKey(row)}`
+    const tagName = row.tag_name || options.noTagLabel
+    const username = row.username || ''
+    const label =
+      options.isAdmin && username ? `${username} / ${tagName}` : tagName
+    seriesMetadata.set(seriesKey, { label, tagName, username })
+    const period = getTrendPeriodKey(row.created_at, granularity)
+    const valueKey = `${seriesKey}\u001f${period}`
+    values.set(valueKey, (values.get(valueKey) || 0) + metricValue(row, metric))
+  }
+
+  const periodStarts: number[] = []
+  let current = getTrendPeriodStart(range.startTimestamp, granularity)
+  const end = getTrendPeriodStart(range.endTimestamp, granularity)
+  while (current.valueOf() <= end.valueOf()) {
+    periodStarts.push(Math.floor(current.valueOf() / 1000))
+    if (granularity === 'month') {
+      current = current.add(1, 'month')
+    } else if (granularity === 'week') {
+      current = current.add(1, 'week')
+    } else {
+      current = current.add(1, 'day')
+    }
+  }
+
+  const periods = periodStarts.map((timestamp) =>
+    getTrendPeriodKey(timestamp, granularity)
+  )
+  const series = [...seriesMetadata.entries()].sort(
+    ([keyA, valueA], [keyB, valueB]) =>
+      valueA.label.localeCompare(valueB.label) || keyA.localeCompare(keyB)
+  )
+  const data: TokenTagTrendDatum[] = []
+  for (const [seriesKey, metadata] of series) {
+    for (const timestamp of periodStarts) {
+      const period = getTrendPeriodKey(timestamp, granularity)
+      data.push({
+        period,
+        periodLabel: getTrendPeriodLabel(timestamp, granularity),
+        seriesKey,
+        seriesLabel: metadata.label,
+        value: values.get(`${seriesKey}\u001f${period}`) || 0,
+        tagName: metadata.tagName,
+        username: metadata.username,
+      })
+    }
+  }
+
+  return {
+    data,
+    periods,
+    series: series.map(([key, metadata]) => ({ key, ...metadata })),
+  }
+}
+
+export function filterTagTrendChartData(
+  data: TokenTagTrendData,
+  hiddenSeriesKeys: ReadonlySet<string>
+): TokenTagTrendData {
+  if (hiddenSeriesKeys.size === 0) {
+    return data
+  }
+  return {
+    ...data,
+    data: data.data.filter((item) => !hiddenSeriesKeys.has(item.seriesKey)),
+  }
+}
+
+export function toggleTagTrendSeriesVisibility(
+  hiddenSeriesKeys: ReadonlySet<string>,
+  seriesKey: string
+): Set<string> {
+  const next = new Set(hiddenSeriesKeys)
+  if (next.has(seriesKey)) {
+    next.delete(seriesKey)
+  } else {
+    next.add(seriesKey)
+  }
+  return next
 }
 
 function finalizeChartData(

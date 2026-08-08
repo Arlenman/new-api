@@ -14,11 +14,12 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -40,6 +41,67 @@ const (
 	playgroundImageTerminalStateComplete playgroundImageTerminalState = "complete"
 	playgroundImageTerminalStateFailed   playgroundImageTerminalState = "failed"
 )
+
+type playgroundImageMetadata struct {
+	ImageCount         int
+	HasURL             bool
+	HasB64JSON         bool
+	DownloadStatusCode int
+	ErrorSummary       string
+}
+
+type playgroundImageProcessingError struct {
+	Stage              string
+	Message            string
+	StatusCode         int
+	DownloadStatusCode int
+	Cause              error
+}
+
+type playgroundImageDownloadStatusError struct {
+	StatusCode int
+}
+
+func (e *playgroundImageDownloadStatusError) Error() string {
+	return fmt.Sprintf("download playground image: HTTP %d", e.StatusCode)
+}
+
+func (e *playgroundImageProcessingError) Error() string {
+	if e == nil {
+		return "playground image processing failed"
+	}
+	if e.Cause == nil {
+		return e.Message
+	}
+	return fmt.Sprintf("%s: %s", e.Message, e.Cause.Error())
+}
+
+func newPlaygroundImageProcessingError(stage string, statusCode int, message string, cause error) *playgroundImageProcessingError {
+	return &playgroundImageProcessingError{
+		Stage:      stage,
+		Message:    message,
+		StatusCode: statusCode,
+		Cause:      cause,
+	}
+}
+
+func newPlaygroundImagePersistenceError(err error) *playgroundImageProcessingError {
+	message := "failed to persist playground image"
+	var statusErr *playgroundImageDownloadStatusError
+	if errors.As(err, &statusErr) {
+		message = fmt.Sprintf("failed to persist playground image: HTTP %d", statusErr.StatusCode)
+	}
+	processingErr := newPlaygroundImageProcessingError(
+		"persist_image",
+		http.StatusInternalServerError,
+		message,
+		err,
+	)
+	if statusErr != nil {
+		processingErr.DownloadStatusCode = statusErr.StatusCode
+	}
+	return processingErr
+}
 
 type playgroundImageCaptureWriter struct {
 	gin.ResponseWriter
@@ -153,15 +215,12 @@ func (w *playgroundImageCaptureWriter) CloseNotify() <-chan bool {
 }
 
 func shouldRunPlaygroundImageAsync(c *gin.Context) bool {
-	if c == nil || c.Request == nil {
+	if c == nil || c.Request == nil || !strings.EqualFold(strings.TrimSpace(c.GetHeader(playgroundAsyncHeader)), "true") {
 		return false
 	}
 	sessionID := strings.TrimSpace(c.GetHeader(playgroundSessionHeader))
 	messageKey := strings.TrimSpace(c.GetHeader(playgroundMessageKeyHeader))
-	if sessionID == "" || messageKey == "" {
-		return false
-	}
-	return true
+	return sessionID != "" && messageKey != ""
 }
 
 func startAsyncPlaygroundImage(c *gin.Context) {
@@ -233,7 +292,7 @@ func persistPlaygroundImageTerminalState(
 	state playgroundImageTerminalState,
 	value string,
 	completedAt int64,
-) {
+) bool {
 	var firstErr error
 	for attempt := 1; attempt <= playgroundImageTerminalUpdateAttempts; attempt++ {
 		var err error
@@ -259,7 +318,7 @@ func persistPlaygroundImageTerminalState(
 					firstErr,
 				))
 			}
-			return
+			return true
 		}
 		if firstErr == nil {
 			firstErr = err
@@ -276,10 +335,227 @@ func persistPlaygroundImageTerminalState(
 				err,
 				firstErr,
 			))
-			return
+			return false
 		}
 		time.Sleep(playgroundImageTerminalUpdateInterval)
 	}
+	return false
+}
+
+func inspectPlaygroundImageData(items []dto.ImageData) playgroundImageMetadata {
+	metadata := playgroundImageMetadata{}
+	for _, item := range items {
+		hasURL := strings.TrimSpace(item.Url) != ""
+		hasB64JSON := strings.TrimSpace(item.B64Json) != ""
+		metadata.HasURL = metadata.HasURL || hasURL
+		metadata.HasB64JSON = metadata.HasB64JSON || hasB64JSON
+		if hasURL || hasB64JSON {
+			metadata.ImageCount++
+		}
+	}
+	return metadata
+}
+
+func decodeAndValidatePlaygroundImageResponse(raw []byte) (dto.ImageResponse, playgroundImageMetadata, error) {
+	var response dto.ImageResponse
+	if err := common.Unmarshal(raw, &response); err != nil {
+		return response, playgroundImageMetadata{}, newPlaygroundImageProcessingError(
+			"decode_response",
+			http.StatusBadGateway,
+			"failed to decode playground image response",
+			errors.New("invalid JSON response"),
+		)
+	}
+
+	metadata := inspectPlaygroundImageData(response.Data)
+	if metadata.ImageCount == 0 {
+		return response, metadata, newPlaygroundImageProcessingError(
+			"validate_image_data",
+			http.StatusBadGateway,
+			"playground image response did not include a valid url or b64_json",
+			nil,
+		)
+	}
+
+	validImages := make([]dto.ImageData, 0, metadata.ImageCount)
+	for _, item := range response.Data {
+		item.Url = strings.TrimSpace(item.Url)
+		item.B64Json = strings.TrimSpace(item.B64Json)
+		if item.Url == "" && item.B64Json == "" {
+			continue
+		}
+		validImages = append(validImages, item)
+	}
+	response.Data = validImages
+	return response, metadata, nil
+}
+
+func playgroundImageMetadataFromRelay(c *gin.Context) playgroundImageMetadata {
+	metadata, ok := common.GetContextKeyType[relaycommon.ImageFailureMetadata](c, constant.ContextKeyImageFailureMetadata)
+	if !ok {
+		return playgroundImageMetadata{}
+	}
+	return playgroundImageMetadata{
+		ImageCount:   int(metadata.ImageCount),
+		HasURL:       metadata.HasURL,
+		HasB64JSON:   metadata.HasB64JSON,
+		ErrorSummary: metadata.ErrorSummary,
+	}
+}
+
+func playgroundImageRelayFailure(c *gin.Context, statusCode int, body []byte) *playgroundImageProcessingError {
+	stage := "relay"
+	message := ""
+	if metadata, ok := common.GetContextKeyType[relaycommon.ImageFailureMetadata](c, constant.ContextKeyImageFailureMetadata); ok {
+		switch metadata.Stage {
+		case "parse_stream", "validate_image_data", "decode_response", "relay":
+			stage = metadata.Stage
+		}
+		message = metadata.ErrorSummary
+	}
+	if statusCode == 0 {
+		statusCode = http.StatusInternalServerError
+	}
+	if message == "" {
+		message = playgroundImageErrorFromResponse(statusCode, body)
+	}
+	return newPlaygroundImageProcessingError(stage, statusCode, relaycommon.SanitizeImageErrorSummary(message), nil)
+}
+
+func playgroundImageDownloadStatusCode(err error) int {
+	var processingErr *playgroundImageProcessingError
+	if errors.As(err, &processingErr) {
+		return processingErr.DownloadStatusCode
+	}
+	return 0
+}
+
+func playgroundImageProcessingErrorDetails(err error) (string, int, string) {
+	var processingErr *playgroundImageProcessingError
+	if errors.As(err, &processingErr) {
+		statusCode := processingErr.StatusCode
+		if statusCode == 0 {
+			statusCode = http.StatusInternalServerError
+		}
+		return processingErr.Stage, statusCode, relaycommon.SanitizeImageErrorSummary(processingErr.Message)
+	}
+	return "relay", http.StatusInternalServerError, "playground image processing failed"
+}
+
+func recordPlaygroundImageFailure(
+	c *gin.Context,
+	stage string,
+	statusCode int,
+	contentType string,
+	metadata playgroundImageMetadata,
+	message string,
+	recordErrorLog bool,
+) {
+	requestID := ""
+	channelID := 0
+	modelName := ""
+	if c != nil {
+		requestID = c.GetString(common.RequestIdKey)
+		channelID = c.GetInt("channel_id")
+		modelName = c.GetString("original_model")
+	}
+	errorSummary := relaycommon.SanitizeImageErrorSummary(message)
+	logMessage := fmt.Sprintf(
+		"playground image failure request_id=%s channel_id=%d model=%s stage=%s status=%d content_type=%q image_count=%d has_url=%t has_b64_json=%t error_summary=%q",
+		requestID,
+		channelID,
+		modelName,
+		stage,
+		statusCode,
+		contentType,
+		metadata.ImageCount,
+		metadata.HasURL,
+		metadata.HasB64JSON,
+		errorSummary,
+	)
+	if metadata.DownloadStatusCode > 0 {
+		logMessage += fmt.Sprintf(" download_status_code=%d", metadata.DownloadStatusCode)
+	}
+	logger.LogError(c, logMessage)
+
+	// Playground image failures must remain visible in the usage log even when
+	// the optional global relay error log switch is disabled. These failures can
+	// happen after the relay has returned (stream validation, image persistence,
+	// or billing settlement), so the task record and process log alone are not a
+	// sufficient request audit trail.
+	if !recordErrorLog || c == nil || model.LOG_DB == nil {
+		return
+	}
+	startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
+	if startTime.IsZero() {
+		startTime = time.Now()
+	}
+	other := map[string]interface{}{
+		"stage":         stage,
+		"status_code":   statusCode,
+		"content_type":  contentType,
+		"image_count":   metadata.ImageCount,
+		"has_url":       metadata.HasURL,
+		"has_b64_json":  metadata.HasB64JSON,
+		"error_summary": errorSummary,
+	}
+	if metadata.DownloadStatusCode > 0 {
+		other["download_status_code"] = metadata.DownloadStatusCode
+	}
+	if taskID := strings.TrimSpace(common.GetContextKeyString(c, constant.ContextKeyPlaygroundImageTaskID)); taskID != "" {
+		other["task_id"] = taskID
+	}
+	model.RecordErrorLog(
+		c,
+		c.GetInt("id"),
+		channelID,
+		modelName,
+		c.GetString("token_name"),
+		fmt.Sprintf("playground image processing failed at %s: %s", stage, errorSummary),
+		c.GetInt("token_id"),
+		int(time.Since(startTime).Seconds()),
+		common.GetContextKeyBool(c, constant.ContextKeyIsStream),
+		c.GetString("group"),
+		other,
+	)
+}
+
+func writePlaygroundImageProcessingError(c *gin.Context, err error) {
+	stage, statusCode, message := playgroundImageProcessingErrorDetails(err)
+	c.Writer.Header().Del("Content-Length")
+	c.Writer.Header().Del("Transfer-Encoding")
+	c.JSON(statusCode, gin.H{
+		"error": gin.H{
+			"message": message,
+			"type":    "playground_image_error",
+			"code":    "playground_image_" + stage,
+			"stage":   stage,
+		},
+	})
+}
+
+func failAsyncPlaygroundImage(
+	c *gin.Context,
+	userID int,
+	sessionID string,
+	messageKey string,
+	contentType string,
+	metadata playgroundImageMetadata,
+	err error,
+) {
+	stage, statusCode, message := playgroundImageProcessingErrorDetails(err)
+	metadata.DownloadStatusCode = playgroundImageDownloadStatusCode(err)
+	recordPlaygroundImageFailure(c, stage, statusCode, contentType, metadata, message, stage != "relay")
+	persistPlaygroundImageTerminalState(
+		c,
+		userID,
+		sessionID,
+		messageKey,
+		stage,
+		playgroundImageTerminalStateFailed,
+		message,
+		time.Now().UnixMilli(),
+	)
 }
 
 func runAsyncPlaygroundImage(c *gin.Context, userID int, sessionID string, messageKey string) {
@@ -288,59 +564,120 @@ func runAsyncPlaygroundImage(c *gin.Context, userID int, sessionID string, messa
 		writer = newPlaygroundImageCaptureWriter(c.Writer)
 		c.Writer = writer
 	}
+	defer service.RefundPlaygroundImageBilling(c)
 
 	PlaygroundRelay(c, types.RelayFormatOpenAIImage)
 
 	status := writer.Status()
 	body := writer.body.Bytes()
 	contentType := strings.ToLower(writer.Header().Get("Content-Type"))
-	if status >= 200 && status < 300 && len(body) > 0 {
-		var response dto.ImageResponse
-		if strings.Contains(contentType, "text/event-stream") {
-			streamResponse, err := playgroundImageResponseFromStream(body)
-			if err != nil {
-				persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "parse_stream", playgroundImageTerminalStateFailed, err.Error(), time.Now().UnixMilli())
-				return
-			}
-			rawResponse, err := common.Marshal(streamResponse)
-			if err != nil {
-				persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "marshal_stream", playgroundImageTerminalStateFailed, "invalid image stream response", time.Now().UnixMilli())
-				return
-			}
-			rewritten, err := rewritePlaygroundImageResponse(c, rawResponse)
-			if err != nil {
-				persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "persist_stream_image", playgroundImageTerminalStateFailed, fmt.Sprintf("failed to persist playground image: %s", err.Error()), time.Now().UnixMilli())
-				return
-			}
-			if err := common.Unmarshal(rewritten, &response); err != nil {
-				persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "decode_stream_response", playgroundImageTerminalStateFailed, "invalid image stream response", time.Now().UnixMilli())
-				return
-			}
-		} else {
-			rewritten, err := rewritePlaygroundImageResponse(c, body)
-			if err != nil {
-				persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "persist_image", playgroundImageTerminalStateFailed, fmt.Sprintf("failed to persist playground image: %s", err.Error()), time.Now().UnixMilli())
-				return
-			}
-			if err := common.Unmarshal(rewritten, &response); err != nil {
-				persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "decode_response", playgroundImageTerminalStateFailed, "invalid image response", time.Now().UnixMilli())
-				return
-			}
-		}
-		if len(response.Data) == 0 {
-			persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "validate_image_data", playgroundImageTerminalStateFailed, "empty image response", time.Now().UnixMilli())
-			return
-		}
-		content := buildPlaygroundImageResponseContent(response)
-		if strings.TrimSpace(content) == "" {
-			persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "build_image_content", playgroundImageTerminalStateFailed, "empty image response", time.Now().UnixMilli())
-			return
-		}
-		persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "complete", playgroundImageTerminalStateComplete, content, time.Now().UnixMilli())
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		failAsyncPlaygroundImage(
+			c,
+			userID,
+			sessionID,
+			messageKey,
+			contentType,
+			playgroundImageMetadataFromRelay(c),
+			playgroundImageRelayFailure(c, status, body),
+		)
+		return
+	}
+	if len(body) == 0 {
+		failAsyncPlaygroundImage(
+			c,
+			userID,
+			sessionID,
+			messageKey,
+			contentType,
+			playgroundImageMetadata{},
+			newPlaygroundImageProcessingError(
+				"validate_image_data",
+				http.StatusBadGateway,
+				"playground image response did not include a valid url or b64_json",
+				nil,
+			),
+		)
 		return
 	}
 
-	persistPlaygroundImageTerminalState(c, userID, sessionID, messageKey, "relay", playgroundImageTerminalStateFailed, playgroundImageErrorFromResponse(status, body), time.Now().UnixMilli())
+	var response dto.ImageResponse
+	var metadata playgroundImageMetadata
+	if strings.Contains(contentType, "text/event-stream") {
+		streamResponse, err := playgroundImageResponseFromStream(body)
+		if err != nil {
+			failAsyncPlaygroundImage(c, userID, sessionID, messageKey, contentType, metadata, err)
+			return
+		}
+		metadata = inspectPlaygroundImageData(streamResponse.Data)
+		rawResponse, err := common.Marshal(streamResponse)
+		if err != nil {
+			processingErr := newPlaygroundImageProcessingError(
+				"decode_response",
+				http.StatusInternalServerError,
+				"failed to encode playground image response",
+				errors.New("invalid image response"),
+			)
+			failAsyncPlaygroundImage(c, userID, sessionID, messageKey, contentType, metadata, processingErr)
+			return
+		}
+		body = rawResponse
+		contentType = gin.MIMEJSON
+	}
+
+	rewritten, err := rewritePlaygroundImageResponse(c, body)
+	if err != nil {
+		if _, decodedMetadata, decodeErr := decodeAndValidatePlaygroundImageResponse(body); decodeErr == nil {
+			metadata = decodedMetadata
+		}
+		failAsyncPlaygroundImage(c, userID, sessionID, messageKey, contentType, metadata, err)
+		return
+	}
+	response, metadata, err = decodeAndValidatePlaygroundImageResponse(rewritten)
+	if err != nil {
+		failAsyncPlaygroundImage(c, userID, sessionID, messageKey, contentType, metadata, err)
+		return
+	}
+
+	content := buildPlaygroundImageResponseContent(response)
+	if strings.TrimSpace(content) == "" {
+		processingErr := newPlaygroundImageProcessingError(
+			"validate_image_data",
+			http.StatusBadGateway,
+			"playground image response did not include renderable image data",
+			nil,
+		)
+		failAsyncPlaygroundImage(c, userID, sessionID, messageKey, contentType, metadata, processingErr)
+		return
+	}
+	if !persistPlaygroundImageTerminalState(
+		c,
+		userID,
+		sessionID,
+		messageKey,
+		"complete",
+		playgroundImageTerminalStateComplete,
+		content,
+		time.Now().UnixMilli(),
+	) {
+		processingErr := newPlaygroundImageProcessingError(
+			"persist_image",
+			http.StatusInternalServerError,
+			"failed to persist completed playground image state",
+			nil,
+		)
+		recordPlaygroundImageFailure(c, processingErr.Stage, processingErr.StatusCode, contentType, metadata, processingErr.Message, true)
+		return
+	}
+	if _, err := service.FinalizePlaygroundImageBilling(c); err != nil {
+		processingErr := newPlaygroundImageProcessingError(
+			"settle_billing",
+			http.StatusInternalServerError,
+			"failed to settle playground image billing",
+			err,
+		)
+		failAsyncPlaygroundImage(c, userID, sessionID, messageKey, contentType, metadata, processingErr)
+	}
 }
 
 func buildPlaygroundImageResponseContent(response dto.ImageResponse) string {
@@ -376,17 +713,18 @@ func playgroundImageErrorFromResponse(status int, body []byte) string {
 	}
 	if err := common.Unmarshal(body, &payload); err == nil {
 		if strings.TrimSpace(payload.Error.Message) != "" {
-			return payload.Error.Message
+			return relaycommon.SanitizeImageErrorSummary(payload.Error.Message)
 		}
 		if strings.TrimSpace(payload.Message) != "" {
-			return payload.Message
+			return relaycommon.SanitizeImageErrorSummary(payload.Message)
 		}
 	}
-	return strings.TrimSpace(common.LocalLogPreview(string(body)))
+	return fmt.Sprintf("image generation failed with HTTP %d", status)
 }
 
 type playgroundImageStreamPayload struct {
 	Type          string          `json:"type"`
+	Data          []dto.ImageData `json:"data"`
 	Url           string          `json:"url"`
 	B64Json       string          `json:"b64_json"`
 	RevisedPrompt string          `json:"revised_prompt"`
@@ -401,19 +739,11 @@ func playgroundImageResponseFromStream(body []byte) (dto.ImageResponse, error) {
 	response := dto.ImageResponse{}
 	completedImages := make([]dto.ImageData, 0)
 	hasPartialImage := false
+	sawCompletedEvent := false
 	streamError := ""
 
 	for _, event := range events {
 		if event == "" || event == "[DONE]" {
-			continue
-		}
-
-		var imageResponse dto.ImageResponse
-		if err := common.Unmarshal(common.StringToByteSlice(event), &imageResponse); err == nil && len(imageResponse.Data) > 0 {
-			if imageResponse.Created > 0 {
-				response.Created = imageResponse.Created
-			}
-			completedImages = append(completedImages, imageResponse.Data...)
 			continue
 		}
 
@@ -429,9 +759,28 @@ func playgroundImageResponseFromStream(body []byte) (dto.ImageResponse, error) {
 			response.Created = payload.CreatedAt
 		}
 
-		if len(payload.Error) > 0 {
+		if len(payload.Error) > 0 || strings.EqualFold(strings.TrimSpace(payload.Type), "error") || strings.EqualFold(strings.TrimSpace(payload.Type), "upstream_error") {
 			streamError = playgroundImageStreamErrorMessage(payload)
 			continue
+		}
+
+		completedEvent := isPlaygroundImageCompletedEvent(payload.Type)
+		if completedEvent {
+			sawCompletedEvent = true
+		}
+		completedDataCount := 0
+		for _, item := range payload.Data {
+			item.Url = strings.TrimSpace(item.Url)
+			item.B64Json = strings.TrimSpace(item.B64Json)
+			if item.Url == "" && item.B64Json == "" {
+				continue
+			}
+			if completedEvent {
+				completedImages = append(completedImages, item)
+				completedDataCount++
+			} else {
+				hasPartialImage = true
+			}
 		}
 
 		image := dto.ImageData{
@@ -439,11 +788,10 @@ func playgroundImageResponseFromStream(body []byte) (dto.ImageResponse, error) {
 			B64Json:       strings.TrimSpace(payload.B64Json),
 			RevisedPrompt: strings.TrimSpace(payload.RevisedPrompt),
 		}
-		if image.Url == "" && image.B64Json == "" && image.RevisedPrompt == "" {
+		if (image.Url == "" && image.B64Json == "") || completedDataCount > 0 {
 			continue
 		}
-
-		if isPlaygroundImageCompletedEvent(payload.Type) {
+		if completedEvent {
 			completedImages = append(completedImages, image)
 		} else {
 			hasPartialImage = true
@@ -452,13 +800,35 @@ func playgroundImageResponseFromStream(body []byte) (dto.ImageResponse, error) {
 
 	switch {
 	case streamError != "":
-		return response, fmt.Errorf("%s", streamError)
+		return response, newPlaygroundImageProcessingError(
+			"parse_stream",
+			http.StatusBadGateway,
+			"playground image stream returned an error: "+streamError,
+			nil,
+		)
 	case len(completedImages) > 0:
 		response.Data = completedImages
+	case sawCompletedEvent:
+		return response, newPlaygroundImageProcessingError(
+			"validate_image_data",
+			http.StatusBadGateway,
+			"completed playground image stream event did not include a valid url or b64_json",
+			nil,
+		)
 	case hasPartialImage:
-		return response, errors.New("image stream did not complete")
+		return response, newPlaygroundImageProcessingError(
+			"parse_stream",
+			http.StatusBadGateway,
+			"playground image stream did not complete an image",
+			nil,
+		)
 	default:
-		return response, errors.New("empty image stream response")
+		return response, newPlaygroundImageProcessingError(
+			"parse_stream",
+			http.StatusBadGateway,
+			"empty image stream response",
+			nil,
+		)
 	}
 
 	if response.Created == 0 {
@@ -491,12 +861,12 @@ func playgroundImageStreamDataEvents(body []byte) []string {
 
 func isPlaygroundImageCompletedEvent(eventType string) bool {
 	eventType = strings.ToLower(strings.TrimSpace(eventType))
-	return eventType == "" || strings.Contains(eventType, "completed") || strings.Contains(eventType, "complete")
+	return eventType == "" || eventType == "image_generation.completed" || eventType == "image_edit.completed"
 }
 
 func playgroundImageStreamErrorMessage(payload playgroundImageStreamPayload) string {
 	if msg := strings.TrimSpace(payload.Message); msg != "" {
-		return msg
+		return relaycommon.SanitizeImageErrorSummary(msg)
 	}
 	if len(payload.Error) == 0 {
 		return "image stream returned an error"
@@ -506,16 +876,15 @@ func playgroundImageStreamErrorMessage(payload playgroundImageStreamPayload) str
 	}
 	if err := common.Unmarshal(payload.Error, &nested); err == nil {
 		if msg := strings.TrimSpace(nested.Message); msg != "" {
-			return msg
+			return relaycommon.SanitizeImageErrorSummary(msg)
 		}
-	}
-	if msg := strings.TrimSpace(common.JsonRawMessageToString(payload.Error)); msg != "" {
-		return msg
 	}
 	return "image stream returned an error"
 }
 
 func writeCapturedPlaygroundImageResponse(c *gin.Context, writer *playgroundImageCaptureWriter) {
+	defer service.RefundPlaygroundImageBilling(c)
+
 	status := writer.Status()
 	body := writer.body.Bytes()
 	contentType := writer.Header().Get("Content-Type")
@@ -524,54 +893,104 @@ func writeCapturedPlaygroundImageResponse(c *gin.Context, writer *playgroundImag
 	}
 
 	isEventStream := strings.HasPrefix(strings.ToLower(contentType), "text/event-stream")
-	if status >= 200 && status < 300 && isEventStream {
+	if status >= http.StatusOK && status < http.StatusMultipleChoices && isEventStream {
 		streamResponse, err := playgroundImageResponseFromStream(body)
 		if err != nil {
-			c.Writer.Header().Del("Content-Length")
-			c.Writer.Header().Del("Transfer-Encoding")
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": gin.H{
-					"message": fmt.Sprintf("failed to parse playground image stream: %s", err.Error()),
-				},
-			})
+			stage, errorStatus, message := playgroundImageProcessingErrorDetails(err)
+			metadata := inspectPlaygroundImageData(streamResponse.Data)
+			recordPlaygroundImageFailure(c, stage, errorStatus, contentType, metadata, message, true)
+			var processingErr *playgroundImageProcessingError
+			if !errors.As(err, &processingErr) {
+				err = newPlaygroundImageProcessingError(stage, errorStatus, message, nil)
+			}
+			writePlaygroundImageProcessingError(c, err)
 			return
 		}
 		body, err = common.Marshal(streamResponse)
 		if err != nil {
-			c.Writer.Header().Del("Content-Length")
-			c.Writer.Header().Del("Transfer-Encoding")
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": gin.H{
-					"message": "failed to encode playground image stream",
-				},
-			})
+			processingErr := newPlaygroundImageProcessingError(
+				"decode_response",
+				http.StatusInternalServerError,
+				"failed to encode playground image response",
+				errors.New("invalid image response"),
+			)
+			metadata := inspectPlaygroundImageData(streamResponse.Data)
+			recordPlaygroundImageFailure(c, processingErr.Stage, status, contentType, metadata, processingErr.Message, true)
+			writePlaygroundImageProcessingError(c, processingErr)
 			return
 		}
 		contentType = gin.MIMEJSON
-	} else if (status < 200 || status >= 300) && isEventStream {
+	} else if (status < http.StatusOK || status >= http.StatusMultipleChoices) && isEventStream {
 		// Streaming headers may already have been staged before the relay detects
 		// an upstream failure. PlaygroundRelay serializes that failure as JSON;
 		// do not expose a JSON error body as text/event-stream to the embedded tool.
 		contentType = gin.MIMEJSON
 	}
 
-	if status >= 200 && status < 300 && len(body) > 0 {
+	if status >= http.StatusOK && status < http.StatusMultipleChoices {
+		if len(body) == 0 {
+			processingErr := newPlaygroundImageProcessingError(
+				"validate_image_data",
+				http.StatusBadGateway,
+				"playground image response did not include a valid url or b64_json",
+				nil,
+			)
+			recordPlaygroundImageFailure(c, processingErr.Stage, status, contentType, playgroundImageMetadata{}, processingErr.Message, true)
+			writePlaygroundImageProcessingError(c, processingErr)
+			return
+		}
+
+		_, metadata, err := decodeAndValidatePlaygroundImageResponse(body)
+		if err != nil {
+			stage, _, message := playgroundImageProcessingErrorDetails(err)
+			recordPlaygroundImageFailure(c, stage, status, contentType, metadata, message, true)
+			writePlaygroundImageProcessingError(c, err)
+			return
+		}
+
 		sessionID := strings.TrimSpace(c.GetHeader(playgroundSessionHeader))
 		messageKey := strings.TrimSpace(c.GetHeader(playgroundMessageKeyHeader))
 		if sessionID != "" && messageKey != "" {
 			rewritten, err := rewritePlaygroundImageResponse(c, body)
 			if err != nil {
-				c.Writer.Header().Del("Content-Length")
-				c.Writer.Header().Del("Transfer-Encoding")
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error": gin.H{
-						"message": fmt.Sprintf("failed to persist playground image: %s", err.Error()),
-					},
-				})
+				stage, _, message := playgroundImageProcessingErrorDetails(err)
+				metadata.DownloadStatusCode = playgroundImageDownloadStatusCode(err)
+				recordPlaygroundImageFailure(c, stage, status, contentType, metadata, message, true)
+				writePlaygroundImageProcessingError(c, err)
 				return
 			}
 			body = rewritten
+			_, metadata, err = decodeAndValidatePlaygroundImageResponse(body)
+			if err != nil {
+				stage, _, message := playgroundImageProcessingErrorDetails(err)
+				recordPlaygroundImageFailure(c, stage, status, contentType, metadata, message, true)
+				writePlaygroundImageProcessingError(c, err)
+				return
+			}
 		}
+		if _, err := service.FinalizePlaygroundImageBilling(c); err != nil {
+			processingErr := newPlaygroundImageProcessingError(
+				"settle_billing",
+				http.StatusInternalServerError,
+				"failed to settle playground image billing",
+				err,
+			)
+			recordPlaygroundImageFailure(c, processingErr.Stage, status, contentType, metadata, processingErr.Message, true)
+			writePlaygroundImageProcessingError(c, processingErr)
+			return
+		}
+	} else {
+		processingErr := playgroundImageRelayFailure(c, status, body)
+		recordErrorLog := processingErr.Stage != "relay" || !common.GetContextKeyBool(c, constant.ContextKeyChannelErrorLogRecorded)
+		recordPlaygroundImageFailure(
+			c,
+			processingErr.Stage,
+			processingErr.StatusCode,
+			contentType,
+			playgroundImageMetadataFromRelay(c),
+			processingErr.Message,
+			recordErrorLog,
+		)
 	}
 
 	for key, values := range writer.Header() {
@@ -592,12 +1011,9 @@ func writeCapturedPlaygroundImageResponse(c *gin.Context, writer *playgroundImag
 }
 
 func rewritePlaygroundImageResponse(c *gin.Context, raw []byte) ([]byte, error) {
-	var response dto.ImageResponse
-	if err := common.Unmarshal(raw, &response); err != nil {
-		return raw, nil
-	}
-	if len(response.Data) == 0 {
-		return raw, nil
+	response, _, err := decodeAndValidatePlaygroundImageResponse(raw)
+	if err != nil {
+		return nil, err
 	}
 
 	userID := c.GetInt("id")
@@ -608,40 +1024,59 @@ func rewritePlaygroundImageResponse(c *gin.Context, raw []byte) ([]byte, error) 
 		item := &response.Data[idx]
 		switch {
 		case item.B64Json != "":
-			file, err := model.PersistPlaygroundImageBase64(userID, sessionID, messageKey, item.B64Json, "")
-			if err != nil {
-				return nil, err
+			file, persistErr := model.PersistPlaygroundImageBase64(userID, sessionID, messageKey, item.B64Json, "")
+			if persistErr != nil {
+				return nil, newPlaygroundImagePersistenceError(persistErr)
 			}
 			item.Url = model.PlaygroundFileURL(file.ID)
 			item.B64Json = ""
 		case strings.HasPrefix(item.Url, "data:image/"):
-			file, err := model.PersistPlaygroundImageBase64(userID, sessionID, messageKey, item.Url, "")
-			if err != nil {
-				return nil, err
+			file, persistErr := model.PersistPlaygroundImageBase64(userID, sessionID, messageKey, item.Url, "")
+			if persistErr != nil {
+				return nil, newPlaygroundImagePersistenceError(persistErr)
 			}
 			item.Url = model.PlaygroundFileURL(file.ID)
 			item.B64Json = ""
 		case strings.HasPrefix(item.Url, "http://") || strings.HasPrefix(item.Url, "https://"):
-			file, err := persistPlaygroundImageURL(userID, sessionID, messageKey, item.Url)
-			if err != nil {
-				return nil, err
+			file, persistErr := persistPlaygroundImageURL(userID, sessionID, messageKey, item.Url)
+			if persistErr != nil {
+				return nil, newPlaygroundImagePersistenceError(persistErr)
 			}
 			item.Url = model.PlaygroundFileURL(file.ID)
 			item.B64Json = ""
 		}
 	}
 
-	return common.Marshal(response)
+	metadata := inspectPlaygroundImageData(response.Data)
+	if metadata.ImageCount == 0 {
+		return nil, newPlaygroundImageProcessingError(
+			"validate_image_data",
+			http.StatusBadGateway,
+			"persisted playground image response did not include a valid url or b64_json",
+			nil,
+		)
+	}
+
+	rewritten, err := common.Marshal(response)
+	if err != nil {
+		return nil, newPlaygroundImageProcessingError(
+			"decode_response",
+			http.StatusInternalServerError,
+			"failed to encode playground image response",
+			errors.New("invalid image response"),
+		)
+	}
+	return rewritten, nil
 }
 
 func persistPlaygroundImageURL(userID int, sessionID string, messageKey string, imageURL string) (*model.PlaygroundFile, error) {
 	resp, err := service.DoDownloadRequest(imageURL, "playground_image_persist")
 	if err != nil {
-		return nil, fmt.Errorf("download playground image: %w", err)
+		return nil, errors.New("download playground image request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("download playground image: HTTP %d", resp.StatusCode)
+		return nil, &playgroundImageDownloadStatusError{StatusCode: resp.StatusCode}
 	}
 	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
 	if contentType == "" {

@@ -22,7 +22,10 @@ export const DEFAULT_IMAGE_PREVIEW_ZOOM = 1
 export const IMAGE_PREVIEW_ZOOM_STEP = 0.25
 
 function clampImagePreviewZoom(zoom: number): number {
-  return Math.min(MAX_IMAGE_PREVIEW_ZOOM, Math.max(MIN_IMAGE_PREVIEW_ZOOM, zoom))
+  return Math.min(
+    MAX_IMAGE_PREVIEW_ZOOM,
+    Math.max(MIN_IMAGE_PREVIEW_ZOOM, zoom)
+  )
 }
 
 export function getNextImagePreviewZoom(currentZoom: number): number {

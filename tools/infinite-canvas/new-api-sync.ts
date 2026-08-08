@@ -175,6 +175,8 @@ interface SyncEntry {
   content_sha256?: string;
   plugin_id?: string;
   record_key?: string;
+  conflict_hash?: string;
+  conflict_revision?: number;
 }
 
 interface SyncMetadata {
@@ -1547,8 +1549,48 @@ async function remoteItemHash(item: RemoteItem): Promise<string> {
   return hashPayload(item.payload);
 }
 
-function createProjectConflictCopy(item: LocalItem) {
-  if (item.kind !== "canvas-project" || !isRecord(item.localValue))
+async function remoteItemSyncEntry(
+  item: RemoteItem,
+  known?: SyncEntry,
+): Promise<SyncEntry> {
+  const identity =
+    item.kind === PLUGIN_RECORD_KIND
+      ? pluginRecordIdentity(item, known)
+      : null;
+  return {
+    revision: item.revision,
+    hash: await remoteItemHash(item),
+    deleted: item.deleted,
+    asset_id: item.asset_ids[0],
+    size_bytes:
+      isRecord(item.payload) && typeof item.payload.size_bytes === "number"
+        ? item.payload.size_bytes
+        : undefined,
+    content_type:
+      isRecord(item.payload) && typeof item.payload.content_type === "string"
+        ? item.payload.content_type
+        : undefined,
+    content_sha256:
+      isRecord(item.payload) &&
+      typeof item.payload.content_sha256 === "string"
+        ? item.payload.content_sha256
+        : undefined,
+    plugin_id: identity?.pluginId,
+    record_key: identity?.recordKey,
+  };
+}
+
+function createProjectConflictCopy(
+  item: LocalItem,
+  known: SyncEntry | undefined,
+  authoritativeRevision: number,
+) {
+  if (
+    item.kind !== "canvas-project" ||
+    !isRecord(item.localValue) ||
+    (known?.conflict_hash === item.hash &&
+      known.conflict_revision === authoritativeRevision)
+  )
     return false;
   const project = item.localValue as unknown as CanvasProject;
   const now = new Date().toISOString();
@@ -1580,6 +1622,7 @@ async function performSync(): Promise<InfiniteCanvasSyncResult> {
   const localItems = await collectLocalItems(metadata);
   const mutations = await buildMutations(localItems, metadata);
   let conflictCopies = 0;
+  let dataChanged = false;
 
   for (let offset = 0; offset < mutations.length; offset += MAX_BATCH_SIZE) {
     const response = await apiRequest<SyncResponse>(
@@ -1601,12 +1644,43 @@ async function performSync(): Promise<InfiniteCanvasSyncResult> {
       }
       const localKey = entryKey(mutationResult.kind, mutationResult.key);
       const localItem = localItems.get(localKey);
+      const known = metadata.entries[localKey];
       if (
         mutationResult.result === "conflict" &&
-        localItem &&
-        createProjectConflictCopy(localItem)
-      )
-        conflictCopies += 1;
+        localItem?.kind === "canvas-project"
+      ) {
+        const authoritativeRevision =
+          mutationResult.item?.revision ?? known?.revision ?? 0;
+        if (
+          createProjectConflictCopy(localItem, known, authoritativeRevision)
+        )
+          conflictCopies += 1;
+
+        const authoritativeItem = mutationResult.item;
+        if (authoritativeItem) {
+          const itemChanged =
+            await runWithoutNewApiInfiniteCanvasSyncNotifications(() =>
+              applyRemoteItem(authoritativeItem, known),
+            );
+          dataChanged ||= itemChanged;
+          metadata.entries[localKey] = {
+            ...(await remoteItemSyncEntry(authoritativeItem, known)),
+            conflict_hash: localItem.hash,
+            conflict_revision: authoritativeRevision,
+          };
+        } else {
+          metadata.entries[localKey] = {
+            ...(known || {
+              revision: 0,
+              deleted: false,
+            }),
+            hash: localItem.hash,
+            conflict_hash: localItem.hash,
+            conflict_revision: authoritativeRevision,
+          };
+        }
+        continue;
+      }
       if (
         mutationResult.result === "applied" &&
         mutationResult.item &&
@@ -1628,7 +1702,6 @@ async function performSync(): Promise<InfiniteCanvasSyncResult> {
     writeMetadata(metadata);
   }
 
-  let dataChanged = false;
   let blobChanged = false;
   const changedSettingKeys = new Set<string>();
   const restoredSettingKeys = new Set<string>();
@@ -1651,33 +1724,7 @@ async function performSync(): Promise<InfiniteCanvasSyncResult> {
             changedSettingKeys.add(item.key);
             if (!item.deleted) restoredSettingKeys.add(item.key);
           }
-          const identity =
-            item.kind === PLUGIN_RECORD_KIND
-              ? pluginRecordIdentity(item, known)
-              : null;
-          metadata.entries[key] = {
-            revision: item.revision,
-            hash: await remoteItemHash(item),
-            deleted: item.deleted,
-            asset_id: item.asset_ids[0],
-            size_bytes:
-              isRecord(item.payload) &&
-              typeof item.payload.size_bytes === "number"
-                ? item.payload.size_bytes
-                : undefined,
-            content_type:
-              isRecord(item.payload) &&
-              typeof item.payload.content_type === "string"
-                ? item.payload.content_type
-                : undefined,
-            content_sha256:
-              isRecord(item.payload) &&
-              typeof item.payload.content_sha256 === "string"
-                ? item.payload.content_sha256
-                : undefined,
-            plugin_id: identity?.pluginId,
-            record_key: identity?.recordKey,
-          };
+          metadata.entries[key] = await remoteItemSyncEntry(item, known);
         }
         writeMetadata(metadata);
       },
