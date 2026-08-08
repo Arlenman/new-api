@@ -38,7 +38,32 @@ type Token struct {
 	UsedQuota               int            `json:"used_quota" gorm:"default:0"` // used quota
 	Group                   string         `json:"group" gorm:"default:''"`
 	CrossGroupRetry         bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
+	AutoGroups              string         `json:"-" gorm:"type:text"`
 	DeletedAt               gorm.DeletedAt `gorm:"index"`
+}
+
+func (token *Token) GetAutoGroups() ([]string, error) {
+	if token.AutoGroups == "" {
+		return nil, nil
+	}
+	var groups []string
+	if err := common.UnmarshalJsonStr(token.AutoGroups, &groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
+func (token *Token) SetAutoGroups(groups []string) error {
+	if len(groups) == 0 {
+		token.AutoGroups = ""
+		return nil
+	}
+	data, err := common.Marshal(groups)
+	if err != nil {
+		return err
+	}
+	token.AutoGroups = string(data)
+	return nil
 }
 
 func (token *Token) Clean() {
@@ -355,6 +380,9 @@ func (token *Token) UpdateWithTags(tags *[]string, quotaResetPatch *TokenQuotaRe
 		if shouldUpdateRedis(true, err) {
 			if cacheErr := cacheSetToken(*token); cacheErr != nil {
 				common.SysLog("failed to update token cache: " + cacheErr.Error())
+				if deleteErr := cacheDeleteToken(token.Key); deleteErr != nil {
+					common.SysLog("failed to invalidate token cache after update: " + deleteErr.Error())
+				}
 			}
 		}
 	}()
@@ -380,12 +408,13 @@ func (token *Token) UpdateWithTags(tags *[]string, quotaResetPatch *TokenQuotaRe
 		current.AllowIps = token.AllowIps
 		current.Group = token.Group
 		current.CrossGroupRetry = token.CrossGroupRetry
+		current.AutoGroups = token.AutoGroups
 		current.clampQuotaResetRemainingToTotal()
 
 		if err := tx.Model(&current).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
 			"quota_reset_enabled", "quota_reset_period", "quota_reset_interval_hours", "quota_reset_amount", "quota_reset_remaining",
 			"quota_reset_carry_over", "quota_reset_last_time", "quota_reset_next_time", "quota_reset_version",
-			"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry").Updates(&current).Error; err != nil {
+			"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry", "auto_groups").Updates(&current).Error; err != nil {
 			return err
 		}
 		if tags == nil {

@@ -8,23 +8,40 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/sync/errgroup"
 )
 
+type tokenAutoGroupsInput struct {
+	Set    bool
+	Groups []string
+}
+
+func (input *tokenAutoGroupsInput) UnmarshalJSON(data []byte) error {
+	input.Set = true
+	if strings.TrimSpace(string(data)) == "null" {
+		input.Groups = nil
+		return nil
+	}
+	return common.Unmarshal(data, &input.Groups)
+}
+
 type tokenRequest struct {
 	model.Token
-	Tags                    *[]string `json:"tags"`
-	QuotaResetEnabled       *bool     `json:"quota_reset_enabled"`
-	QuotaResetPeriod        *string   `json:"quota_reset_period"`
-	QuotaResetIntervalHours *int      `json:"quota_reset_interval_hours"`
-	QuotaResetAmount        *int      `json:"quota_reset_amount"`
-	QuotaResetCarryOver     *bool     `json:"quota_reset_carry_over"`
+	Tags                    *[]string            `json:"tags"`
+	QuotaResetEnabled       *bool                `json:"quota_reset_enabled"`
+	QuotaResetPeriod        *string              `json:"quota_reset_period"`
+	QuotaResetIntervalHours *int                 `json:"quota_reset_interval_hours"`
+	QuotaResetAmount        *int                 `json:"quota_reset_amount"`
+	QuotaResetCarryOver     *bool                `json:"quota_reset_carry_over"`
+	AutoGroups              tokenAutoGroupsInput `json:"auto_groups"`
 }
 
 func (req tokenRequest) quotaResetConfig(existing *model.Token, creating bool) *model.TokenQuotaResetConfig {
@@ -54,8 +71,9 @@ func (req tokenRequest) quotaResetConfigPatch() *model.TokenQuotaResetConfigPatc
 
 type tokenResponse struct {
 	model.Token
-	Tags []string            `json:"tags"`
-	IPs  []model.TokenIPView `json:"ips,omitempty"`
+	Tags       []string            `json:"tags"`
+	IPs        []model.TokenIPView `json:"ips,omitempty"`
+	AutoGroups []string            `json:"auto_groups"`
 }
 
 type tokenIPLocationRequestItem struct {
@@ -84,7 +102,7 @@ func canViewTokenIPs(c *gin.Context) bool {
 	return c.GetInt("role") == common.RoleRootUser
 }
 
-func buildMaskedTokenResponse(token *model.Token, tokenIPs []model.TokenIP) (*tokenResponse, error) {
+func buildTokenResponse(token *model.Token, tokenIPs []model.TokenIP) (*tokenResponse, error) {
 	if token == nil {
 		return nil, nil
 	}
@@ -94,11 +112,29 @@ func buildMaskedTokenResponse(token *model.Token, tokenIPs []model.TokenIP) (*to
 	if err != nil {
 		return nil, err
 	}
+	autoGroups, err := token.GetAutoGroups()
+	if err != nil {
+		common.SysError(fmt.Sprintf("failed to parse auto groups for token %d: %v", token.Id, err))
+		autoGroups = nil
+	}
+	if len(autoGroups) == 0 {
+		autoGroups = nil
+	}
 	return &tokenResponse{
-		Token: maskedToken,
-		Tags:  tags,
-		IPs:   model.BuildTokenIPViews(tokenIPs),
+		Token:      maskedToken,
+		Tags:       tags,
+		IPs:        model.BuildTokenIPViews(tokenIPs),
+		AutoGroups: autoGroups,
 	}, nil
+}
+
+func buildMaskedTokenResponse(token *model.Token) *tokenResponse {
+	response, err := buildTokenResponse(token, nil)
+	if err != nil {
+		common.SysError(fmt.Sprintf("failed to build token response for token %d: %v", token.Id, err))
+		return nil
+	}
+	return response
 }
 
 func buildMaskedTokenResponses(tokens []*model.Token, includeIPs bool) ([]*tokenResponse, error) {
@@ -117,13 +153,63 @@ func buildMaskedTokenResponses(tokens []*model.Token, includeIPs bool) ([]*token
 
 	maskedTokens := make([]*tokenResponse, 0, len(tokens))
 	for _, token := range tokens {
-		maskedToken, err := buildMaskedTokenResponse(token, tokenIPs[token.Id])
+		maskedToken, err := buildTokenResponse(token, tokenIPs[token.Id])
 		if err != nil {
 			return nil, err
 		}
 		maskedTokens = append(maskedTokens, maskedToken)
 	}
 	return maskedTokens, nil
+}
+
+func getTokenRequestUserGroup(c *gin.Context) (string, error) {
+	if userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup); userGroup != "" {
+		return userGroup, nil
+	}
+	if userGroup := c.GetString("group"); userGroup != "" {
+		return userGroup, nil
+	}
+	return model.GetUserGroup(c.GetInt("id"), false)
+}
+
+func setTokenAutoGroups(c *gin.Context, token *model.Token, groups []string) bool {
+	if len(groups) == 0 {
+		if err := token.SetAutoGroups(nil); err != nil {
+			common.ApiError(c, err)
+			return false
+		}
+		return true
+	}
+
+	maxCount := setting.GetMaxTokenAutoGroups()
+	if len(groups) > maxCount {
+		common.ApiErrorI18n(c, i18n.MsgTokenAutoGroupsTooMany, map[string]any{"Max": maxCount})
+		return false
+	}
+
+	userGroup, err := getTokenRequestUserGroup(c)
+	if err != nil {
+		common.ApiError(c, err)
+		return false
+	}
+	seen := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		if _, ok := seen[group]; ok {
+			common.ApiErrorI18n(c, i18n.MsgTokenAutoGroupsDuplicate, map[string]any{"Group": group})
+			return false
+		}
+		seen[group] = struct{}{}
+		if !service.IsUserSelectableGroup(userGroup, group) {
+			common.ApiErrorI18n(c, i18n.MsgTokenAutoGroupsInvalid, map[string]any{"Group": group})
+			return false
+		}
+	}
+
+	if err := token.SetAutoGroups(groups); err != nil {
+		common.ApiError(c, err)
+		return false
+	}
+	return true
 }
 
 func GetAllTokens(c *gin.Context) {
@@ -188,7 +274,7 @@ func GetToken(c *gin.Context) {
 		}
 		tokenIPs = tokenIPMap[token.Id]
 	}
-	maskedToken, err := buildMaskedTokenResponse(token, tokenIPs)
+	maskedToken, err := buildTokenResponse(token, tokenIPs)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -284,6 +370,18 @@ func GetTokenIPLocations(c *gin.Context) {
 	}
 	_ = group.Wait()
 	common.ApiSuccess(c, results)
+}
+
+func GetTokenAutoGroups(c *gin.Context) {
+	userGroup, err := getTokenRequestUserGroup(c)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, gin.H{
+		"groups":    service.GetUserAutoGroup(userGroup),
+		"max_count": setting.GetMaxTokenAutoGroups(),
+	})
 }
 
 func GetTokenKey(c *gin.Context) {
@@ -411,6 +509,14 @@ func AddToken(c *gin.Context) {
 		})
 		return
 	}
+	if token.Group == "auto" {
+		if !setTokenAutoGroups(c, &token, req.AutoGroups.Groups) {
+			return
+		}
+	} else {
+		token.CrossGroupRetry = false
+		_ = token.SetAutoGroups(nil)
+	}
 	key, err := common.GenerateKey()
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgTokenGenerateFailed)
@@ -431,6 +537,7 @@ func AddToken(c *gin.Context) {
 		AllowIps:           token.AllowIps,
 		Group:              token.Group,
 		CrossGroupRetry:    token.CrossGroupRetry,
+		AutoGroups:         token.AutoGroups,
 	}
 	if config := req.quotaResetConfig(nil, true); config != nil {
 		if _, err := cleanToken.ApplyQuotaResetConfig(*config, time.Now()); err != nil {
@@ -518,6 +625,14 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.Group = token.Group
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
 		quotaResetPatch = req.quotaResetConfigPatch()
+		if token.Group != "auto" {
+			cleanToken.CrossGroupRetry = false
+			_ = cleanToken.SetAutoGroups(nil)
+		} else if req.AutoGroups.Set {
+			if !setTokenAutoGroups(c, cleanToken, req.AutoGroups.Groups) {
+				return
+			}
+		}
 	}
 	var tags *[]string
 	if statusOnly == "" {
@@ -537,7 +652,7 @@ func UpdateToken(c *gin.Context) {
 		}
 		tokenIPs = tokenIPMap[cleanToken.Id]
 	}
-	maskedToken, err := buildMaskedTokenResponse(cleanToken, tokenIPs)
+	maskedToken, err := buildTokenResponse(cleanToken, tokenIPs)
 	if err != nil {
 		common.ApiError(c, err)
 		return
