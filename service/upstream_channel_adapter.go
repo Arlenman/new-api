@@ -22,6 +22,8 @@ const (
 	upstreamResponseLimit                         = 8 << 20
 	upstreamKeyPageSize                           = 100
 	upstreamKeyMaxPages                           = 10000
+	upstreamXTokenMirrorAPIBaseURL                = "https://api.xtokenmirror.cn"
+	upstreamXTokenMirrorLoginBaseURL              = "https://www.xtokenmirror.cn"
 	UpstreamErrorCodeTurnstileRequiresAccessToken = "upstream_turnstile_requires_access_token"
 )
 
@@ -882,7 +884,11 @@ func authenticateSub2API(ctx context.Context, client *http.Client, baseURL strin
 
 	loginPayload := map[string]string{"email": credential.Username, "password": credential.Password}
 	var loginEnvelope sub2APIEnvelope
-	if err := doUpstreamJSON(ctx, client, http.MethodPost, upstreamURL(baseURL, "/api/v1/auth/login"), loginPayload, nil, &loginEnvelope); err != nil {
+	loginBaseURL := baseURL
+	if strings.EqualFold(strings.TrimRight(baseURL, "/"), upstreamXTokenMirrorAPIBaseURL) {
+		loginBaseURL = upstreamXTokenMirrorLoginBaseURL
+	}
+	if err := doUpstreamJSON(ctx, client, http.MethodPost, upstreamURL(loginBaseURL, "/api/v1/auth/login"), loginPayload, nil, &loginEnvelope); err != nil {
 		if strings.EqualFold(strings.TrimSpace(loginEnvelope.Reason), "TURNSTILE_VERIFICATION_FAILED") || strings.Contains(strings.ToLower(loginEnvelope.Message), "turnstile") {
 			return nil, nil, ErrSub2APITurnstileRequiresAccessToken
 		}

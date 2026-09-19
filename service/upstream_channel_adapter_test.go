@@ -200,6 +200,43 @@ func TestFetchSub2APIUpstreamSnapshot(t *testing.T) {
 	assert.Equal(t, 0.9, snapshot.Ratios["5"])
 }
 
+func TestAuthenticateSub2APILoginUsesWebHostOnlyForXTokenMirror(t *testing.T) {
+	tests := []struct {
+		name     string
+		baseURL  string
+		wantHost string
+	}{
+		{
+			name:     "xtokenmirror uses web host for login",
+			baseURL:  "https://api.xtokenmirror.cn",
+			wantHost: "www.xtokenmirror.cn",
+		},
+		{
+			name:     "other upstream keeps configured host",
+			baseURL:  "https://sub2.test",
+			wantHost: "sub2.test",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				require.Equal(t, tt.wantHost, r.URL.Host)
+				require.Equal(t, "/api/v1/auth/login", r.URL.Path)
+				return jsonResponse(http.StatusOK, `{"code":0,"message":"success","data":{"access_token":"token-123"}}`, nil), nil
+			})}
+
+			_, headers, err := authenticateSub2API(context.Background(), client, tt.baseURL, UpstreamCredential{
+				AuthType: model.UpstreamAuthTypePassword,
+				Username: "owner@example.com",
+				Password: "secret",
+			})
+			require.NoError(t, err)
+			assert.Equal(t, "Bearer token-123", headers["Authorization"])
+		})
+	}
+}
+
 func TestFetchSub2APIUpstreamSnapshotUsesExplicitAccessToken(t *testing.T) {
 	const accessToken = "sub2-access-secret"
 	loginRequested := false
