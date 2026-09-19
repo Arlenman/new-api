@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -372,7 +373,39 @@ func buildTokenTagLogQuery(logDB *gorm.DB, startTime int64, endTime int64, usern
 	return query, nil
 }
 
+const tokenTagAnalyticsLogIndexName = "idx_logs_token_tag_analytics"
+
+// ensureTokenTagAnalyticsLogIndex 为令牌标签统计补一个覆盖索引。
+// PostgreSQL/SQLite 可以据此走 index-only scan，不再为每一行回表读取
+// content/other 等大字段，这是整月统计从数十秒降到秒级的关键。
+// MySQL 不能对 TEXT 列建全列索引，退化为只覆盖过滤与分组用的整型列。
+func ensureTokenTagAnalyticsLogIndex(db *gorm.DB) error {
+	if db == nil || !db.Migrator().HasTable(&Log{}) {
+		return nil
+	}
+	if db.Migrator().HasIndex(&Log{}, tokenTagAnalyticsLogIndexName) {
+		return nil
+	}
+	var statement string
+	switch db.Dialector.Name() {
+	case "postgres", "sqlite":
+		statement = fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON logs (type, created_at, user_id, token_id, model_name, username, token_name, quota, prompt_tokens, completion_tokens)", tokenTagAnalyticsLogIndexName)
+	case "mysql":
+		statement = fmt.Sprintf("CREATE INDEX %s ON logs (type, created_at, user_id, token_id)", tokenTagAnalyticsLogIndexName)
+	default:
+		return nil
+	}
+	return db.Exec(statement).Error
+}
+
 func GetTokenTagQuotaAnalytics(startTime int64, endTime int64, username string, userID int, role int, filters TokenTagQuotaFilters) ([]*TokenTagQuotaData, TokenTagQuotaSummary, error) {
+	return getTokenTagQuotaAnalytics(context.Background(), startTime, endTime, username, userID, role, filters)
+}
+
+// getTokenTagQuotaAnalytics 只用一次日志聚合同时得到明细与汇总。
+// 明细按「用户 + 密钥 + 模型」分组，汇总在应用层累加同一批分组，
+// 避免对同一时间范围重复扫描 logs 表（大范围统计的主要开销来源）。
+func getTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int64, username string, userID int, role int, filters TokenTagQuotaFilters) ([]*TokenTagQuotaData, TokenTagQuotaSummary, error) {
 	rows := make([]*TokenTagQuotaData, 0)
 	summary := TokenTagQuotaSummary{}
 	_, includedNameKeys, err := normalizeTokenTagNames(filters.IncludedTags)
@@ -419,27 +452,21 @@ func GetTokenTagQuotaAnalytics(startTime int64, endTime int64, username string, 
 		return rows, summary, err
 	}
 	var aggregates []tokenTagLogAggregate
-	err = detailQuery.
-		Select("logs.user_id, logs.username, logs.token_id, max(logs.token_name) as token_name, logs.model_name, count(logs.id) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used, max(logs.created_at) as last_used_at").
+	err = detailQuery.WithContext(ctx).
+		Select("logs.user_id, logs.username, logs.token_id, max(logs.token_name) as token_name, logs.model_name, count(*) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used, max(logs.created_at) as last_used_at").
 		Group("logs.user_id, logs.username, logs.token_id, logs.model_name").
 		Order("quota DESC").
 		Scan(&aggregates).Error
 	if err != nil {
 		return rows, summary, err
 	}
-
-	summaryQuery, err := buildTokenTagLogQuery(logDB, startTime, endTime, username, userID, role, includedTokenIDs, excludedTokenIDs, taggedTokenIDs, len(includedNameKeys) > 0, filters.IncludeUntagged, filters.ExcludeUntagged)
-	if err != nil {
-		return rows, summary, err
-	}
-	err = summaryQuery.
-		Select("coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used, count(logs.id) as count").
-		Scan(&summary).Error
-	if err != nil {
-		return rows, summary, err
-	}
 	if len(aggregates) == 0 {
 		return rows, summary, nil
+	}
+	for _, aggregate := range aggregates {
+		summary.Quota += aggregate.Quota
+		summary.TokenUsed += aggregate.TokenUsed
+		summary.Count += aggregate.Count
 	}
 
 	tokenIDs := make([]int, 0, len(aggregates))
@@ -540,13 +567,14 @@ func GetTokenTagQuotaAnalytics(startTime int64, endTime int64, username string, 
 	return rows, summary, nil
 }
 
-func GetTokenTagQuotaAnalyticsWithTrend(startTime int64, endTime int64, username string, userID int, role int, filters TokenTagQuotaFilters) (TokenTagQuotaAnalyticsResult, error) {
-	rows, summary, err := GetTokenTagQuotaAnalytics(startTime, endTime, username, userID, role, filters)
+func GetTokenTagQuotaAnalyticsWithTrend(ctx context.Context, startTime int64, endTime int64, username string, userID int, role int, filters TokenTagQuotaFilters) (TokenTagQuotaAnalyticsResult, error) {
 	result := TokenTagQuotaAnalyticsResult{
-		Data:    rows,
-		Summary: summary,
-		Trend:   make([]*TokenTagQuotaTrendData, 0),
+		Data:  make([]*TokenTagQuotaData, 0),
+		Trend: make([]*TokenTagQuotaTrendData, 0),
 	}
+	rows, summary, err := getTokenTagQuotaAnalytics(ctx, startTime, endTime, username, userID, role, filters)
+	result.Data = rows
+	result.Summary = summary
 	if err != nil || len(rows) == 0 {
 		return result, err
 	}
@@ -600,8 +628,8 @@ func GetTokenTagQuotaAnalyticsWithTrend(startTime int64, endTime int64, username
 
 	const hourBucketExpression = "logs.created_at - (logs.created_at % 3600)"
 	var aggregates []tokenTagTrendLogAggregate
-	err = trendQuery.
-		Select("logs.token_id, " + hourBucketExpression + " as created_at, count(logs.id) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used").
+	err = trendQuery.WithContext(ctx).
+		Select("logs.token_id, " + hourBucketExpression + " as created_at, count(*) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used").
 		Group("logs.token_id, " + hourBucketExpression).
 		Order(hourBucketExpression + " ASC, logs.token_id ASC").
 		Scan(&aggregates).Error

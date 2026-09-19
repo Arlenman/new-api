@@ -320,6 +320,9 @@ func migrateDB() error {
 	if err := migrateUpstreamChannelBaseURLHashIndex(DB); err != nil {
 		return err
 	}
+	if err := ensureTokenTagAnalyticsLogIndex(DB); err != nil {
+		return err
+	}
 	if err := InitializeUserAuthVersions(); err != nil {
 		return err
 	}
@@ -425,6 +428,9 @@ func migrateDBFast() error {
 	if err := migrateUpstreamChannelBaseURLHashIndex(DB); err != nil {
 		return err
 	}
+	if err := ensureTokenTagAnalyticsLogIndex(DB); err != nil {
+		return err
+	}
 	if err := InitializeUserAuthVersions(); err != nil {
 		return err
 	}
@@ -448,7 +454,10 @@ func migrateLOGDB() error {
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		return migrateClickHouseLogDB()
 	}
-	return LOG_DB.AutoMigrate(&Log{})
+	if err := LOG_DB.AutoMigrate(&Log{}); err != nil {
+		return err
+	}
+	return ensureTokenTagAnalyticsLogIndex(LOG_DB)
 }
 
 func migrateClickHouseLogDB() error {

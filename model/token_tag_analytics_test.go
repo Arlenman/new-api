@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -522,7 +523,7 @@ func TestGetTokenTagQuotaAnalyticsWithTrendGroupsHourlyUsageByTag(t *testing.T) 
 		require.NoError(t, LOG_DB.Create(&logs[index]).Error)
 	}
 
-	result, err := GetTokenTagQuotaAnalyticsWithTrend(3600, 10800, "", 0, common.RoleAdminUser, TokenTagQuotaFilters{})
+	result, err := GetTokenTagQuotaAnalyticsWithTrend(context.Background(), 3600, 10800, "", 0, common.RoleAdminUser, TokenTagQuotaFilters{})
 	require.NoError(t, err)
 	require.Equal(t, TokenTagQuotaSummary{Quota: 75, TokenUsed: 30, Count: 4}, result.Summary)
 	require.Len(t, result.Trend, 3)
@@ -542,4 +543,43 @@ func TestGetTokenTagQuotaAnalyticsWithTrendGroupsHourlyUsageByTag(t *testing.T) 
 	require.Equal(t, "Client A", result.Trend[2].TagName)
 	require.EqualValues(t, 7200, result.Trend[2].CreatedAt)
 	require.Equal(t, 30, result.Trend[2].Quota)
+}
+
+func TestGetTokenTagQuotaAnalyticsMergesHourlyUsageIntoDetailAndSummary(t *testing.T) {
+	truncateTables(t)
+	require.NoError(t, DB.Create(&User{Id: 1, Username: "alice", Password: "password123", AffCode: "alice-hours-aff"}).Error)
+	seedTokenForTags(t, Token{Id: 701, UserId: 1, Key: "analytics-hours", Name: "hours"})
+	require.NoError(t, ReplaceTokenTags(1, 701, []string{"Client A"}))
+
+	logs := []Log{
+		{UserId: 1, Username: "alice", TokenId: 701, TokenName: "hours", ModelName: "gpt-a", Type: LogTypeConsume, Quota: 10, PromptTokens: 2, CompletionTokens: 3, CreatedAt: 3601},
+		{UserId: 1, Username: "alice", TokenId: 701, TokenName: "hours", ModelName: "gpt-a", Type: LogTypeConsume, Quota: 20, PromptTokens: 4, CompletionTokens: 1, CreatedAt: 7205},
+		{UserId: 1, Username: "alice", TokenId: 701, TokenName: "hours", ModelName: "gpt-b", Type: LogTypeConsume, Quota: 5, PromptTokens: 1, CompletionTokens: 1, CreatedAt: 7300},
+	}
+	for i := range logs {
+		require.NoError(t, LOG_DB.Create(&logs[i]).Error)
+	}
+
+	rows, summary, err := GetTokenTagQuotaAnalytics(3600, 10800, "", 0, common.RoleAdminUser, TokenTagQuotaFilters{})
+	require.NoError(t, err)
+	require.Equal(t, TokenTagQuotaSummary{Quota: 35, TokenUsed: 12, Count: 3}, summary)
+	require.Len(t, rows, 2)
+
+	rowsByModel := make(map[string]*TokenTagQuotaData, len(rows))
+	for _, row := range rows {
+		rowsByModel[row.ModelName] = row
+	}
+	require.Equal(t, 30, rowsByModel["gpt-a"].Quota)
+	require.Equal(t, 10, rowsByModel["gpt-a"].TokenUsed)
+	require.Equal(t, 2, rowsByModel["gpt-a"].Count)
+	require.EqualValues(t, 7205, rowsByModel["gpt-a"].LastUsedAt)
+	require.Equal(t, 5, rowsByModel["gpt-b"].Quota)
+	require.EqualValues(t, 7300, rowsByModel["gpt-b"].LastUsedAt)
+}
+
+func TestEnsureTokenTagAnalyticsLogIndexIsIdempotent(t *testing.T) {
+	truncateTables(t)
+	require.NoError(t, ensureTokenTagAnalyticsLogIndex(DB))
+	require.True(t, DB.Migrator().HasIndex(&Log{}, tokenTagAnalyticsLogIndexName))
+	require.NoError(t, ensureTokenTagAnalyticsLogIndex(DB))
 }

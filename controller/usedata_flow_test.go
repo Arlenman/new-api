@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -192,6 +193,24 @@ func TestGetUserTokenTagQuotaDatesAllowsRangesLongerThanOneMonth(t *testing.T) {
 	require.Equal(t, 40, payload.Data[0].TokenUsed)
 	require.Equal(t, 100, payload.Data[0].Quota)
 	require.EqualValues(t, 1199, payload.Data[0].LastUsedAt)
+}
+
+func TestGetAllTokenTagQuotaDatesReportsTimeoutWithActionableMessage(t *testing.T) {
+	setupFlowControllerTestDB(t)
+
+	requestContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Set("role", common.RoleAdminUser)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data/token-tags?start_timestamp=1000&end_timestamp=5200000", nil).WithContext(requestContext)
+
+	GetAllTokenTagQuotaDates(ctx)
+
+	var payload tokenTagQuotaResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.False(t, payload.Success)
+	require.Equal(t, "token tag analytics timed out, please narrow the time range", payload.Message)
 }
 
 func TestGetAllTokenTagQuotaDatesFiltersByUsernameAndTag(t *testing.T) {
