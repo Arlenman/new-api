@@ -5121,6 +5121,7 @@
     "Token share by model author across the past month": "Part des tokens par auteur de modèle au cours du dernier mois",
     "Token share by model author across the past year": "Part des tokens par auteur de modèle au cours de la dernière année",
     "Token share by model author since launch": "Part des tokens par auteur de modèle depuis le lancement",
+    "Token tag analytics timed out. Please narrow the time range.": "L’analyse des balises de jetons a expiré. Veuillez réduire la plage de temps.",
     "Token unit": "Unité de tokens",
     "Token usage by model since launch": "Utilisation des tokens par modèle depuis le lancement",
     "Token-based": "Basé sur les jetons",

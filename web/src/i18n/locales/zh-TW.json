@@ -5121,6 +5121,7 @@
     "Token share by model author across the past month": "過去一個月內各廠商的 Token 佔比",
     "Token share by model author across the past year": "過去一年內各廠商的 Token 佔比",
     "Token share by model author since launch": "自上線以來各廠商的 Token 佔比",
+    "Token tag analytics timed out. Please narrow the time range.": "令牌標籤統計逾時，請縮小時間範圍。",
     "Token unit": "Token 單位",
     "Token usage by model since launch": "自上線以來各模型的 Token 用量",
     "Token-based": "按量收費",

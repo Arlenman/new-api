@@ -5121,6 +5121,7 @@
     "Token share by model author across the past month": "Tỷ lệ token theo nhà phát triển trong tháng qua",
     "Token share by model author across the past year": "Tỷ lệ token theo nhà phát triển trong năm qua",
     "Token share by model author since launch": "Tỷ lệ token theo nhà phát triển kể từ khi ra mắt",
+    "Token tag analytics timed out. Please narrow the time range.": "Phân tích thẻ mã thông báo đã hết thời gian chờ. Vui lòng thu hẹp khoảng thời gian.",
     "Token unit": "Đơn vị token",
     "Token usage by model since launch": "Sử dụng token của từng mô hình kể từ khi ra mắt",
     "Token-based": "Dựa trên token",

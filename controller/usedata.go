@@ -129,9 +129,9 @@ func GetAllTokenTagQuotaDates(c *gin.Context) {
 			seenTokenIds[row.TokenID] = struct{}{}
 			tokenIds = append(tokenIds, row.TokenID)
 		}
-		tokenIPs, loadErr := model.GetTokenIPsByTokenIDs(tokenIds)
+		tokenIPs, loadErr := model.GetTokenIPsByTokenIDsWithContext(ctx, tokenIds)
 		if loadErr != nil {
-			common.ApiError(c, loadErr)
+			respondTokenTagAnalyticsError(c, ctx, loadErr)
 			return
 		}
 		for _, row := range result.Data {

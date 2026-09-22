@@ -50,11 +50,22 @@ function serverErrorPayload(value: unknown): Record<string, unknown> | null {
 
 export function getServerErrorMessageKey(value: unknown): string | null {
   const payload = serverErrorPayload(value)
-  if (!payload || typeof payload.code !== 'string') return null
+  if (!payload) return null
 
-  return (
-    serverErrorMessageKeys[
-      payload.code as keyof typeof serverErrorMessageKeys
-    ] ?? null
-  )
+  if (typeof payload.code === 'string') {
+    const messageKey =
+      serverErrorMessageKeys[
+        payload.code as keyof typeof serverErrorMessageKeys
+      ]
+    if (messageKey) return messageKey
+  }
+
+  if (
+    payload.message ===
+    'token tag analytics timed out, please narrow the time range'
+  ) {
+    return 'Token tag analytics timed out. Please narrow the time range.'
+  }
+
+  return null
 }

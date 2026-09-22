@@ -5121,6 +5121,7 @@
     "Token share by model author across the past month": "Доля токенов по автору модели за последний месяц",
     "Token share by model author across the past year": "Доля токенов по автору модели за последний год",
     "Token share by model author since launch": "Доля токенов по автору модели с момента запуска",
+    "Token tag analytics timed out. Please narrow the time range.": "Превышено время ожидания анализа тегов токенов. Пожалуйста, сократите временной диапазон.",
     "Token unit": "Единица токенов",
     "Token usage by model since launch": "Использование токенов по моделям с момента запуска",
     "Token-based": "На основе токенов",

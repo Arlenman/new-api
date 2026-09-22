@@ -5,10 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -196,21 +198,35 @@ func TestGetUserTokenTagQuotaDatesAllowsRangesLongerThanOneMonth(t *testing.T) {
 }
 
 func TestGetAllTokenTagQuotaDatesReportsTimeoutWithActionableMessage(t *testing.T) {
-	setupFlowControllerTestDB(t)
+	for _, testCase := range []struct {
+		name    string
+		role    int
+		handler gin.HandlerFunc
+	}{
+		{name: "admin", role: common.RoleAdminUser, handler: GetAllTokenTagQuotaDates},
+		{name: "root", role: common.RoleRootUser, handler: GetAllTokenTagQuotaDates},
+		{name: "user", role: common.RoleCommonUser, handler: GetUserTokenTagQuotaDates},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			setupFlowControllerTestDB(t)
+			requestContext, cancel := context.WithDeadline(context.Background(), time.Unix(1, 0))
+			defer cancel()
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Set("role", testCase.role)
+			ctx.Set("id", 1)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data/token-tags?start_timestamp=1000&end_timestamp=5200000", nil).WithContext(requestContext)
 
-	requestContext, cancel := context.WithCancel(context.Background())
-	cancel()
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Set("role", common.RoleAdminUser)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data/token-tags?start_timestamp=1000&end_timestamp=5200000", nil).WithContext(requestContext)
+			testCase.handler(ctx)
 
-	GetAllTokenTagQuotaDates(ctx)
+			var payload tokenTagQuotaResponse
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+			assert.Equal(t, http.StatusOK, recorder.Code)
+			assert.False(t, payload.Success)
+			assert.Equal(t, "token tag analytics timed out, please narrow the time range", payload.Message)
+		})
 
-	var payload tokenTagQuotaResponse
-	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
-	require.False(t, payload.Success)
-	require.Equal(t, "token tag analytics timed out, please narrow the time range", payload.Message)
+	}
 }
 
 func TestGetAllTokenTagQuotaDatesFiltersByUsernameAndTag(t *testing.T) {

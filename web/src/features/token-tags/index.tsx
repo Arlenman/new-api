@@ -69,6 +69,7 @@ import { useIsAdmin } from '@/hooks/use-admin'
 import { getChartColor } from '@/lib/colors'
 import { formatNumber, formatQuota } from '@/lib/format'
 import { ROLE } from '@/lib/roles'
+import { getServerErrorMessageKey } from '@/lib/server-error-message'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { DistributionChart } from './components/distribution-chart'
@@ -402,9 +403,15 @@ export function TokenTagsDashboard() {
 
   let queryErrorMessage = ''
   if (query.isError) {
-    queryErrorMessage = getErrorMessage(query.error) || t('Failed to load data')
+    const messageKey = getServerErrorMessageKey(query.error)
+    queryErrorMessage = messageKey
+      ? t(messageKey)
+      : getErrorMessage(query.error) || t('Failed to load data')
   } else if (query.data && !query.data.success) {
-    queryErrorMessage = query.data.message || t('Failed to load data')
+    const messageKey = getServerErrorMessageKey(query.data)
+    queryErrorMessage = messageKey
+      ? t(messageKey)
+      : query.data.message || t('Failed to load data')
   }
   const isInitialLoading = query.isLoading && rows.length === 0
   let keyTableColumnCount = 7

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"net"
 	"strings"
@@ -76,12 +77,17 @@ func RecordTokenIP(tokenId int, rawIP string) error {
 }
 
 func GetTokenIPsByTokenIDs(tokenIds []int) (map[int][]TokenIP, error) {
+	return GetTokenIPsByTokenIDsWithContext(context.Background(), tokenIds)
+}
+
+func GetTokenIPsByTokenIDsWithContext(ctx context.Context, tokenIds []int) (map[int][]TokenIP, error) {
 	result := make(map[int][]TokenIP, len(tokenIds))
 	if len(tokenIds) == 0 {
 		return result, nil
 	}
 	var records []TokenIP
-	err := DB.Where("token_id IN (?)", tokenIds).
+	err := DB.WithContext(ctx).
+		Where("token_id IN (?)", tokenIds).
 		Order("created_time desc, id desc").
 		Find(&records).Error
 	if err != nil {

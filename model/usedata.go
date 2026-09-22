@@ -297,11 +297,11 @@ type tokenTagAnalyticsTag struct {
 	NameKey string `gorm:"column:name_key"`
 }
 
-func getTokenIDsByTagKeys(nameKeys []string, userID int) ([]int, error) {
+func getTokenIDsByTagKeys(ctx context.Context, nameKeys []string, userID int) ([]int, error) {
 	if len(nameKeys) == 0 {
 		return []int{}, nil
 	}
-	query := DB.Table("token_tag_bindings").
+	query := DB.WithContext(ctx).Table("token_tag_bindings").
 		Distinct("token_tag_bindings.token_id").
 		Joins("join token_tags on token_tags.id = token_tag_bindings.tag_id").
 		Where("token_tags.name_key IN ?", nameKeys)
@@ -313,8 +313,8 @@ func getTokenIDsByTagKeys(nameKeys []string, userID int) ([]int, error) {
 	return tokenIDs, err
 }
 
-func getTaggedTokenIDs(userID int) ([]int, error) {
-	query := DB.Table("token_tag_bindings").
+func getTaggedTokenIDs(ctx context.Context, userID int) ([]int, error) {
+	query := DB.WithContext(ctx).Table("token_tag_bindings").
 		Distinct("token_tag_bindings.token_id").
 		Joins("join token_tags on token_tags.id = token_tag_bindings.tag_id")
 	if userID > 0 {
@@ -380,10 +380,7 @@ const tokenTagAnalyticsLogIndexName = "idx_logs_token_tag_analytics"
 // content/other 等大字段，这是整月统计从数十秒降到秒级的关键。
 // MySQL 不能对 TEXT 列建全列索引，退化为只覆盖过滤与分组用的整型列。
 func ensureTokenTagAnalyticsLogIndex(db *gorm.DB) error {
-	if db == nil || !db.Migrator().HasTable(&Log{}) {
-		return nil
-	}
-	if db.Migrator().HasIndex(&Log{}, tokenTagAnalyticsLogIndexName) {
+	if db == nil {
 		return nil
 	}
 	var statement string
@@ -393,6 +390,9 @@ func ensureTokenTagAnalyticsLogIndex(db *gorm.DB) error {
 	case "mysql":
 		statement = fmt.Sprintf("CREATE INDEX %s ON logs (type, created_at, user_id, token_id)", tokenTagAnalyticsLogIndexName)
 	default:
+		return nil
+	}
+	if !db.Migrator().HasTable(&Log{}) || db.Migrator().HasIndex(&Log{}, tokenTagAnalyticsLogIndexName) {
 		return nil
 	}
 	return db.Exec(statement).Error
@@ -423,7 +423,7 @@ func getTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int
 	}
 	var includedTokenIDs []int
 	if len(includedNameKeys) > 0 {
-		includedTokenIDs, err = getTokenIDsByTagKeys(includedNameKeys, tagUserID)
+		includedTokenIDs, err = getTokenIDsByTagKeys(ctx, includedNameKeys, tagUserID)
 		if err != nil {
 			return rows, summary, err
 		}
@@ -431,13 +431,13 @@ func getTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int
 			return rows, summary, nil
 		}
 	}
-	excludedTokenIDs, err := getTokenIDsByTagKeys(excludedNameKeys, tagUserID)
+	excludedTokenIDs, err := getTokenIDsByTagKeys(ctx, excludedNameKeys, tagUserID)
 	if err != nil {
 		return rows, summary, err
 	}
 	var taggedTokenIDs []int
 	if filters.IncludeUntagged || filters.ExcludeUntagged {
-		taggedTokenIDs, err = getTaggedTokenIDs(tagUserID)
+		taggedTokenIDs, err = getTaggedTokenIDs(ctx, tagUserID)
 		if err != nil {
 			return rows, summary, err
 		}
@@ -447,7 +447,7 @@ func getTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int
 	if logDB == nil {
 		logDB = DB
 	}
-	detailQuery, err := buildTokenTagLogQuery(logDB, startTime, endTime, username, userID, role, includedTokenIDs, excludedTokenIDs, taggedTokenIDs, len(includedNameKeys) > 0, filters.IncludeUntagged, filters.ExcludeUntagged)
+	detailQuery, err := buildTokenTagLogQuery(logDB.WithContext(ctx), startTime, endTime, username, userID, role, includedTokenIDs, excludedTokenIDs, taggedTokenIDs, len(includedNameKeys) > 0, filters.IncludeUntagged, filters.ExcludeUntagged)
 	if err != nil {
 		return rows, summary, err
 	}
@@ -479,7 +479,7 @@ func getTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int
 		tokenIDs = append(tokenIDs, aggregate.TokenID)
 	}
 	var tokens []Token
-	if err = DB.Select("id", "name").Where("id IN ?", tokenIDs).Find(&tokens).Error; err != nil {
+	if err = DB.WithContext(ctx).Select("id", "name").Where("id IN ?", tokenIDs).Find(&tokens).Error; err != nil {
 		return rows, summary, err
 	}
 	tokenNames := make(map[int]string, len(tokens))
@@ -490,7 +490,7 @@ func getTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int
 	}
 
 	var tags []tokenTagAnalyticsTag
-	err = DB.Table("token_tag_bindings").
+	err = DB.WithContext(ctx).Table("token_tag_bindings").
 		Select("token_tag_bindings.token_id, token_tags.user_id, token_tags.id as tag_id, token_tags.name as tag_name, token_tags.name_key").
 		Joins("join token_tags on token_tags.id = token_tag_bindings.tag_id").
 		Where("token_tag_bindings.token_id IN ?", tokenIDs).
@@ -610,7 +610,7 @@ func GetTokenTagQuotaAnalyticsWithTrend(ctx context.Context, startTime int64, en
 	if logDB == nil {
 		logDB = DB
 	}
-	trendQuery := logDB.Table("logs").
+	trendQuery := logDB.WithContext(ctx).Table("logs").
 		Where("logs.type = ?", LogTypeConsume).
 		Where("logs.created_at >= ? and logs.created_at <= ?", startTime, endTime).
 		Where("logs.token_id IN ?", tokenIDs)

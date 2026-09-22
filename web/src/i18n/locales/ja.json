@@ -5121,6 +5121,7 @@
     "Token share by model author across the past month": "過去 1 か月におけるモデル提供者別のトークンシェア",
     "Token share by model author across the past year": "過去 1 年間におけるモデル提供者別のトークンシェア",
     "Token share by model author since launch": "リリース以降のモデル提供者別のトークンシェア",
+    "Token tag analytics timed out. Please narrow the time range.": "トークンタグの分析がタイムアウトしました。期間を絞り込んでください。",
     "Token unit": "トークン単位",
     "Token usage by model since launch": "リリース以降のモデル別トークン使用量",
     "Token-based": "トークンベース",
