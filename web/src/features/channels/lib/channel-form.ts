@@ -130,6 +130,61 @@ function isOptionalModelMapping(value: string | undefined): boolean {
   }
 }
 
+function isValidRequestPath(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().startsWith('/') &&
+    !value.includes('#')
+  )
+}
+
+function isRequestPathMap(value: unknown): value is Record<string, string> {
+  return (
+    isJsonObjectValue(value) &&
+    Object.entries(value).every(
+      ([incomingPath, upstreamPath]) =>
+        isValidRequestPath(incomingPath) && isValidRequestPath(upstreamPath)
+    )
+  )
+}
+
+function isOptionalRequestPathMapping(value: string | undefined): boolean {
+  try {
+    const parsed = parseOptionalJson(value)
+    if (parsed === undefined || !isJsonObjectValue(parsed)) {
+      if (parsed === undefined) {
+        return true
+      }
+      return false
+    }
+
+    const mappingKeys = Object.keys(parsed)
+    if (!mappingKeys.every((key) => key === 'channel' || key === 'models')) {
+      return false
+    }
+
+    if (
+      'channel' in parsed &&
+      parsed.channel !== undefined &&
+      !isRequestPathMap(parsed.channel)
+    ) {
+      return false
+    }
+
+    if ('models' in parsed && parsed.models !== undefined) {
+      if (!isJsonObjectValue(parsed.models)) return false
+      return Object.entries(parsed.models).every(
+        ([modelName, modelMapping]) =>
+          modelName.trim().length > 0 && isRequestPathMap(modelMapping)
+      )
+    }
+
+    return true
+  } catch {
+    return false
+  }
+}
+
 function isOptionalStatusCodeMapping(value: string | undefined): boolean {
   try {
     const parsed = parseOptionalJson(value)
@@ -208,6 +263,13 @@ export const channelFormSchema = z
       .refine(
         isOptionalModelMapping,
         'Model mapping must be a JSON object with string values'
+      ),
+    request_path_mapping: z
+      .string()
+      .optional()
+      .refine(
+        isOptionalRequestPathMapping,
+        'Request path mapping must be a JSON object containing valid channel and model path mappings'
       ),
     priority: z.number().optional(),
     weight: z.number().optional(),
@@ -407,6 +469,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   models: '',
   group: ['default'],
   model_mapping: '',
+  request_path_mapping: '',
   priority: 0,
   weight: 0,
   test_model: '',
@@ -558,6 +621,7 @@ export function transformChannelToFormDefaults(
     models: channel.models || '',
     group: parseGroups(channel.group || 'default'),
     model_mapping: channel.model_mapping || '',
+    request_path_mapping: channel.request_path_mapping || '',
     priority: channel.priority || 0,
     weight: channel.weight || 0,
     test_model: channel.test_model || '',
@@ -784,6 +848,7 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
     models: formData.models,
     group: formatGroups(formData.group),
     model_mapping: formData.model_mapping || null,
+    request_path_mapping: formData.request_path_mapping || null,
     priority: formData.priority || null,
     weight: formData.weight || null,
     test_model: formData.test_model || null,
@@ -832,6 +897,7 @@ export function transformFormDataToUpdatePayload(
     models: formData.models,
     group: formatGroups(formData.group),
     model_mapping: formData.model_mapping || null,
+    request_path_mapping: formData.request_path_mapping || null,
     priority: formData.priority ?? 0,
     weight: formData.weight ?? 0,
     test_model: formData.test_model || null,
@@ -865,6 +931,7 @@ export function transformFormDataToUpdatePayload(
   payload.tag = formData.tag || ''
   payload.remark = formData.remark || ''
   payload.model_mapping = formData.model_mapping || ''
+  payload.request_path_mapping = formData.request_path_mapping || ''
   payload.status_code_mapping = formData.status_code_mapping || ''
   payload.param_override = formData.param_override || ''
   payload.header_override = formData.header_override || ''

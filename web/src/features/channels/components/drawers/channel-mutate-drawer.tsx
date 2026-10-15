@@ -327,6 +327,7 @@ function hasConfiguredOverrideValue(value: unknown): boolean {
 
 function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
   return Boolean(
+    hasConfiguredOverrideValue(values.request_path_mapping) ||
     hasConfiguredOverrideValue(values.param_override) ||
     hasConfiguredOverrideValue(values.header_override) ||
     values.advanced_custom?.trim() ||
@@ -741,6 +742,7 @@ export function ChannelMutateDrawer({
   const currentTag = form.watch('tag')
   const currentRemark = form.watch('remark')
   const currentStatusCodeMapping = form.watch('status_code_mapping')
+  const currentRequestPathMapping = form.watch('request_path_mapping')
   const currentParamOverride = form.watch('param_override')
   const currentHeaderOverride = form.watch('header_override')
   const currentForceFormat = form.watch('force_format')
@@ -1011,6 +1013,7 @@ export function ChannelMutateDrawer({
   )
   const overrideRulesConfigured = Boolean(
     hasConfiguredOverrideValue(currentStatusCodeMapping) ||
+    hasConfiguredOverrideValue(currentRequestPathMapping) ||
     hasConfiguredOverrideValue(currentParamOverride) ||
     hasConfiguredOverrideValue(currentHeaderOverride)
   )
@@ -3803,6 +3806,79 @@ export function ChannelMutateDrawer({
                               title={t('Override Rules')}
                               icon={<Code className='h-3.5 w-3.5' />}
                               iconTone='chart-4'
+                            />
+
+                            <FormField
+                              control={form.control}
+                              name='request_path_mapping'
+                              render={({ field }) => (
+                                <FormItem className='space-y-3'>
+                                  <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
+                                    <div className='space-y-1'>
+                                      <FormLabel>
+                                        {t('Request Path Mapping')}
+                                      </FormLabel>
+                                      <FormDescription>
+                                        {t(
+                                          'Map incoming request paths to upstream paths. Model mappings take precedence over channel mappings; unmatched requests keep their original path.'
+                                        )}
+                                      </FormDescription>
+                                    </div>
+                                    <div className='flex flex-wrap gap-2'>
+                                      <Button
+                                        type='button'
+                                        variant='outline'
+                                        size='sm'
+                                        onClick={() =>
+                                          field.onChange(
+                                            JSON.stringify(
+                                              {
+                                                channel: {
+                                                  '/v1/responses':
+                                                    '/v1/chat/completions',
+                                                },
+                                                models: {
+                                                  'gpt-4o': {
+                                                    '/v1/responses':
+                                                      '/v1/chat/completions',
+                                                  },
+                                                },
+                                              },
+                                              null,
+                                              2
+                                            )
+                                          )
+                                        }
+                                      >
+                                        {t('Fill Template')}
+                                      </Button>
+                                      <Button
+                                        type='button'
+                                        variant='ghost'
+                                        size='sm'
+                                        onClick={() => field.onChange('')}
+                                      >
+                                        {t('Clear')}
+                                      </Button>
+                                    </div>
+                                  </div>
+                                  <FormControl>
+                                    <JsonCodeEditor
+                                      value={field.value || ''}
+                                      onChange={field.onChange}
+                                      name={field.name}
+                                      onBlur={field.onBlur}
+                                      textareaRef={field.ref}
+                                      disabled={isSubmitting}
+                                      placeholder={t(
+                                        'Request path mapping JSON example'
+                                      )}
+                                      heightClassName='h-48 min-h-48 max-h-48'
+                                    />
+                                  </FormControl>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
                             />
 
                             <FormField
