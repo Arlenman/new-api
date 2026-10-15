@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -56,23 +57,24 @@ type ResponsesUsageInfo struct {
 }
 
 type ChannelMeta struct {
-	ChannelType          int
-	ChannelId            int
-	ChannelIsMultiKey    bool
-	ChannelMultiKeyIndex int
-	ChannelBaseUrl       string
-	ApiType              int
-	ApiVersion           string
-	ApiKey               string
-	Organization         string
-	ChannelCreateTime    int64
-	ParamOverride        map[string]interface{}
-	HeadersOverride      map[string]interface{}
-	ChannelSetting       dto.ChannelSettings
-	ChannelOtherSettings dto.ChannelOtherSettings
-	UpstreamModelName    string
-	IsModelMapped        bool
-	SupportStreamOptions bool // 是否支持流式选项
+	ChannelType               int
+	ChannelId                 int
+	ChannelIsMultiKey         bool
+	ChannelMultiKeyIndex      int
+	ChannelBaseUrl            string
+	ApiType                   int
+	ApiVersion                string
+	ApiKey                    string
+	Organization              string
+	ChannelCreateTime         int64
+	ParamOverride             map[string]interface{}
+	HeadersOverride           map[string]interface{}
+	ChannelRequestPathMapping string
+	ChannelSetting            dto.ChannelSettings
+	ChannelOtherSettings      dto.ChannelOtherSettings
+	UpstreamModelName         string
+	IsModelMapped             bool
+	SupportStreamOptions      bool // 是否支持流式选项
 }
 
 type TokenCountMeta struct {
@@ -192,21 +194,22 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 	headerOverride := common.GetContextKeyStringMap(c, constant.ContextKeyChannelHeaderOverride)
 	apiType, _ := common.ChannelType2APIType(channelType)
 	channelMeta := &ChannelMeta{
-		ChannelType:          channelType,
-		ChannelId:            common.GetContextKeyInt(c, constant.ContextKeyChannelId),
-		ChannelIsMultiKey:    common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey),
-		ChannelMultiKeyIndex: common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex),
-		ChannelBaseUrl:       common.GetContextKeyString(c, constant.ContextKeyChannelBaseUrl),
-		ApiType:              apiType,
-		ApiVersion:           c.GetString("api_version"),
-		ApiKey:               common.GetContextKeyString(c, constant.ContextKeyChannelKey),
-		Organization:         c.GetString("channel_organization"),
-		ChannelCreateTime:    c.GetInt64("channel_create_time"),
-		ParamOverride:        paramOverride,
-		HeadersOverride:      headerOverride,
-		UpstreamModelName:    common.GetContextKeyString(c, constant.ContextKeyOriginalModel),
-		IsModelMapped:        false,
-		SupportStreamOptions: false,
+		ChannelType:               channelType,
+		ChannelId:                 common.GetContextKeyInt(c, constant.ContextKeyChannelId),
+		ChannelIsMultiKey:         common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey),
+		ChannelMultiKeyIndex:      common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex),
+		ChannelBaseUrl:            common.GetContextKeyString(c, constant.ContextKeyChannelBaseUrl),
+		ApiType:                   apiType,
+		ApiVersion:                c.GetString("api_version"),
+		ApiKey:                    common.GetContextKeyString(c, constant.ContextKeyChannelKey),
+		Organization:              c.GetString("channel_organization"),
+		ChannelCreateTime:         c.GetInt64("channel_create_time"),
+		ParamOverride:             paramOverride,
+		HeadersOverride:           headerOverride,
+		ChannelRequestPathMapping: common.GetContextKeyString(c, constant.ContextKeyChannelRequestPathMapping),
+		UpstreamModelName:         common.GetContextKeyString(c, constant.ContextKeyOriginalModel),
+		IsModelMapped:             false,
+		SupportStreamOptions:      false,
 	}
 
 	if channelType == constant.ChannelTypeAzure {
@@ -520,6 +523,38 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 	}
 
 	return info
+}
+
+func (info *RelayInfo) GetUpstreamRequestURLPath() string {
+	if info == nil {
+		return ""
+	}
+	return ResolveRequestPathForModels(
+		[]string{info.UpstreamModelName, info.OriginModelName},
+		info.RequestURLPath,
+		info.ChannelRequestPathMapping,
+	)
+}
+
+func (info *RelayInfo) GetUpstreamRelayFormat() types.RelayFormat {
+	if info == nil {
+		return ""
+	}
+	upstreamPath := info.GetUpstreamRequestURLPath()
+	path, err := url.Parse(upstreamPath)
+	if err != nil {
+		return info.RelayFormat
+	}
+	switch path.Path {
+	case "/v1/responses/compact":
+		return types.RelayFormatOpenAIResponsesCompaction
+	case "/v1/responses":
+		return types.RelayFormatOpenAIResponses
+	case "/v1/chat/completions":
+		return types.RelayFormatOpenAI
+	default:
+		return info.RelayFormat
+	}
 }
 
 func cloneRequestHeaders(c *gin.Context) map[string]string {

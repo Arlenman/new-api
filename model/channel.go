@@ -40,6 +40,7 @@ type Channel struct {
 	Group              string  `json:"group" gorm:"type:varchar(64);default:'default'"`
 	UsedQuota          int64   `json:"used_quota" gorm:"bigint;default:0"`
 	ModelMapping       *string `json:"model_mapping" gorm:"type:text"`
+	RequestPathMapping *string `json:"request_path_mapping" gorm:"type:text"`
 	//MaxInputTokens     *int    `json:"max_input_tokens" gorm:"default:0"`
 	StatusCodeMapping *string `json:"status_code_mapping" gorm:"type:varchar(1024);default:''"`
 	Priority          *int64  `json:"priority" gorm:"bigint;default:0"`
@@ -529,6 +530,13 @@ func (channel *Channel) GetModelMapping() string {
 		return ""
 	}
 	return *channel.ModelMapping
+}
+
+func (channel *Channel) GetRequestPathMapping() string {
+	if channel.RequestPathMapping == nil {
+		return ""
+	}
+	return *channel.RequestPathMapping
 }
 
 func (channel *Channel) GetStatusCodeMapping() string {
@@ -1043,6 +1051,9 @@ func (channel *Channel) ValidateSettings() error {
 			return err
 		}
 	}
+	if err := validateRequestPathMapping(channel.GetRequestPathMapping()); err != nil {
+		return err
+	}
 	if channel.Type == constant.ChannelTypeAdvancedCustom {
 		if channelOtherSettings.AdvancedCustom == nil {
 			return fmt.Errorf("advanced_custom is required")
@@ -1056,6 +1067,48 @@ func (channel *Channel) ValidateSettings() error {
 	if channel.Type == constant.ChannelTypeAdvancedCustom && channelOtherSettings.UpstreamModelUpdateCheckEnabled {
 		if _, ok := channelOtherSettings.AdvancedCustom.ModelListRoute(); !ok {
 			return fmt.Errorf("advanced custom channels require a %s route when upstream model update checks are enabled", dto.AdvancedCustomModelListPath)
+		}
+	}
+	return nil
+}
+
+func validateRequestPathMapping(rawMapping string) error {
+	if strings.TrimSpace(rawMapping) == "" {
+		return nil
+	}
+	var mapping struct {
+		Channel map[string]string            `json:"channel"`
+		Models  map[string]map[string]string `json:"models"`
+	}
+	if err := common.Unmarshal([]byte(rawMapping), &mapping); err != nil {
+		return fmt.Errorf("invalid request path mapping: %w", err)
+	}
+	validatePath := func(kind, path string) error {
+		path = strings.TrimSpace(path)
+		if path == "" || !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "#") {
+			return fmt.Errorf("invalid %s request path %q", kind, path)
+		}
+		return nil
+	}
+	for incomingPath, upstreamPath := range mapping.Channel {
+		if err := validatePath("channel", incomingPath); err != nil {
+			return err
+		}
+		if err := validatePath("upstream", upstreamPath); err != nil {
+			return err
+		}
+	}
+	for modelName, modelPaths := range mapping.Models {
+		if strings.TrimSpace(modelName) == "" {
+			return fmt.Errorf("request path mapping model name cannot be empty")
+		}
+		for incomingPath, upstreamPath := range modelPaths {
+			if err := validatePath("model", incomingPath); err != nil {
+				return err
+			}
+			if err := validatePath("upstream", upstreamPath); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

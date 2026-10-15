@@ -41,6 +41,60 @@ func TestChannelValidateSettingsRejectsInvalidHTTPTransport(t *testing.T) {
 	}
 }
 
+func TestChannelValidateSettingsRequestPathMapping(t *testing.T) {
+	validMapping := `{"channel":{"/v1/responses":"/v1/chat/completions"},"models":{"gpt-4o":{"/v1/responses":"/v1/chat/completions"}}}`
+	invalidJSON := `{"channel":`
+	invalidIncomingPath := `{"channel":{"v1/responses":"/v1/chat/completions"}}`
+	invalidUpstreamPath := `{"models":{"gpt-4o":{"/v1/responses":"https://api.example.com/v1/chat/completions"}}}`
+	emptyMapping := "  "
+
+	tests := []struct {
+		name        string
+		mapping     *string
+		wantErrText string
+	}{
+		{
+			name:    "valid channel and model mappings",
+			mapping: &validMapping,
+		},
+		{
+			name:        "invalid JSON",
+			mapping:     &invalidJSON,
+			wantErrText: "invalid request path mapping",
+		},
+		{
+			name:        "incoming path must begin with slash",
+			mapping:     &invalidIncomingPath,
+			wantErrText: "invalid channel request path",
+		},
+		{
+			name:        "upstream path must begin with slash",
+			mapping:     &invalidUpstreamPath,
+			wantErrText: "invalid upstream request path",
+		},
+		{
+			name: "nil mapping is empty configuration",
+		},
+		{
+			name:    "blank mapping is empty configuration",
+			mapping: &emptyMapping,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			channel := &Channel{RequestPathMapping: tt.mapping}
+			err := channel.ValidateSettings()
+			if tt.wantErrText == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrText)
+		})
+	}
+}
+
 func TestAdvancedCustomChannelRequiresModelListRouteOnlyWhenUpdateChecksEnabled(t *testing.T) {
 	inferenceRoute := dto.AdvancedCustomRoute{
 		IncomingPath: "/v1/chat/completions",

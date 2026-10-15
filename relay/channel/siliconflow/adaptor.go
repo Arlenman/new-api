@@ -69,7 +69,7 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	if info.RelayMode == constant.RelayModeRerank {
 		return fmt.Sprintf("%s/v1/rerank", info.ChannelBaseUrl), nil
 	}
-	return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, info.RequestURLPath, info.ChannelType), nil
+	return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, info.GetUpstreamRequestURLPath(), info.ChannelType), nil
 }
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *relaycommon.RelayInfo) error {

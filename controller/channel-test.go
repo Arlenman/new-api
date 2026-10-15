@@ -348,7 +348,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	case relayconstant.RelayModeResponses:
 		// Response 请求 - request 已经是正确的类型
 		if responseReq, ok := request.(*dto.OpenAIResponsesRequest); ok {
-			convertedRequest, err = adaptor.ConvertOpenAIResponsesRequest(c, info, *responseReq)
+			convertedRequest, err = relay.ConvertOpenAIResponsesRequestForUpstream(c, info, adaptor, *responseReq)
 		} else {
 			return testResult{
 				context:     c,
@@ -360,14 +360,14 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		// Response compaction request - convert to OpenAIResponsesRequest before adapting
 		switch req := request.(type) {
 		case *dto.OpenAIResponsesCompactionRequest:
-			convertedRequest, err = adaptor.ConvertOpenAIResponsesRequest(c, info, dto.OpenAIResponsesRequest{
+			convertedRequest, err = relay.ConvertOpenAIResponsesRequestForUpstream(c, info, adaptor, dto.OpenAIResponsesRequest{
 				Model:              req.Model,
 				Input:              req.Input,
 				Instructions:       req.Instructions,
 				PreviousResponseID: req.PreviousResponseID,
 			})
 		case *dto.OpenAIResponsesRequest:
-			convertedRequest, err = adaptor.ConvertOpenAIResponsesRequest(c, info, *req)
+			convertedRequest, err = relay.ConvertOpenAIResponsesRequestForUpstream(c, info, adaptor, *req)
 		default:
 			return testResult{
 				context:     c,
@@ -378,7 +378,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	default:
 		switch req := request.(type) {
 		case *dto.GeneralOpenAIRequest:
-			convertedRequest, err = adaptor.ConvertOpenAIRequest(c, info, req)
+			convertedRequest, err = relay.ConvertOpenAIRequestForUpstream(c, info, adaptor, req)
 		case *dto.ClaudeRequest:
 			convertedRequest, err = adaptor.ConvertClaudeRequest(c, info, req)
 		case *dto.GeminiChatRequest:
@@ -399,6 +399,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			newAPIError: types.NewError(err, types.ErrorCodeConvertRequestFailed),
 		}
 	}
+	relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 	jsonData, err := common.Marshal(convertedRequest)
 	if err != nil {
 		return testResult{
@@ -471,7 +472,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			}
 		}
 	}
-	usageA, respErr := adaptor.DoResponse(c, httpResp, info)
+	usageA, respErr := relay.DoOpenAIResponseForMappedEndpoint(c, adaptor, httpResp, info, isStream)
 	if respErr != nil {
 		return testResult{
 			context:     c,
