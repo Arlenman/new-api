@@ -183,6 +183,153 @@ func TestResponsesRequestToChatCompletionsRequestOnlyFunctionCallCreatesAssistan
 	assert.Equal(t, `{"q":"x"}`, toolCalls[0].Function.Arguments)
 }
 
+func TestResponsesRequestToChatCompletionsRequestPassesBackAssistantReasoning(t *testing.T) {
+	got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{
+		Model: "deepseek-v4.1-flash",
+		Input: mustRawMessage(t, []map[string]any{
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": []map[string]any{{"type": "input_text", "text": "check the build"}},
+			},
+			{
+				"type":              "reasoning",
+				"id":                "68df115f-2c71-4835-940c-294955bf1dc2",
+				"summary":           []map[string]any{},
+				"content":           []map[string]any{{"type": "reasoning_text", "text": "I should run the tests first."}},
+				"encrypted_content": "0942fe45-fffe-45dc-bebf-85a652be437d-0",
+			},
+			{
+				"type":      "function_call",
+				"call_id":   "call_1",
+				"name":      "shell",
+				"arguments": `{"command":["go","test","./..."]}`,
+			},
+			{
+				"type":    "function_call_output",
+				"call_id": "call_1",
+				"output":  "ok",
+			},
+			{
+				"type":    "reasoning",
+				"summary": []map[string]any{},
+				"content": []map[string]any{{"type": "reasoning_text", "text": "Tests passed."}},
+			},
+			{
+				"type":    "message",
+				"role":    "assistant",
+				"content": []map[string]any{{"type": "output_text", "text": "All green."}},
+			},
+		}),
+		Tools: mustRawMessage(t, []map[string]any{
+			{"type": "function", "name": "shell", "parameters": map[string]any{"type": "object"}},
+		}),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, got.Messages, 4)
+	assert.Equal(t, "user", got.Messages[0].Role)
+	assert.Equal(t, "check the build", got.Messages[0].StringContent())
+
+	// The Responses format carries the chain of thought as a dedicated `reasoning`
+	// input item, the chat format as `reasoning_content` on the assistant message.
+	require.NotNil(t, got.Messages[1].ReasoningContent)
+	assert.Equal(t, "I should run the tests first.", *got.Messages[1].ReasoningContent)
+	assert.Equal(t, "assistant", got.Messages[1].Role)
+	require.Len(t, got.Messages[1].ParseToolCalls(), 1)
+
+	assert.Equal(t, "tool", got.Messages[2].Role)
+
+	require.NotNil(t, got.Messages[3].ReasoningContent)
+	assert.Equal(t, "Tests passed.", *got.Messages[3].ReasoningContent)
+	assert.Equal(t, "assistant", got.Messages[3].Role)
+	assert.Equal(t, "All green.", got.Messages[3].StringContent())
+
+	for i, message := range got.Messages {
+		assert.NotEqual(t, "reasoning", message.Role, "reasoning item must not become a standalone turn at index %d", i)
+	}
+}
+
+func TestResponsesRequestToChatCompletionsRequestFallsBackToReasoningSummary(t *testing.T) {
+	// This is what a Codex client replays after our own Responses response conversion
+	// handed it a summary and nothing else: content is null, the chain of thought only
+	// survives in `summary`. The chat upstream still needs it back.
+	got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{
+		Model: "gpt-test",
+		Input: mustRawMessage(t, []map[string]any{
+			{
+				"type":              "reasoning",
+				"id":                "rs_1",
+				"summary":           []map[string]any{{"type": "summary_text", "text": "Ran the tests."}},
+				"content":           nil,
+				"encrypted_content": nil,
+			},
+			{
+				"type":    "message",
+				"role":    "assistant",
+				"content": []map[string]any{{"type": "output_text", "text": "All green."}},
+			},
+		}),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, got.Messages, 1)
+	assert.Equal(t, "assistant", got.Messages[0].Role)
+	require.NotNil(t, got.Messages[0].ReasoningContent)
+	assert.Equal(t, "Ran the tests.", *got.Messages[0].ReasoningContent)
+	assert.Equal(t, "All green.", got.Messages[0].StringContent())
+}
+
+func TestResponsesRequestToChatCompletionsRequestPrefersReasoningTextOverSummary(t *testing.T) {
+	got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{
+		Model: "gpt-test",
+		Input: mustRawMessage(t, []map[string]any{
+			{
+				"type":    "reasoning",
+				"id":      "rs_1",
+				"summary": []map[string]any{{"type": "summary_text", "text": "Summary only."}},
+				"content": []map[string]any{{"type": "reasoning_text", "text": "Raw chain of thought."}},
+			},
+			{
+				"type":    "message",
+				"role":    "assistant",
+				"content": []map[string]any{{"type": "output_text", "text": "All green."}},
+			},
+		}),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, got.Messages, 1)
+	require.NotNil(t, got.Messages[0].ReasoningContent)
+	assert.Equal(t, "Raw chain of thought.", *got.Messages[0].ReasoningContent)
+}
+
+func TestResponsesRequestToChatCompletionsRequestIgnoresReasoningWithoutAnyText(t *testing.T) {
+	got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{
+		Model: "gpt-test",
+		Input: mustRawMessage(t, []map[string]any{
+			{
+				"type":              "reasoning",
+				"id":                "rs_1",
+				"summary":           []map[string]any{},
+				"content":           nil,
+				"encrypted_content": "gAAAAAB",
+			},
+			{
+				"type":    "message",
+				"role":    "assistant",
+				"content": []map[string]any{{"type": "output_text", "text": "All green."}},
+			},
+		}),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, got.Messages, 1)
+	assert.Equal(t, "assistant", got.Messages[0].Role)
+	assert.Nil(t, got.Messages[0].ReasoningContent)
+	assert.Equal(t, "All green.", got.Messages[0].StringContent())
+}
+
 func TestResponsesRequestToChatCompletionsRequestToolsToolChoiceAndTextFormat(t *testing.T) {
 	got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{
 		Model: "gpt-test",

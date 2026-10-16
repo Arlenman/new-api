@@ -146,6 +146,7 @@ func ClaudeMessagesRequestToOpenAIChat(claudeRequest dto.ClaudeRequest, info con
 			}
 			var toolCalls []dto.ToolCallRequest
 			mediaMessages := make([]dto.MediaContent, 0, len(content))
+			thinkingParts := make([]string, 0, 1)
 
 			for _, mediaMsg := range content {
 				switch mediaMsg.Type {
@@ -156,6 +157,14 @@ func ClaudeMessagesRequestToOpenAIChat(claudeRequest dto.ClaudeRequest, info con
 						CacheControl: mediaMsg.CacheControl,
 					}
 					mediaMessages = append(mediaMessages, message)
+				case "thinking":
+					// Claude keeps the chain of thought in thinking blocks, chat
+					// completions keep it in reasoning_content. Dropping it makes
+					// thinking-mode upstreams reject the next request with a 400
+					// once the conversation carries tools.
+					if mediaMsg.Thinking != nil && strings.TrimSpace(*mediaMsg.Thinking) != "" {
+						thinkingParts = append(thinkingParts, *mediaMsg.Thinking)
+					}
 				case "image":
 					imageData := fmt.Sprintf("data:%s;base64,%s", mediaMsg.Source.MediaType, mediaMsg.Source.Data)
 					mediaMessage := dto.MediaContent{
@@ -199,6 +208,10 @@ func ClaudeMessagesRequestToOpenAIChat(claudeRequest dto.ClaudeRequest, info con
 			}
 			if len(mediaMessages) > 0 && len(toolCalls) == 0 {
 				openAIMessage.SetMediaContent(mediaMessages)
+			}
+			if len(thinkingParts) > 0 {
+				reasoningContent := strings.Join(thinkingParts, "\n\n")
+				openAIMessage.ReasoningContent = &reasoningContent
 			}
 		}
 		if len(openAIMessage.ParseContent()) > 0 || len(openAIMessage.ToolCalls) > 0 {

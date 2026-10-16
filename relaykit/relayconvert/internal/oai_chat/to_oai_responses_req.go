@@ -152,6 +152,26 @@ func ChatCompletionsRequestToResponsesRequest(req *dto.GeneralOpenAIRequest) (*d
 			continue
 		}
 
+		// The Responses format keeps the assistant chain of thought in a dedicated
+		// input item instead of the chat `reasoning_content` field. Thinking-mode
+		// upstreams (for example DeepSeek) require it to be passed back once the
+		// request carries tools, otherwise they reject the request with a 400.
+		// Note the field name difference: chat uses `reasoning_content`, the
+		// Responses input item uses `reasoning_text` content parts.
+		if role == "assistant" {
+			if reasoning := msg.GetReasoningContent(); strings.TrimSpace(reasoning) != "" {
+				inputItems = append(inputItems, map[string]any{
+					"type": "reasoning",
+					"content": []map[string]any{
+						{
+							"type": "reasoning_text",
+							"text": reasoning,
+						},
+					},
+				})
+			}
+		}
+
 		item := map[string]any{
 			"role": role,
 		}

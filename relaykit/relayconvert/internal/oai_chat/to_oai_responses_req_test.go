@@ -84,6 +84,78 @@ func TestChatCompletionsRequestToResponsesRequestRejectsMultipleChoices(t *testi
 	assert.Contains(t, err.Error(), "n>1")
 }
 
+// A thinking-mode Responses upstream (for example DeepSeek) rejects a request
+// that carries tools but does not pass the assistant chain of thought back, so
+// the chat `reasoning_content` has to be re-emitted as a `reasoning` input item
+// whose content part type is `reasoning_text`.
+func TestChatCompletionsRequestToResponsesRequestPassesBackAssistantReasoning(t *testing.T) {
+	tests := []struct {
+		name          string
+		content       string
+		apply         func(msg *dto.Message)
+		wantReasoning string
+	}{
+		{
+			name:          "reasoning_content on a tool call turn",
+			content:       "",
+			apply:         func(msg *dto.Message) { msg.ReasoningContent = lo.ToPtr("I should call the lookup tool.") },
+			wantReasoning: "I should call the lookup tool.",
+		},
+		{
+			name:          "reasoning alias on a text turn",
+			content:       "the answer is 42",
+			apply:         func(msg *dto.Message) { msg.Reasoning = lo.ToPtr("Let me think.") },
+			wantReasoning: "Let me think.",
+		},
+		{
+			name:    "blank reasoning_content is not sent",
+			content: "the answer is 42",
+			apply:   func(msg *dto.Message) { msg.ReasoningContent = lo.ToPtr("   ") },
+		},
+		{
+			name:    "assistant message without reasoning",
+			content: "the answer is 42",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assistant := assistantMessageWithTool(tt.content, "call_1", "lookup", `{"q":"x"}`)
+			if tt.apply != nil {
+				tt.apply(&assistant)
+			}
+
+			req := &dto.GeneralOpenAIRequest{
+				Model: "deepseek-v4-pro",
+				Messages: []dto.Message{
+					{Role: "user", Content: "look it up"},
+					assistant,
+					{Role: "tool", ToolCallId: "call_1", Content: "tool result"},
+				},
+			}
+
+			got, err := ChatCompletionsRequestToResponsesRequest(req)
+			require.NoError(t, err)
+
+			if tt.wantReasoning == "" {
+				assert.Equal(t, "assistant", gjson.GetBytes(got.Input, "1.role").String())
+				assert.Equal(t, "function_call", gjson.GetBytes(got.Input, "2.type").String())
+				assert.Equal(t, "function_call_output", gjson.GetBytes(got.Input, "3.type").String())
+				return
+			}
+
+			assert.Equal(t, "reasoning", gjson.GetBytes(got.Input, "1.type").String())
+			assert.Equal(t, "reasoning_text", gjson.GetBytes(got.Input, "1.content.0.type").String())
+			assert.Equal(t, tt.wantReasoning, gjson.GetBytes(got.Input, "1.content.0.text").String())
+			// The reasoning item is merged into the adjacent assistant message
+			// upstream, so it must stay directly in front of that turn.
+			assert.Equal(t, "assistant", gjson.GetBytes(got.Input, "2.role").String())
+			assert.Equal(t, "function_call", gjson.GetBytes(got.Input, "3.type").String())
+			assert.Equal(t, "function_call_output", gjson.GetBytes(got.Input, "4.type").String())
+		})
+	}
+}
+
 func assistantMessageWithTool(content string, id string, name string, args string) dto.Message {
 	msg := dto.Message{Role: "assistant", Content: content}
 	msg.SetToolCalls([]dto.ToolCallRequest{

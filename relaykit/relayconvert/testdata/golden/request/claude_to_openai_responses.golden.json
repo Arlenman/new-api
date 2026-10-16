@@ -15,6 +15,15 @@
       "role": "user"
     },
     {
+      "content": [
+        {
+          "text": "Let me look.",
+          "type": "reasoning_text"
+        }
+      ],
+      "type": "reasoning"
+    },
+    {
       "content": "",
       "role": "assistant"
     },
