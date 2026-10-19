@@ -30,6 +30,18 @@ func shouldPassThroughRequestBody(info *relaycommon.RelayInfo, passThrough bool)
 	return true
 }
 
+// shouldPassThroughChannelBody decides whether the raw request body may be forwarded
+// as-is. Channels that opt into request rewriting (e.g. reasoning_content compat) must
+// go through the adaptor, otherwise the rewrite never reaches the upstream.
+func shouldPassThroughChannelBody(info *relaycommon.RelayInfo, passThroughGlobal bool) bool {
+	passThrough := passThroughGlobal
+	if info != nil {
+		passThrough = (passThroughGlobal || info.ChannelSetting.PassThroughBodyEnabled) &&
+			!info.ChannelSetting.ReasoningContentCompat
+	}
+	return shouldPassThroughRequestBody(info, passThrough)
+}
+
 func ConvertOpenAIResponsesRequestForUpstream(c *gin.Context, info *relaycommon.RelayInfo, adaptor channel.Adaptor, request dto.OpenAIResponsesRequest) (any, error) {
 	if info.GetUpstreamRelayFormat() != types.RelayFormatOpenAI {
 		return adaptor.ConvertOpenAIResponsesRequest(c, info, request)

@@ -13,6 +13,7 @@ import (
 type ChannelSettings struct {
 	ForceFormat            bool   `json:"force_format,omitempty"`
 	ThinkingToContent      bool   `json:"thinking_to_content,omitempty"`
+	ReasoningContentCompat bool   `json:"reasoning_content_compat,omitempty"` // 转发前给 assistant 消息补齐 reasoning_content，兼容要求回放思维链的 thinking 模式上游
 	Proxy                  string `json:"proxy"`
 	PassThroughBodyEnabled bool   `json:"pass_through_body_enabled,omitempty"`
 	SystemPrompt           string `json:"system_prompt,omitempty"`

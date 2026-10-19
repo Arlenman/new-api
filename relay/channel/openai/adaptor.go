@@ -252,6 +252,9 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if info.ChannelType != constant.ChannelTypeOpenAI && info.ChannelType != constant.ChannelTypeAzure {
 		request.StreamOptions = nil
 	}
+	if info.ChannelSetting.ReasoningContentCompat {
+		ensureReasoningContentReplay(request.Messages)
+	}
 	if info.ChannelType == constant.ChannelTypeOpenRouter {
 		if len(request.Usage) == 0 {
 			request.Usage = json.RawMessage(`{"include":true}`)
@@ -368,6 +371,33 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	}
 
 	return request, nil
+}
+
+// ensureReasoningContentReplay guarantees that replayed assistant messages carry
+// `reasoning_content`. Thinking-mode upstreams (DeepSeek and compatible gateways)
+// reject requests whose assistant turns lost the chain of thought: clients often
+// replay it under `reasoning`, or omit it entirely for tool-call turns.
+func ensureReasoningContentReplay(messages []dto.Message) {
+	for i := range messages {
+		message := &messages[i]
+		if message.Role != "assistant" {
+			continue
+		}
+		if message.ReasoningContent != nil && strings.TrimSpace(*message.ReasoningContent) != "" {
+			continue
+		}
+		if message.Reasoning != nil && strings.TrimSpace(*message.Reasoning) != "" {
+			message.ReasoningContent = message.Reasoning
+			continue
+		}
+		// The echo is only enforced on assistant turns that requested tools.
+		toolCalls := bytes.TrimSpace(message.ToolCalls)
+		if len(toolCalls) == 0 || bytes.Equal(toolCalls, []byte("[]")) || bytes.Equal(toolCalls, []byte("null")) {
+			continue
+		}
+		empty := ""
+		message.ReasoningContent = &empty
+	}
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
