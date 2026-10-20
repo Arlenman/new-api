@@ -73,14 +73,25 @@ func ChatCompletionsResponseToResponsesResponse(resp *dto.OpenAITextResponse, id
 		})
 	}
 	if reasoning := choice.Message.GetReasoningContent(); reasoning != "" {
+		// Responses clients keep the chain of thought of a reasoning item in two
+		// places: `summary` is what they display and what Codex serializes back
+		// unconditionally, while `content` is only replayed when it carries a
+		// `reasoning_text` part (see Codex's should_serialize_reasoning_content).
+		// The chat upstream handed us one plain-text CoT, so it is published in
+		// both shapes: dropping either one loses the replay on the next turn and
+		// thinking-mode upstreams then answer 400.
 		out.Output = append(out.Output, dto.ResponsesOutput{
 			Type:   responsesOutputTypeReasoning,
 			ID:     fmt.Sprintf("%s_reasoning_0", id),
 			Status: responseOutputStatus(out),
+			Summary: &[]dto.ResponsesReasoningSummaryPart{
+				{Type: "summary_text", Text: reasoning},
+			},
 			Content: []dto.ResponsesOutputContent{
 				{
-					Type: "summary_text",
-					Text: reasoning,
+					Type:        "reasoning_text",
+					Text:        reasoning,
+					Annotations: []interface{}{},
 				},
 			},
 		})

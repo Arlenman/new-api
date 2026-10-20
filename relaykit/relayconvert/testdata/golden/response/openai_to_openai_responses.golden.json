@@ -29,9 +29,15 @@
       "role": "",
       "content": [
         {
-          "type": "summary_text",
+          "type": "reasoning_text",
           "text": "Deep thought.",
-          "annotations": null
+          "annotations": []
+        }
+      ],
+      "summary": [
+        {
+          "type": "summary_text",
+          "text": "Deep thought."
         }
       ],
       "quality": "",

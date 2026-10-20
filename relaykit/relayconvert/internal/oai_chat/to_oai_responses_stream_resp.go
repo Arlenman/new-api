@@ -176,6 +176,7 @@ func (s *ChatToResponsesStreamState) appendReasoningDelta(delta string) []ChatTo
 				Type:    responsesOutputTypeReasoning,
 				ID:      s.reasoningID(),
 				Status:  "in_progress",
+				Summary: &[]dto.ResponsesReasoningSummaryPart{},
 				Content: []dto.ResponsesOutputContent{},
 			},
 		}))
@@ -392,14 +393,22 @@ func (s *ChatToResponsesStreamState) messageOutput(status string) *dto.Responses
 }
 
 func (s *ChatToResponsesStreamState) reasoningOutput(status string) *dto.ResponsesOutput {
+	// Both shapes are required for replay: `summary` is mandatory for Responses
+	// clients, `content.reasoning_text` is the only form Codex sends back on the
+	// next turn. See ChatCompletionsResponseToResponsesResponse for details.
+	reasoning := s.reasoning.String()
 	return &dto.ResponsesOutput{
 		Type:   responsesOutputTypeReasoning,
 		ID:     s.reasoningID(),
 		Status: status,
+		Summary: &[]dto.ResponsesReasoningSummaryPart{
+			{Type: "summary_text", Text: reasoning},
+		},
 		Content: []dto.ResponsesOutputContent{
 			{
-				Type: "summary_text",
-				Text: s.reasoning.String(),
+				Type:        "reasoning_text",
+				Text:        reasoning,
+				Annotations: []interface{}{},
 			},
 		},
 	}

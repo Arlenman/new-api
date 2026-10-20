@@ -214,18 +214,33 @@ func ExtractReasoningTextFromResponses(resp *dto.OpenAIResponsesResponse) string
 		return ""
 	}
 
-	var sb strings.Builder
+	// A reasoning item exposes the plain chain of thought in `content`
+	// (`reasoning_text` parts) and the summarized form in `summary`. Prefer the
+	// plain text and only fall back to the summary, so an item that carries both
+	// is never duplicated into `reasoning_content`.
+	var content, summary strings.Builder
 	for _, out := range resp.Output {
 		if out.Type != responsesOutputTypeReasoning {
 			continue
 		}
 		for _, c := range out.Content {
 			if c.Text != "" {
-				sb.WriteString(c.Text)
+				content.WriteString(c.Text)
+			}
+		}
+		if out.Summary == nil {
+			continue
+		}
+		for _, part := range *out.Summary {
+			if part.Text != "" {
+				summary.WriteString(part.Text)
 			}
 		}
 	}
-	return sb.String()
+	if content.Len() > 0 {
+		return content.String()
+	}
+	return summary.String()
 }
 
 func responseStatusString(resp *dto.OpenAIResponsesResponse) string {

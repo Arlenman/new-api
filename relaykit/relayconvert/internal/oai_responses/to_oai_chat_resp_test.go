@@ -77,6 +77,64 @@ func TestResponsesResponseToChatCompletionsPreservesReasoningSummary(t *testing.
 	assert.Equal(t, "final", chat.Choices[0].Message.StringContent())
 }
 
+func TestResponsesResponseToChatCompletionsReadsReasoningSummaryField(t *testing.T) {
+	resp := &dto.OpenAIResponsesResponse{
+		ID:     "resp_1",
+		Model:  "gpt-test",
+		Status: []byte(`"completed"`),
+		Output: []dto.ResponsesOutput{
+			{
+				Type: responsesOutputTypeReasoning,
+				Summary: &[]dto.ResponsesReasoningSummaryPart{
+					{Type: "summary_text", Text: "summary only"},
+				},
+			},
+			{
+				Type: responsesOutputTypeMessage,
+				Role: "assistant",
+				Content: []dto.ResponsesOutputContent{
+					{Type: "output_text", Text: "final"},
+				},
+			},
+		},
+	}
+
+	chat, _, err := ResponsesResponseToChatCompletionsResponse(resp, "chatcmpl_1")
+	require.NoError(t, err)
+	assert.Equal(t, "summary only", chat.Choices[0].Message.GetReasoningContent())
+	assert.Equal(t, "final", chat.Choices[0].Message.StringContent())
+}
+
+func TestResponsesResponseToChatCompletionsPrefersReasoningTextOverSummary(t *testing.T) {
+	resp := &dto.OpenAIResponsesResponse{
+		ID:     "resp_1",
+		Model:  "gpt-test",
+		Status: []byte(`"completed"`),
+		Output: []dto.ResponsesOutput{
+			{
+				Type: responsesOutputTypeReasoning,
+				Summary: &[]dto.ResponsesReasoningSummaryPart{
+					{Type: "summary_text", Text: "short summary"},
+				},
+				Content: []dto.ResponsesOutputContent{
+					{Type: "reasoning_text", Text: "raw chain of thought"},
+				},
+			},
+			{
+				Type: responsesOutputTypeMessage,
+				Role: "assistant",
+				Content: []dto.ResponsesOutputContent{
+					{Type: "output_text", Text: "final"},
+				},
+			},
+		},
+	}
+
+	chat, _, err := ResponsesResponseToChatCompletionsResponse(resp, "chatcmpl_1")
+	require.NoError(t, err)
+	assert.Equal(t, "raw chain of thought", chat.Choices[0].Message.GetReasoningContent())
+}
+
 func TestResponsesFinishReasonFromIncompleteStatus(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -279,6 +337,61 @@ func TestResponsesStreamEventToChatChunksUsesTerminalDoneOutput(t *testing.T) {
 	assert.Equal(t, `{"q":"x"}`, tool.Function.Arguments)
 	require.NotNil(t, chunks[3].Choices[0].FinishReason)
 	assert.Equal(t, "tool_calls", *chunks[3].Choices[0].FinishReason)
+}
+
+func TestResponsesStreamEventToChatChunksReadsReasoningSummaryFromTerminalOutput(t *testing.T) {
+	state := newTestResponsesStreamState()
+	chunks := mustStreamChunks(t, state, &dto.ResponsesStreamResponse{
+		Type: responsesEventCompleted,
+		Response: &dto.OpenAIResponsesResponse{
+			Status: []byte(`"completed"`),
+			Output: []dto.ResponsesOutput{
+				{
+					Type: responsesOutputTypeReasoning,
+					Summary: &[]dto.ResponsesReasoningSummaryPart{
+						{Type: "summary_text", Text: "summary from terminal output"},
+					},
+				},
+			},
+		},
+	})
+
+	reasoning := ""
+	for _, chunk := range chunks {
+		for _, choice := range chunk.Choices {
+			reasoning += choice.Delta.GetReasoningContent()
+		}
+	}
+	assert.Equal(t, "summary from terminal output", reasoning)
+}
+
+func TestResponsesStreamEventToChatChunksDoesNotDuplicateReasoningTextAndSummary(t *testing.T) {
+	state := newTestResponsesStreamState()
+	chunks := mustStreamChunks(t, state, &dto.ResponsesStreamResponse{
+		Type: responsesEventCompleted,
+		Response: &dto.OpenAIResponsesResponse{
+			Status: []byte(`"completed"`),
+			Output: []dto.ResponsesOutput{
+				{
+					Type: responsesOutputTypeReasoning,
+					Summary: &[]dto.ResponsesReasoningSummaryPart{
+						{Type: "summary_text", Text: "summary"},
+					},
+					Content: []dto.ResponsesOutputContent{
+						{Type: "reasoning_text", Text: "raw chain of thought"},
+					},
+				},
+			},
+		},
+	})
+
+	reasoning := ""
+	for _, chunk := range chunks {
+		for _, choice := range chunk.Choices {
+			reasoning += choice.Delta.GetReasoningContent()
+		}
+	}
+	assert.Equal(t, "raw chain of thought", reasoning)
 }
 
 func TestResponsesStreamEventToChatChunksDoesNotResendToolOnTerminalOutput(t *testing.T) {

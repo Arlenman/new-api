@@ -178,10 +178,20 @@ func (s *ResponsesToChatStreamState) terminalOutputChunks(response *dto.OpenAIRe
 			}
 			chunks = append(chunks, s.textDelta(text.String())...)
 		case out.Type == responsesOutputTypeReasoning && !s.hasSentReasoning:
+			// Plain `reasoning_text` content wins; summary-only items (OpenAI's own
+			// models, and our own Responses output) still carry the chain of thought
+			// in `summary`, so it is the fallback rather than being dropped.
 			var reasoning strings.Builder
 			for _, c := range out.Content {
 				if c.Text != "" {
 					reasoning.WriteString(c.Text)
+				}
+			}
+			if reasoning.Len() == 0 && out.Summary != nil {
+				for _, part := range *out.Summary {
+					if part.Text != "" {
+						reasoning.WriteString(part.Text)
+					}
 				}
 			}
 			chunks = append(chunks, s.reasoningDelta(reasoning.String())...)
@@ -622,10 +632,14 @@ func (a *ResponsesBufferedAccumulator) BuildOutput() []dto.ResponsesOutput {
 	}
 	out := make([]dto.ResponsesOutput, 0, 2+len(a.tools))
 	if a.reasoning.Len() > 0 {
+		reasoning := a.reasoning.String()
 		out = append(out, dto.ResponsesOutput{
 			Type: responsesOutputTypeReasoning,
+			Summary: &[]dto.ResponsesReasoningSummaryPart{
+				{Type: "summary_text", Text: reasoning},
+			},
 			Content: []dto.ResponsesOutputContent{
-				{Type: "summary_text", Text: a.reasoning.String()},
+				{Type: "reasoning_text", Text: reasoning},
 			},
 		})
 	}

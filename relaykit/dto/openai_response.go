@@ -325,17 +325,24 @@ type IncompleteDetails struct {
 }
 
 type ResponsesOutput struct {
-	Type      string                   `json:"type"`
-	ID        string                   `json:"id"`
-	Status    string                   `json:"status"`
-	Role      string                   `json:"role"`
-	Content   []ResponsesOutputContent `json:"content"`
-	Quality   string                   `json:"quality"`
-	Size      string                   `json:"size"`
-	Result    string                   `json:"result,omitempty"`
-	CallId    string                   `json:"call_id,omitempty"`
-	Name      string                   `json:"name,omitempty"`
-	Arguments json.RawMessage          `json:"arguments,omitempty"`
+	Type    string                   `json:"type"`
+	ID      string                   `json:"id"`
+	Status  string                   `json:"status"`
+	Role    string                   `json:"role"`
+	Content []ResponsesOutputContent `json:"content"`
+	// Summary is the reasoning summary of a `reasoning` output item. Responses
+	// clients deserialize it as a required array, so a reasoning item must carry
+	// the field even before the summary text exists (an empty array). It is a
+	// pointer only to keep that "present but empty" state distinct from "absent":
+	// message and function_call items omit the field entirely instead of sending
+	// a meaningless null.
+	Summary   *[]ResponsesReasoningSummaryPart `json:"summary,omitempty"`
+	Quality   string                           `json:"quality"`
+	Size      string                           `json:"size"`
+	Result    string                           `json:"result,omitempty"`
+	CallId    string                           `json:"call_id,omitempty"`
+	Name      string                           `json:"name,omitempty"`
+	Arguments json.RawMessage                  `json:"arguments,omitempty"`
 }
 
 // ArgumentsString returns function call arguments in the string form expected by Chat Completions.

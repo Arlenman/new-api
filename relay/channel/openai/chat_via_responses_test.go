@@ -223,6 +223,63 @@ func TestOaiChatToResponsesStreamHandlerConvertsSSEOrderAndUsage(t *testing.T) {
 	)
 }
 
+// A chat upstream delivers the chain of thought as `reasoning_content`. The
+// Responses client must receive it in the two shapes it needs: `summary` (a
+// required field, also what it renders) and `content.reasoning_text` (the only
+// shape Codex serializes back on the next turn). Without the latter, thinking
+// mode upstreams reject the follow-up request with a 400.
+func TestOaiChatToResponsesHandlersKeepReplayableReasoningItem(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+
+	t.Run("non-stream", func(t *testing.T) {
+		body := `{"id":"chatcmpl_1","object":"chat.completion","created":1710000000,"model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"answer","reasoning_content":"think"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`
+		c, recorder, resp, info := newResponsesChatTestContext(t, body, false)
+
+		_, apiErr := OaiChatToResponsesHandler(c, info, resp)
+		require.Nil(t, apiErr)
+
+		got := recorder.Body.String()
+		require.Contains(t, got, `"summary":[{"type":"summary_text","text":"think"}]`)
+		require.Contains(t, got, `"content":[{"type":"reasoning_text","text":"think","annotations":[]}]`)
+		require.NotContains(t, got, `"content":[{"type":"summary_text"`)
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		body := strings.Join([]string{
+			`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1710000000,"model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"think"}}]}`,
+			`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1710000000,"model":"gpt-test","choices":[{"index":0,"delta":{"content":"answer"}}]}`,
+			`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1710000000,"model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1710000000,"model":"gpt-test","choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`,
+			`data: [DONE]`,
+			``,
+		}, "\n")
+		c, recorder, resp, info := newResponsesChatTestContext(t, body, true)
+
+		_, apiErr := OaiChatToResponsesStreamHandler(c, info, resp)
+		require.Nil(t, apiErr)
+
+		got := recorder.Body.String()
+		// The in-progress snapshot must already carry an empty summary array.
+		require.Contains(t, got, `"summary":[]`)
+		require.Contains(t, got, `"summary":[{"type":"summary_text","text":"think"}]`)
+		require.Contains(t, got, `"content":[{"type":"reasoning_text","text":"think","annotations":[]}]`)
+		require.NotContains(t, got, `"content":[{"type":"summary_text"`)
+		requireOrderedSubstrings(t, got,
+			`event: response.output_item.added`,
+			`event: response.reasoning_summary_text.delta`,
+			`event: response.reasoning_summary_text.done`,
+			`event: response.output_item.done`,
+			`event: response.completed`,
+		)
+	})
+}
+
 func requireOrderedSubstrings(t *testing.T, s string, parts ...string) {
 	t.Helper()
 
