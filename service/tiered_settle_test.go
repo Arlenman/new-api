@@ -329,6 +329,10 @@ func (s *recordingBillingSettler) GetPreConsumedQuota() int {
 	return s.preConsumedQuota
 }
 
+func (s *recordingBillingSettler) GetChargedQuota() int {
+	return s.preConsumedQuota
+}
+
 func (s *recordingBillingSettler) Reserve(targetQuota int) error {
 	s.reserveTargets = append(s.reserveTargets, targetQuota)
 	if targetQuota > s.preConsumedQuota {
