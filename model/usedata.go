@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -269,16 +270,41 @@ func GetTokenTagQuotaData(startTime int64, endTime int64, username string, userI
 	return rows, err
 }
 
-type tokenTagLogAggregate struct {
+// tokenTagHourBucketExpression 把日志时间对齐到整点，明细与趋势共用同一份聚合结果。
+const tokenTagHourBucketExpression = "logs.created_at - (logs.created_at % 3600)"
+
+type tokenTagHourlyAggregate struct {
 	UserID     int    `gorm:"column:user_id"`
 	Username   string `gorm:"column:username"`
 	TokenID    int    `gorm:"column:token_id"`
 	TokenName  string `gorm:"column:token_name"`
 	ModelName  string `gorm:"column:model_name"`
+	Hour       int64  `gorm:"column:hour"`
 	TokenUsed  int    `gorm:"column:token_used"`
 	Count      int    `gorm:"column:count"`
 	Quota      int    `gorm:"column:quota"`
 	LastUsedAt int64  `gorm:"column:last_used_at"`
+}
+
+type tokenTagDetailKey struct {
+	UserID    int
+	Username  string
+	TokenID   int
+	ModelName string
+}
+
+type tokenTagDetailAggregate struct {
+	tokenTagDetailKey
+	TokenName  string
+	TokenUsed  int
+	Count      int
+	Quota      int
+	LastUsedAt int64
+}
+
+type tokenTagTrendSeriesMeta struct {
+	UserID   int
+	Username string
 }
 
 type tokenTagTrendLogAggregate struct {
@@ -325,49 +351,71 @@ func getTaggedTokenIDs(ctx context.Context, userID int) ([]int, error) {
 	return tokenIDs, err
 }
 
-func buildTokenTagLogQuery(logDB *gorm.DB, startTime int64, endTime int64, username string, userID int, role int, includedTokenIDs []int, excludedTokenIDs []int, taggedTokenIDs []int, hasIncludedTags bool, includeUntagged bool, excludeUntagged bool) (*gorm.DB, error) {
+// tokenTagQuotaScope 是令牌标签统计的过滤条件，明细、趋势与小时汇总共用同一套语义。
+type tokenTagQuotaScope struct {
+	Username         string
+	UserID           int
+	Role             int
+	IncludedTokenIDs []int
+	ExcludedTokenIDs []int
+	TaggedTokenIDs   []int
+	HasIncludedTags  bool
+	IncludeUntagged  bool
+	ExcludeUntagged  bool
+}
+
+func buildTokenTagLogQuery(logDB *gorm.DB, startTime int64, endTime int64, scope tokenTagQuotaScope) (*gorm.DB, error) {
 	query := logDB.Table("logs").
 		Where("logs.type = ?", LogTypeConsume).
 		Where("logs.created_at >= ? and logs.created_at <= ?", startTime, endTime).
 		Where("logs.token_id > 0")
-	if role < common.RoleAdminUser {
-		query = query.Where("logs.user_id = ?", userID)
+	return applyTokenTagQuotaScope(query, "logs", scope)
+}
+
+// applyTokenTagQuotaScope 把用户、用户名与标签过滤套到任意一张按密钥统计的表上。
+func applyTokenTagQuotaScope(query *gorm.DB, columnPrefix string, scope tokenTagQuotaScope) (*gorm.DB, error) {
+	prefix := ""
+	if columnPrefix != "" {
+		prefix = columnPrefix + "."
+	}
+	if scope.Role < common.RoleAdminUser {
+		query = query.Where(prefix+"user_id = ?", scope.UserID)
 	} else {
 		var err error
-		query, err = applyHiddenUserFilter(query, "logs.user_id", true)
+		query, err = applyHiddenUserFilter(query, prefix+"user_id", true)
 		if err != nil {
 			return nil, err
 		}
-		if username != "" {
-			query = query.Where("logs.username = ?", username)
+		if scope.Username != "" {
+			query = query.Where(prefix+"username = ?", scope.Username)
 		}
 	}
-	if hasIncludedTags || includeUntagged {
+	if scope.HasIncludedTags || scope.IncludeUntagged {
 		switch {
-		case hasIncludedTags && includeUntagged:
-			if len(includedTokenIDs) == 0 {
-				if len(taggedTokenIDs) > 0 {
-					query = query.Where("logs.token_id NOT IN ?", taggedTokenIDs)
+		case scope.HasIncludedTags && scope.IncludeUntagged:
+			if len(scope.IncludedTokenIDs) == 0 {
+				if len(scope.TaggedTokenIDs) > 0 {
+					query = query.Where(prefix+"token_id NOT IN ?", scope.TaggedTokenIDs)
 				}
-			} else if len(taggedTokenIDs) == 0 {
-				query = query.Where("logs.token_id IN ?", includedTokenIDs)
+			} else if len(scope.TaggedTokenIDs) == 0 {
+				query = query.Where(prefix+"token_id IN ?", scope.IncludedTokenIDs)
 			} else {
-				query = query.Where("(logs.token_id IN ? OR logs.token_id NOT IN ?)", includedTokenIDs, taggedTokenIDs)
+				query = query.Where("("+prefix+"token_id IN ? OR "+prefix+"token_id NOT IN ?)", scope.IncludedTokenIDs, scope.TaggedTokenIDs)
 			}
-		case hasIncludedTags:
-			query = query.Where("logs.token_id IN ?", includedTokenIDs)
-		case len(taggedTokenIDs) > 0:
-			query = query.Where("logs.token_id NOT IN ?", taggedTokenIDs)
+		case scope.HasIncludedTags:
+			query = query.Where(prefix+"token_id IN ?", scope.IncludedTokenIDs)
+		case len(scope.TaggedTokenIDs) > 0:
+			query = query.Where(prefix+"token_id NOT IN ?", scope.TaggedTokenIDs)
 		}
 	}
-	if len(excludedTokenIDs) > 0 {
-		query = query.Where("logs.token_id NOT IN ?", excludedTokenIDs)
+	if len(scope.ExcludedTokenIDs) > 0 {
+		query = query.Where(prefix+"token_id NOT IN ?", scope.ExcludedTokenIDs)
 	}
-	if excludeUntagged {
-		if len(taggedTokenIDs) == 0 {
+	if scope.ExcludeUntagged {
+		if len(scope.TaggedTokenIDs) == 0 {
 			query = query.Where("1 = 0")
 		} else {
-			query = query.Where("logs.token_id IN ?", taggedTokenIDs)
+			query = query.Where(prefix+"token_id IN ?", scope.TaggedTokenIDs)
 		}
 	}
 	return query, nil
@@ -399,22 +447,26 @@ func ensureTokenTagAnalyticsLogIndex(db *gorm.DB) error {
 }
 
 func GetTokenTagQuotaAnalytics(startTime int64, endTime int64, username string, userID int, role int, filters TokenTagQuotaFilters) ([]*TokenTagQuotaData, TokenTagQuotaSummary, error) {
-	return getTokenTagQuotaAnalytics(context.Background(), startTime, endTime, username, userID, role, filters)
+	result, err := queryTokenTagQuotaAnalytics(context.Background(), startTime, endTime, username, userID, role, filters, false)
+	return result.Data, result.Summary, err
 }
 
-// getTokenTagQuotaAnalytics 只用一次日志聚合同时得到明细与汇总。
-// 明细按「用户 + 密钥 + 模型」分组，汇总在应用层累加同一批分组，
-// 避免对同一时间范围重复扫描 logs 表（大范围统计的主要开销来源）。
-func getTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int64, username string, userID int, role int, filters TokenTagQuotaFilters) ([]*TokenTagQuotaData, TokenTagQuotaSummary, error) {
-	rows := make([]*TokenTagQuotaData, 0)
-	summary := TokenTagQuotaSummary{}
+// queryTokenTagQuotaAnalytics 用一次日志聚合同时得到明细、汇总与趋势。
+// 日志先按「用户 + 密钥 + 模型 + 小时」聚合，明细与趋势都由这份结果在应用层推导：
+// 明细按「用户 + 密钥 + 模型」累加，趋势按「密钥 + 小时」累加。
+// 同一时间范围只扫描一遍 logs 表，而不是为明细和趋势各扫一遍。
+func queryTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int64, username string, userID int, role int, filters TokenTagQuotaFilters, includeTrend bool) (TokenTagQuotaAnalyticsResult, error) {
+	result := TokenTagQuotaAnalyticsResult{
+		Data:  make([]*TokenTagQuotaData, 0),
+		Trend: make([]*TokenTagQuotaTrendData, 0),
+	}
 	_, includedNameKeys, err := normalizeTokenTagNames(filters.IncludedTags)
 	if err != nil {
-		return rows, summary, err
+		return result, err
 	}
 	_, excludedNameKeys, err := normalizeTokenTagNames(filters.ExcludedTags)
 	if err != nil {
-		return rows, summary, err
+		return result, err
 	}
 
 	tagUserID := 0
@@ -425,48 +477,89 @@ func getTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int
 	if len(includedNameKeys) > 0 {
 		includedTokenIDs, err = getTokenIDsByTagKeys(ctx, includedNameKeys, tagUserID)
 		if err != nil {
-			return rows, summary, err
+			return result, err
 		}
 		if len(includedTokenIDs) == 0 && !filters.IncludeUntagged {
-			return rows, summary, nil
+			return result, nil
 		}
 	}
 	excludedTokenIDs, err := getTokenIDsByTagKeys(ctx, excludedNameKeys, tagUserID)
 	if err != nil {
-		return rows, summary, err
+		return result, err
 	}
 	var taggedTokenIDs []int
 	if filters.IncludeUntagged || filters.ExcludeUntagged {
 		taggedTokenIDs, err = getTaggedTokenIDs(ctx, tagUserID)
 		if err != nil {
-			return rows, summary, err
+			return result, err
 		}
 	}
 
-	logDB := LOG_DB
-	if logDB == nil {
-		logDB = DB
+	scope := tokenTagQuotaScope{
+		Username:         username,
+		UserID:           userID,
+		Role:             role,
+		IncludedTokenIDs: includedTokenIDs,
+		ExcludedTokenIDs: excludedTokenIDs,
+		TaggedTokenIDs:   taggedTokenIDs,
+		HasIncludedTags:  len(includedNameKeys) > 0,
+		IncludeUntagged:  filters.IncludeUntagged,
+		ExcludeUntagged:  filters.ExcludeUntagged,
 	}
-	detailQuery, err := buildTokenTagLogQuery(logDB.WithContext(ctx), startTime, endTime, username, userID, role, includedTokenIDs, excludedTokenIDs, taggedTokenIDs, len(includedNameKeys) > 0, filters.IncludeUntagged, filters.ExcludeUntagged)
+	hourly, err := collectTokenTagHourly(ctx, startTime, endTime, scope)
 	if err != nil {
-		return rows, summary, err
+		return result, err
 	}
-	var aggregates []tokenTagLogAggregate
-	err = detailQuery.WithContext(ctx).
-		Select("logs.user_id, logs.username, logs.token_id, max(logs.token_name) as token_name, logs.model_name, count(*) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used, max(logs.created_at) as last_used_at").
-		Group("logs.user_id, logs.username, logs.token_id, logs.model_name").
-		Order("quota DESC").
-		Scan(&aggregates).Error
-	if err != nil {
-		return rows, summary, err
+	if len(hourly) == 0 {
+		return result, nil
 	}
-	if len(aggregates) == 0 {
-		return rows, summary, nil
+
+	// 同一小时的同一把密钥可能命中多个模型，趋势需要把它们合并成一个点；
+	// 明细则按「用户 + 密钥 + 模型」累加整个时间范围。
+	aggregates := make([]*tokenTagDetailAggregate, 0, len(hourly))
+	aggregateByKey := make(map[tokenTagDetailKey]*tokenTagDetailAggregate, len(hourly))
+	var trendBuckets []tokenTagTrendLogAggregate
+	for _, entry := range hourly {
+		key := tokenTagDetailKey{UserID: entry.UserID, Username: entry.Username, TokenID: entry.TokenID, ModelName: entry.ModelName}
+		aggregate, ok := aggregateByKey[key]
+		if !ok {
+			aggregate = &tokenTagDetailAggregate{tokenTagDetailKey: key}
+			aggregateByKey[key] = aggregate
+			aggregates = append(aggregates, aggregate)
+		}
+		if entry.TokenName > aggregate.TokenName {
+			aggregate.TokenName = entry.TokenName
+		}
+		aggregate.TokenUsed += entry.TokenUsed
+		aggregate.Count += entry.Count
+		aggregate.Quota += entry.Quota
+		if entry.LastUsedAt > aggregate.LastUsedAt {
+			aggregate.LastUsedAt = entry.LastUsedAt
+		}
+		if !includeTrend {
+			continue
+		}
+		if len(trendBuckets) == 0 || trendBuckets[len(trendBuckets)-1].CreatedAt != entry.Hour || trendBuckets[len(trendBuckets)-1].TokenID != entry.TokenID {
+			trendBuckets = append(trendBuckets, tokenTagTrendLogAggregate{CreatedAt: entry.Hour, TokenID: entry.TokenID})
+		}
+		bucket := &trendBuckets[len(trendBuckets)-1]
+		bucket.TokenUsed += entry.TokenUsed
+		bucket.Count += entry.Count
+		bucket.Quota += entry.Quota
 	}
+	sort.SliceStable(aggregates, func(i, j int) bool {
+		if aggregates[i].Quota != aggregates[j].Quota {
+			return aggregates[i].Quota > aggregates[j].Quota
+		}
+		if aggregates[i].TokenID != aggregates[j].TokenID {
+			return aggregates[i].TokenID < aggregates[j].TokenID
+		}
+		return aggregates[i].ModelName < aggregates[j].ModelName
+	})
 	for _, aggregate := range aggregates {
-		summary.Quota += aggregate.Quota
-		summary.TokenUsed += aggregate.TokenUsed
-		summary.Count += aggregate.Count
+		result.Summary.Quota += aggregate.Quota
+		result.Summary.TokenUsed += aggregate.TokenUsed
+		result.Summary.Count += aggregate.Count
 	}
 
 	tokenIDs := make([]int, 0, len(aggregates))
@@ -480,7 +573,7 @@ func getTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int
 	}
 	var tokens []Token
 	if err = DB.WithContext(ctx).Select("id", "name").Where("id IN ?", tokenIDs).Find(&tokens).Error; err != nil {
-		return rows, summary, err
+		return result, err
 	}
 	tokenNames := make(map[int]string, len(tokens))
 	for _, token := range tokens {
@@ -497,7 +590,7 @@ func getTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int
 		Order("token_tags.name_key ASC").
 		Scan(&tags).Error
 	if err != nil {
-		return rows, summary, err
+		return result, err
 	}
 	tagsByToken := make(map[[2]int][]tokenTagAnalyticsTag)
 	for _, tag := range tags {
@@ -509,6 +602,8 @@ func getTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int
 		includedKeySet[nameKey] = struct{}{}
 	}
 
+	matchedTagsByToken := make(map[int][]tokenTagAnalyticsTag, len(tokenIDs))
+	trendMetaByToken := make(map[int]tokenTagTrendSeriesMeta, len(tokenIDs))
 	for _, aggregate := range aggregates {
 		tokenName := aggregate.TokenName
 		if storedName := tokenNames[aggregate.TokenID]; storedName != "" {
@@ -543,12 +638,22 @@ func getTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int
 			}
 			matchedTags = []tokenTagAnalyticsTag{{}}
 		}
+		rowUserID := aggregate.UserID
+		rowUsername := aggregate.Username
+		if role < common.RoleAdminUser {
+			rowUserID = 0
+			rowUsername = ""
+		}
+		if _, ok := matchedTagsByToken[aggregate.TokenID]; !ok {
+			matchedTagsByToken[aggregate.TokenID] = matchedTags
+			trendMetaByToken[aggregate.TokenID] = tokenTagTrendSeriesMeta{UserID: rowUserID, Username: rowUsername}
+		}
 		for _, tag := range matchedTags {
-			row := &TokenTagQuotaData{
+			result.Data = append(result.Data, &TokenTagQuotaData{
 				TagID:      tag.TagID,
 				TagName:    tag.TagName,
-				UserID:     aggregate.UserID,
-				Username:   aggregate.Username,
+				UserID:     rowUserID,
+				Username:   rowUsername,
 				TokenID:    aggregate.TokenID,
 				TokenName:  tokenName,
 				ModelName:  aggregate.ModelName,
@@ -556,100 +661,30 @@ func getTokenTagQuotaAnalytics(ctx context.Context, startTime int64, endTime int
 				Count:      aggregate.Count,
 				Quota:      aggregate.Quota,
 				LastUsedAt: aggregate.LastUsedAt,
-			}
-			if role < common.RoleAdminUser {
-				row.UserID = 0
-				row.Username = ""
-			}
-			rows = append(rows, row)
+			})
 		}
 	}
-	return rows, summary, nil
-}
-
-func GetTokenTagQuotaAnalyticsWithTrend(ctx context.Context, startTime int64, endTime int64, username string, userID int, role int, filters TokenTagQuotaFilters) (TokenTagQuotaAnalyticsResult, error) {
-	result := TokenTagQuotaAnalyticsResult{
-		Data:  make([]*TokenTagQuotaData, 0),
-		Trend: make([]*TokenTagQuotaTrendData, 0),
-	}
-	rows, summary, err := getTokenTagQuotaAnalytics(ctx, startTime, endTime, username, userID, role, filters)
-	result.Data = rows
-	result.Summary = summary
-	if err != nil || len(rows) == 0 {
-		return result, err
-	}
-
-	type trendTagMetadata struct {
-		TagID    int
-		TagName  string
-		UserID   int
-		Username string
-	}
-	tagsByToken := make(map[int][]trendTagMetadata)
-	seenTagsByToken := make(map[int]map[string]struct{})
-	tokenIDs := make([]int, 0)
-	for _, row := range rows {
-		if _, exists := seenTagsByToken[row.TokenID]; !exists {
-			seenTagsByToken[row.TokenID] = make(map[string]struct{})
-			tokenIDs = append(tokenIDs, row.TokenID)
-		}
-		tagKey := fmt.Sprintf("%d\x00%s", row.TagID, row.TagName)
-		if _, exists := seenTagsByToken[row.TokenID][tagKey]; exists {
+	for _, bucket := range trendBuckets {
+		meta, ok := trendMetaByToken[bucket.TokenID]
+		if !ok {
 			continue
 		}
-		seenTagsByToken[row.TokenID][tagKey] = struct{}{}
-		tagsByToken[row.TokenID] = append(tagsByToken[row.TokenID], trendTagMetadata{
-			TagID:    row.TagID,
-			TagName:  row.TagName,
-			UserID:   row.UserID,
-			Username: row.Username,
-		})
-	}
-
-	logDB := LOG_DB
-	if logDB == nil {
-		logDB = DB
-	}
-	trendQuery := logDB.WithContext(ctx).Table("logs").
-		Where("logs.type = ?", LogTypeConsume).
-		Where("logs.created_at >= ? and logs.created_at <= ?", startTime, endTime).
-		Where("logs.token_id IN ?", tokenIDs)
-	if role < common.RoleAdminUser {
-		trendQuery = trendQuery.Where("logs.user_id = ?", userID)
-	} else {
-		trendQuery, err = applyHiddenUserFilter(trendQuery, "logs.user_id", true)
-		if err != nil {
-			return result, err
-		}
-		if username != "" {
-			trendQuery = trendQuery.Where("logs.username = ?", username)
-		}
-	}
-
-	const hourBucketExpression = "logs.created_at - (logs.created_at % 3600)"
-	var aggregates []tokenTagTrendLogAggregate
-	err = trendQuery.WithContext(ctx).
-		Select("logs.token_id, " + hourBucketExpression + " as created_at, count(*) as count, coalesce(sum(logs.quota), 0) as quota, coalesce(sum(logs.prompt_tokens + logs.completion_tokens), 0) as token_used").
-		Group("logs.token_id, " + hourBucketExpression).
-		Order(hourBucketExpression + " ASC, logs.token_id ASC").
-		Scan(&aggregates).Error
-	if err != nil {
-		return result, err
-	}
-
-	for _, aggregate := range aggregates {
-		for _, tag := range tagsByToken[aggregate.TokenID] {
+		for _, tag := range matchedTagsByToken[bucket.TokenID] {
 			result.Trend = append(result.Trend, &TokenTagQuotaTrendData{
 				TagID:     tag.TagID,
 				TagName:   tag.TagName,
-				UserID:    tag.UserID,
-				Username:  tag.Username,
-				CreatedAt: aggregate.CreatedAt,
-				TokenUsed: aggregate.TokenUsed,
-				Count:     aggregate.Count,
-				Quota:     aggregate.Quota,
+				UserID:    meta.UserID,
+				Username:  meta.Username,
+				CreatedAt: bucket.CreatedAt,
+				TokenUsed: bucket.TokenUsed,
+				Count:     bucket.Count,
+				Quota:     bucket.Quota,
 			})
 		}
 	}
 	return result, nil
+}
+
+func GetTokenTagQuotaAnalyticsWithTrend(ctx context.Context, startTime int64, endTime int64, username string, userID int, role int, filters TokenTagQuotaFilters) (TokenTagQuotaAnalyticsResult, error) {
+	return queryTokenTagQuotaAnalytics(ctx, startTime, endTime, username, userID, role, filters, true)
 }

@@ -114,6 +114,11 @@ func main() {
 	// 数据看板
 	go model.UpdateQuotaData()
 
+	// 令牌标签统计的小时汇总，只有 master 负责写入
+	if common.IsMasterNode {
+		go model.StartTokenTagQuotaHourSync()
+	}
+
 	if os.Getenv("CHANNEL_UPDATE_FREQUENCY") != "" {
 		frequency, err := strconv.Atoi(os.Getenv("CHANNEL_UPDATE_FREQUENCY"))
 		if err != nil {

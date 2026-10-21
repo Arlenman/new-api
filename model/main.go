@@ -265,6 +265,8 @@ func migrateDB() error {
 		&TokenIP{},
 		&TokenTag{},
 		&TokenTagBinding{},
+		&TokenTagQuotaHour{},
+		&TokenTagQuotaHourCursor{},
 		&User{},
 		&UserSession{},
 		&AuthFlow{},

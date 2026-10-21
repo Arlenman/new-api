@@ -51,7 +51,7 @@ func TestTokenTagAnalyticsCancelsMetadataQueries(t *testing.T) {
 				require.NoError(t, DB.Callback().Row().Remove("token_tag_check"))
 			})
 
-			_, _, err := getTokenTagQuotaAnalytics(ctx, 1000, 2000, "", 0, common.RoleAdminUser, testCase.filters)
+			_, err := queryTokenTagQuotaAnalytics(ctx, 1000, 2000, "", 0, common.RoleAdminUser, testCase.filters, false)
 			assert.True(t, queryAttempted)
 			assert.ErrorIs(t, err, context.Canceled)
 		})

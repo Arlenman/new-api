@@ -44,6 +44,8 @@ func TestMain(m *testing.M) {
 		&Token{},
 		&TokenTag{},
 		&TokenTagBinding{},
+		&TokenTagQuotaHour{},
+		&TokenTagQuotaHourCursor{},
 		&PasskeyCredential{},
 		&TwoFA{},
 		&TwoFABackupCode{},
@@ -85,6 +87,8 @@ func truncateTables(t *testing.T) {
 		DB.Exec("DELETE FROM midjourneys")
 		DB.Exec("DELETE FROM token_tag_bindings")
 		DB.Exec("DELETE FROM token_tags")
+		DB.Exec("DELETE FROM token_tag_quota_hours")
+		DB.Exec("DELETE FROM token_tag_quota_hour_cursors")
 		DB.Exec("DELETE FROM auth_flows")
 		DB.Exec("DELETE FROM external_identity_claims")
 		DB.Exec("DELETE FROM user_sessions")
